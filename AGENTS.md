@@ -17,7 +17,7 @@
 
 | 层 | 选型 |
 |----|------|
-| 后端 | Python 3.11+、FastAPI、SQLite（向量检索阶段二引入，见依赖清单） |
+| 后端 | Python 3.11+、FastAPI、SQLite |
 | 前端 | Vue 3 + TypeScript + Vite + Naive UI + ECharts |
 | LLM 接入 | OpenAI 兼容协议（DeepSeek 默认，可切 Doubao/Qwen/Claude/Gemini） |
 | 嵌入 | 本地 `bge-small-zh-v1.5`（`fastembed`，ONNX 轻量、无 PyTorch），可切云端 OpenAI 兼容嵌入 |
@@ -26,8 +26,9 @@
 ## 依赖清单（分阶段，重要）
 
 - **阶段一（已完成）**：只装 `fastapi`、`uvicorn[standard]`、`sqlalchemy`、`pydantic`、`pydantic-settings`。禁止引入向量库、嵌入库、PyTorch。
-- **阶段二（当前）**：不新增重依赖，沿用阶段一依赖 + `httpx`；上下文装配用「章级摘要链」，暂不引入向量检索与嵌入。
-- **阶段三**：引入 `fastembed`（嵌入）+ `numpy`（向量检索）；数据量超过约 5 万条再考虑 `faiss-cpu` 或 `sqlite-vec`。
+- **阶段二（已完成）**：不新增重依赖，沿用阶段一依赖 + `httpx`；上下文装配用「章级摘要链」，暂不引入向量检索与嵌入。
+- **阶段三（自动驾驶）**：不新增重依赖，沿用阶段二依赖；大纲驱动多章推进，上下文仍用「章级摘要链」，**不引入向量检索与嵌入**，不建 `memory_chunk`/`injection` 表。
+- **后续「记忆与检索层」里程碑**（自动驾驶稳定后）：再引入 `fastembed`（嵌入）+ `numpy`（向量检索），构建向量检索层与 `memory_chunk`/`injection` 落库；数据量超过约 5 万条再考虑 `faiss-cpu` 或 `sqlite-vec`。
 - **明确不用**：`chromadb`（完整包会拖入 kubernetes/opentelemetry 等大量无用依赖）、`sentence-transformers`（会拖入数 GB 的 PyTorch）。
 
 ## 目录结构（约定）
@@ -58,7 +59,7 @@ lingmo-writer/
 
 ## 当前任务
 
-见 [docs/04-开发路线图.md](docs/04-开发路线图.md)。阶段一（Story Bible 设定库）与阶段二（人工主导闭环：单章写作 + 设定沉淀 + 一致性检查 + 导出）已完成，已各自打里程碑 commit。当前进入**阶段三（自动驾驶：引入向量检索与嵌入，构建 `fastembed`+`SQLite+NumPy` 检索层、记忆切分 `memory_chunk`、模糊注入 `injection`、设定一致性实时校验）**。请按路线图推进，不要跳阶段实现后续功能。
+见 [docs/04-开发路线图.md](docs/04-开发路线图.md)。阶段一（Story Bible 设定库）与阶段二（人工主导闭环：单章写作 + 设定沉淀 + 一致性检查 + 导出）已完成，已各自打里程碑 commit。当前进入**阶段三（自动驾驶：大纲「卷/幕/章」管理 + `auto_pilot` 多章推进 + 暂停/恢复 + 注入构思后重规划 + 张力评分/文风漂移告警 + 前端控制面板）**。注意：本阶段**不引入向量检索与嵌入**，不建 `memory_chunk`/`injection` 表，上下文继续用「章级摘要链」；这些推迟到自动驾驶稳定后的「记忆与检索层」里程碑。请严格按路线图阶段三推进，不要提前实现后续阶段功能。
 
 ## 禁止提交的内容
 
