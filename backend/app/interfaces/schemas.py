@@ -3,7 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domain.entities import ForeshadowStatus
+from app.domain.entities import ChapterStatus, ForeshadowStatus
 
 
 class ORMBase(BaseModel):
@@ -212,3 +212,58 @@ class RelationshipRead(ORMBase):
     note: str
     created_at: str
     updated_at: str
+
+
+# ================= Chapter =================
+class ChapterCreate(BaseModel):
+    title: str = ""
+    seq: Optional[int] = None
+    content: str = ""
+    status: ChapterStatus = ChapterStatus.DRAFT
+    directive: str = ""
+
+
+class ChapterUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    status: Optional[ChapterStatus] = None
+    summary: Optional[str] = None
+    directive: Optional[str] = None
+
+
+class ChapterRead(ORMBase):
+    id: str
+    novel_id: str
+    outline_node_id: str
+    seq: int
+    title: str
+    content: str
+    status: str
+    summary: str
+    tension_score: Optional[float]
+    directive: str
+    created_at: str
+    updated_at: str
+
+
+# ================= 写作 / 定稿 / 一致性 =================
+class WriteChapterRequest(BaseModel):
+    title: str = ""
+    directive: str = ""
+
+
+class ContinueChapterRequest(BaseModel):
+    directive: str = ""
+
+
+class RewritePassageRequest(BaseModel):
+    passage: str = Field(..., min_length=1)
+    intent: str = ""
+
+
+class SettleApplyRequest(BaseModel):
+    suggestions: list[dict] = Field(default_factory=list)
+
+
+class ConsistencyRequest(BaseModel):
+    content: str = Field(..., min_length=1)

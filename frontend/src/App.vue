@@ -83,6 +83,7 @@ onMounted(loadNovels)
       </div>
       <n-tabs v-model:value="activeTab" type="line">
         <n-tab-pane name="settings" tab="设定面板" />
+        <n-tab-pane name="writing" tab="写作" />
         <n-tab-pane name="graph" tab="知识图谱" />
       </n-tabs>
     </header>

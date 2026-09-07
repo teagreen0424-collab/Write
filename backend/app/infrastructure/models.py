@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
-from sqlalchemy import JSON, ForeignKey, String, Text
+from sqlalchemy import JSON, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from app.domain.entities import ForeshadowStatus
+from app.domain.entities import ChapterStatus, ForeshadowStatus
 
 
 def _uuid() -> str:
@@ -109,3 +110,18 @@ class Relationship(Base, TimestampMixin):
     object_id: Mapped[str] = mapped_column(String(36))
     relation_type: Mapped[str] = mapped_column(String(50))
     note: Mapped[str] = mapped_column(Text, default="")
+
+
+class Chapter(Base, TimestampMixin):
+    __tablename__ = "chapter"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    novel_id: Mapped[str] = mapped_column(String(36), ForeignKey("novel.id"), index=True)
+    outline_node_id: Mapped[str] = mapped_column(String(36), default="")
+    seq: Mapped[int] = mapped_column(Integer, default=1)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default=ChapterStatus.DRAFT.value)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    tension_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    directive: Mapped[str] = mapped_column(Text, default="")

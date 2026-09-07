@@ -161,3 +161,38 @@ export const ENTITY_TYPES: EntityTypeConfig[] = [
 export function getEntityConfig(type: EntityType): EntityTypeConfig {
   return ENTITY_TYPES.find((t) => t.type === type)!
 }
+
+// ================= 章节与写作 =================
+export interface Chapter {
+  id: string
+  novel_id: string
+  outline_node_id: string
+  seq: number
+  title: string
+  content: string
+  status: 'draft' | 'finalized'
+  summary: string
+  tension_score: number | null
+  directive: string
+  created_at: string
+  updated_at: string
+}
+
+export interface Conflict {
+  rule: string
+  message: string
+  start: number
+  end: number
+  entity_id: string
+}
+
+export interface Suggestion {
+  type: 'character' | 'timeline_event' | 'foreshadowing'
+  data: Record<string, unknown>
+}
+
+export interface SettleResult {
+  chapter_id: string
+  summary: string
+  suggestions: Suggestion[]
+}

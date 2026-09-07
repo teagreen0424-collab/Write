@@ -1,0 +1,92 @@
+"""定稿沉淀用例：settle_chapter + apply_suggestions。"""
+import json
+
+from sqlalchemy.orm import Session
+
+from app.domain.entities import ChapterStatus
+from app.infrastructure.ai.llm_provider import LLMProvider
+from app.infrastructure.ai.prompts import SETTLE_SYSTEM, SETTLE_USER
+from app.infrastructure import repository as repos
+from app.interfaces import schemas
+
+llm = LLMProvider()
+
+
+def _parse_json(raw: str) -> dict:
+    """从 LLM 输出中稳健地提取 JSON 对象。"""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
+
+
+def _build_suggestions(data: dict) -> list[dict]:
+    suggestions: list[dict] = []
+    for c in data.get("characters", []):
+        if isinstance(c, dict) and c.get("name"):
+            suggestions.append({"type": "character", "data": c})
+    for e in data.get("events", []):
+        if isinstance(e, dict) and e.get("title"):
+            suggestions.append({"type": "timeline_event", "data": e})
+    for f in data.get("foreshadowings", []):
+        if isinstance(f, dict) and f.get("content"):
+            suggestions.append({"type": "foreshadowing", "data": f})
+    return suggestions
+
+
+def settle_chapter(db: Session, novel_id: str, chapter_id: str) -> dict:
+    """定稿一章：LLM 抽取摘要 + 新增人物/事件/伏笔建议，并落库摘要与状态。"""
+    chapter = repos.ChapterRepo(db).get(novel_id, chapter_id)
+    messages = [
+        {"role": "system", "content": SETTLE_SYSTEM},
+        {"role": "user", "content": SETTLE_USER.format(content=chapter.content)},
+    ]
+    raw = llm.complete(messages, temperature=0.2)
+    data = _parse_json(raw)
+
+    summary = (data.get("summary") or "").strip() or chapter.content[:100]
+    repos.ChapterRepo(db).update(
+        novel_id, chapter_id, status=ChapterStatus.FINALIZED.value, summary=summary
+    )
+
+    return {
+        "chapter_id": chapter_id,
+        "summary": summary,
+        "suggestions": _build_suggestions(data),
+    }
+
+
+def apply_suggestions(db: Session, novel_id: str, suggestions: list[dict]) -> dict:
+    """作者确认后，将设定变更建议落库到对应实体表。"""
+    created: list[dict] = []
+    for s in suggestions:
+        if not isinstance(s, dict):
+            continue
+        kind = s.get("type")
+        data = s.get("data") or {}
+        try:
+            if kind == "character":
+                obj = schemas.CharacterCreate(**data)
+                entity = repos.CharacterRepo(db).create(novel_id, **obj.model_dump())
+                created.append({"type": kind, "id": entity.id})
+            elif kind == "timeline_event":
+                obj = schemas.TimelineEventCreate(**data)
+                entity = repos.TimelineEventRepo(db).create(novel_id, **obj.model_dump())
+                created.append({"type": kind, "id": entity.id})
+            elif kind == "foreshadowing":
+                obj = schemas.ForeshadowingCreate(**data)
+                entity = repos.ForeshadowingRepo(db).create(novel_id, **obj.model_dump())
+                created.append({"type": kind, "id": entity.id})
+        except Exception:  # noqa: BLE001  跳过校验不通过的建议
+            continue
+    return {"created": created}
