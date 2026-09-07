@@ -15,12 +15,15 @@ import { api } from './api'
 import type { EntityType, Novel } from './types'
 import SettingsPanel from './components/SettingsPanel.vue'
 import KnowledgeGraph from './components/KnowledgeGraph.vue'
+import WritingPanel from './components/WritingPanel.vue'
+import OutlinePanel from './components/OutlinePanel.vue'
+import AutopilotPanel from './components/AutopilotPanel.vue'
 
 const message = useMessage()
 
 const novels = ref<Novel[]>([])
 const novelId = ref<string | null>(null)
-const activeTab = ref<'settings' | 'graph'>('settings')
+const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'graph'>('settings')
 const focusTarget = ref<{ type: EntityType; id: string } | null>(null)
 
 const showCreate = ref(false)
@@ -84,6 +87,8 @@ onMounted(loadNovels)
       <n-tabs v-model:value="activeTab" type="line">
         <n-tab-pane name="settings" tab="设定面板" />
         <n-tab-pane name="writing" tab="写作" />
+        <n-tab-pane name="outline" tab="大纲" />
+        <n-tab-pane name="autopilot" tab="自动驾驶" />
         <n-tab-pane name="graph" tab="知识图谱" />
       </n-tabs>
     </header>
@@ -94,6 +99,9 @@ onMounted(loadNovels)
         :novel-id="novelId ?? ''"
         :focus-target="focusTarget"
       />
+      <WritingPanel v-if="activeTab === 'writing'" :novel-id="novelId ?? ''" />
+      <OutlinePanel v-if="activeTab === 'outline'" :novel-id="novelId ?? ''" />
+      <AutopilotPanel v-if="activeTab === 'autopilot'" :novel-id="novelId ?? ''" />
       <KnowledgeGraph
         v-if="activeTab === 'graph'"
         :novel-id="novelId ?? ''"

@@ -3,7 +3,16 @@ from fastapi import APIRouter
 
 from app.infrastructure import repository as repos
 from app.interfaces import schemas
-from app.interfaces.api.v1 import chapters, consistency, export, health, novels, relationships
+from app.interfaces.api.v1 import (
+    autopilot,
+    chapters,
+    consistency,
+    export,
+    health,
+    novels,
+    outline,
+    relationships,
+)
 from app.interfaces.api.v1.crud import build_scoped_crud_router
 
 api_router = APIRouter()
@@ -13,6 +22,8 @@ api_router.include_router(relationships.router)
 api_router.include_router(chapters.router)
 api_router.include_router(consistency.router)
 api_router.include_router(export.router)
+api_router.include_router(outline.router)
+api_router.include_router(autopilot.router)
 
 # 六类设定实体：作品作用域下的 CRUD
 api_router.include_router(

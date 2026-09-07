@@ -8,7 +8,7 @@ from typing import Optional
 from sqlalchemy import JSON, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from app.domain.entities import ChapterStatus, ForeshadowStatus
+from app.domain.entities import ChapterStatus, ForeshadowStatus, OutlineLevel
 
 
 def _uuid() -> str:
@@ -125,3 +125,15 @@ class Chapter(Base, TimestampMixin):
     summary: Mapped[str] = mapped_column(Text, default="")
     tension_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     directive: Mapped[str] = mapped_column(Text, default="")
+
+
+class OutlineNode(Base, TimestampMixin):
+    __tablename__ = "outline_node"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    novel_id: Mapped[str] = mapped_column(String(36), ForeignKey("novel.id"), index=True)
+    level: Mapped[str] = mapped_column(String(20), default=OutlineLevel.CHAPTER.value)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    parent_id: Mapped[str] = mapped_column(String(36), default="", index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)

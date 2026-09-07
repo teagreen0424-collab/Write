@@ -30,6 +30,7 @@ def write_chapter(
     novel_id: str,
     directive: str = "",
     title: str = "",
+    outline_node_id: str = "",
 ):
     """新建一章：生成 seq/title/content，流式输出，落库为 draft。"""
     try:
@@ -54,6 +55,7 @@ def write_chapter(
             content=full,
             status="draft",
             directive=directive,
+            outline_node_id=outline_node_id,
         )
         yield sse({"type": "done", "chapter": _chapter_dict(chapter)})
     except Exception as exc:  # noqa: BLE001

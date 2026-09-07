@@ -3,7 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domain.entities import ChapterStatus, ForeshadowStatus
+from app.domain.entities import ChapterStatus, ForeshadowStatus, OutlineLevel
 
 
 class ORMBase(BaseModel):
@@ -221,6 +221,7 @@ class ChapterCreate(BaseModel):
     content: str = ""
     status: ChapterStatus = ChapterStatus.DRAFT
     directive: str = ""
+    outline_node_id: str = ""
 
 
 class ChapterUpdate(BaseModel):
@@ -229,6 +230,7 @@ class ChapterUpdate(BaseModel):
     status: Optional[ChapterStatus] = None
     summary: Optional[str] = None
     directive: Optional[str] = None
+    outline_node_id: Optional[str] = None
 
 
 class ChapterRead(ORMBase):
@@ -250,6 +252,7 @@ class ChapterRead(ORMBase):
 class WriteChapterRequest(BaseModel):
     title: str = ""
     directive: str = ""
+    outline_node_id: str = ""
 
 
 class ContinueChapterRequest(BaseModel):
@@ -267,3 +270,38 @@ class SettleApplyRequest(BaseModel):
 
 class ConsistencyRequest(BaseModel):
     content: str = Field(..., min_length=1)
+
+
+# ================= Outline =================
+class OutlineNodeCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    level: OutlineLevel = OutlineLevel.CHAPTER
+    summary: str = ""
+    parent_id: str = ""
+
+
+class OutlineNodeUpdate(BaseModel):
+    title: Optional[str] = None
+    level: Optional[OutlineLevel] = None
+    summary: Optional[str] = None
+    parent_id: Optional[str] = None
+
+
+class OutlineNodeRead(ORMBase):
+    id: str
+    novel_id: str
+    level: str
+    title: str
+    summary: str
+    parent_id: str
+    sort_order: int
+    created_at: str
+    updated_at: str
+
+
+class OutlineReorderRequest(BaseModel):
+    ordered_ids: list[str] = Field(..., min_length=1)
+
+
+class AutopilotInjectRequest(BaseModel):
+    directive: str = Field(..., min_length=1)

@@ -3,6 +3,7 @@ import type {
   Conflict,
   EntityRecord,
   Novel,
+  OutlineNode,
   Relationship,
   SettleResult,
   Suggestion,
@@ -81,6 +82,39 @@ export async function streamSSE(
   }
 }
 
+export async function streamEvents(
+  url: string,
+  onEvent: (event: any) => void,
+): Promise<void> {
+  const resp = await fetch(url)
+  if (!resp.ok || !resp.body) {
+    const err = await resp.json().catch(() => null)
+    onEvent({ type: 'error', message: err?.detail ?? `HTTP ${resp.status}` })
+    return
+  }
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() ?? ''
+    for (const part of parts) {
+      const line = part.trim()
+      if (!line.startsWith('data:')) continue
+      const payload = line.slice(5).trim()
+      if (!payload) continue
+      try {
+        onEvent(JSON.parse(payload))
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
 export const api = {
   // 作品
   listNovels: () => request<Novel[]>(`${BASE}/novels`),
@@ -147,4 +181,40 @@ export const api = {
   // 导出
   exportMarkdown: (novelId: string) => fetchText(`${BASE}/novels/${novelId}/export/markdown`),
   exportTxt: (novelId: string) => fetchText(`${BASE}/novels/${novelId}/export/txt`),
+
+  // 大纲
+  listOutline: (novelId: string) =>
+    request<OutlineNode[]>(`${BASE}/novels/${novelId}/outline`),
+  createOutline: (novelId: string, data: Record<string, unknown>) =>
+    request<OutlineNode>(`${BASE}/novels/${novelId}/outline`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateOutline: (novelId: string, id: string, data: Record<string, unknown>) =>
+    request<OutlineNode>(`${BASE}/novels/${novelId}/outline/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deleteOutline: (novelId: string, id: string) =>
+    request<void>(`${BASE}/novels/${novelId}/outline/${id}`, { method: 'DELETE' }),
+  reorderOutline: (novelId: string, orderedIds: string[]) =>
+    request<OutlineNode[]>(`${BASE}/novels/${novelId}/outline/reorder`, {
+      method: 'POST',
+      body: JSON.stringify({ ordered_ids: orderedIds }),
+    }),
+
+  // 自动驾驶
+  autopilotStatus: (novelId: string) =>
+    request<{ running: boolean; paused?: boolean; current_node_id?: string; fail_count?: number }>(
+      `${BASE}/novels/${novelId}/autopilot/status`,
+    ),
+  pauseAutopilot: (novelId: string) =>
+    request<{ status: string }>(`${BASE}/novels/${novelId}/autopilot/pause`, { method: 'POST' }),
+  resumeAutopilot: (novelId: string) =>
+    request<{ status: string }>(`${BASE}/novels/${novelId}/autopilot/resume`, { method: 'POST' }),
+  injectAutopilot: (novelId: string, directive: string) =>
+    request<{ status: string }>(`${BASE}/novels/${novelId}/autopilot/inject`, {
+      method: 'POST',
+      body: JSON.stringify({ directive }),
+    }),
 }

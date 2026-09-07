@@ -196,3 +196,32 @@ export interface SettleResult {
   summary: string
   suggestions: Suggestion[]
 }
+
+// ================= 大纲 / 自动驾驶 =================
+export type OutlineLevel = 'volume' | 'act' | 'chapter'
+
+export interface OutlineNode {
+  id: string
+  novel_id: string
+  level: OutlineLevel
+  title: string
+  summary: string
+  parent_id: string
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+export interface AutopilotEvent {
+  type:
+    | 'progress'
+    | 'text'
+    | 'check'
+    | 'chapter_done'
+    | 'tension'
+    | 'drift'
+    | 'paused'
+    | 'error'
+    | 'done'
+  [key: string]: any
+}
