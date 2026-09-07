@@ -3,6 +3,8 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.domain.entities import ForeshadowStatus
+
 
 class ORMBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -160,7 +162,7 @@ class TimelineEventRead(ORMBase):
 # ================= Foreshadowing =================
 class ForeshadowingCreate(BaseModel):
     content: str = Field(..., min_length=1)
-    status: str = "planted"
+    status: ForeshadowStatus = ForeshadowStatus.PLANTED
     related_characters: list = Field(default_factory=list)
     planted_chapter_id: str = ""
     consumed_chapter_id: str = ""
@@ -168,7 +170,7 @@ class ForeshadowingCreate(BaseModel):
 
 class ForeshadowingUpdate(BaseModel):
     content: Optional[str] = None
-    status: Optional[str] = None
+    status: Optional[ForeshadowStatus] = None
     related_characters: Optional[list] = None
     planted_chapter_id: Optional[str] = None
     consumed_chapter_id: Optional[str] = None

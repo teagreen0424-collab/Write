@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "echarts": "^5.5.0",
     "naive-ui": "^2.38.1",
     "vue": "^3.4.21"
   },
