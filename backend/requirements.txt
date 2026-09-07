@@ -1,6 +1,7 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
-sqlalchemy>=2.0
-pydantic>=2.6
-pydantic-settings>=2.2
-python-dotenv>=1.0
+# 阶段一最小依赖（禁止引入向量库/嵌入库/PyTorch）
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+pydantic-settings
+httpx  # LLM OpenAI 兼容协议 HTTP 调用
