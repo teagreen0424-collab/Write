@@ -17,16 +17,17 @@
 
 | 层 | 选型 |
 |----|------|
-| 后端 | Python 3.11+、FastAPI、SQLite、ChromaDB |
+| 后端 | Python 3.11+、FastAPI、SQLite（向量检索阶段二引入，见依赖清单） |
 | 前端 | Vue 3 + TypeScript + Vite + Naive UI + ECharts |
 | LLM 接入 | OpenAI 兼容协议（DeepSeek 默认，可切 Doubao/Qwen/Claude/Gemini） |
-| 嵌入 | 本地 `bge-small-zh-v1.5`（`sentence-transformers`），可切云端 OpenAI 兼容嵌入 |
+| 嵌入 | 本地 `bge-small-zh-v1.5`（`fastembed`，ONNX 轻量、无 PyTorch），可切云端 OpenAI 兼容嵌入 |
 | 架构 | 轻量分层：`domain` / `application` / `infrastructure` / `interfaces` |
 
 ## 依赖清单（分阶段，重要）
 
-- **阶段一（当前）**：只装 `fastapi`、`uvicorn[standard]`、`sqlalchemy`、`pydantic`、`pydantic-settings`。禁止引入向量库、嵌入库、PyTorch。
-- **阶段二**：引入 `fastembed`（嵌入）+ `numpy`（向量检索）；数据量超过约 5 万条再考虑 `faiss-cpu` 或 `sqlite-vec`。
+- **阶段一（已完成）**：只装 `fastapi`、`uvicorn[standard]`、`sqlalchemy`、`pydantic`、`pydantic-settings`。禁止引入向量库、嵌入库、PyTorch。
+- **阶段二（当前）**：不新增重依赖，沿用阶段一依赖 + `httpx`；上下文装配用「章级摘要链」，暂不引入向量检索与嵌入。
+- **阶段三**：引入 `fastembed`（嵌入）+ `numpy`（向量检索）；数据量超过约 5 万条再考虑 `faiss-cpu` 或 `sqlite-vec`。
 - **明确不用**：`chromadb`（完整包会拖入 kubernetes/opentelemetry 等大量无用依赖）、`sentence-transformers`（会拖入数 GB 的 PyTorch）。
 
 ## 目录结构（约定）
@@ -34,14 +35,16 @@
 ```
 lingmo-writer/
 ├── backend/
-│   ├── domain/            # 纯领域模型（Novel/Character/World/Foreshadowing 等）
-│   ├── application/       # 用例编排（写作、构思注入、一致性检查）
-│   ├── infrastructure/    # 技术实现（LLM Provider、SQLite 仓储、向量库、嵌入）
-│   ├── interfaces/        # FastAPI 路由、依赖注入
-│   └── main.py            # 入口
+│   ├── app/                # 后端包（唯一代码根）
+│   │   ├── domain/         # 纯领域模型（Novel/Character/.../Foreshadowing 等）
+│   │   ├── application/    # 用例编排（写作、构思注入、一致性检查）
+│   │   ├── infrastructure/ # 技术实现（LLM Provider、SQLite 仓储、向量检索、嵌入）
+│   │   ├── interfaces/     # FastAPI 路由、依赖注入
+│   │   └── main.py         # 入口
+│   └── tests/              # 单元测试
 ├── frontend/
-│   └── src/               # Vue 3 应用
-└── docs/                  # 需求与设计文档
+│   └── src/                # Vue 3 应用
+└── docs/                   # 需求与设计文档
 ```
 
 ## 开发约定
