@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 环境变量与密钥
+.env
+
+# 运行时数据
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+logs/
+
+# 向量数据库数据
+chroma/
+chroma_db/
+
+# 模型文件
+models/
+*.bin
+*.safetensors
+
+# Node
+node_modules/
+frontend/dist/
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
