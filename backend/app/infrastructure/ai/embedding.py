@@ -3,10 +3,17 @@
 嵌入失败会抛出异常，由调用方降级处理。
 """
 import httpx
+from pathlib import Path
 
 from app.config import get_settings
 
 DEFAULT_LOCAL_MODEL = "BAAI/bge-small-zh-v1.5"
+
+
+def _default_cache_dir() -> Path:
+    """本地模型缓存目录（项目内固定路径，避免系统 Temp 被清理）。"""
+    # embedding.py 位于 backend/app/infrastructure/ai/，往上三级到 backend/
+    return Path(__file__).resolve().parents[3] / "fastembed_cache"
 
 
 class EmbeddingService:
@@ -25,7 +32,10 @@ class EmbeddingService:
         if self._local_model is None:
             from fastembed import TextEmbedding
 
-            self._local_model = TextEmbedding(model_name=self._model_path)
+            self._local_model = TextEmbedding(
+                model_name=self._model_path,
+                cache_dir=str(_default_cache_dir()),
+            )
         return self._local_model
 
     def embed(self, texts: list[str]) -> list[list[float]]:
