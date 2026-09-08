@@ -29,7 +29,8 @@
 - **阶段二（已完成）**：不新增重依赖，沿用阶段一依赖 + `httpx`；上下文装配用「章级摘要链」，暂不引入向量检索与嵌入。
 - **阶段三（自动驾驶）**：不新增重依赖，沿用阶段二依赖；大纲驱动多章推进，上下文仍用「章级摘要链」，**不引入向量检索与嵌入**，不建 `memory_chunk`/`injection` 表。
 - **阶段四（对话式构思注入）**：不新增重依赖，沿用阶段三依赖；**不引入向量检索与嵌入**，不新增数据库表。
-- **阶段五（记忆与检索层，当前）**：新增 `fastembed`（嵌入，ONNX 轻量、无 PyTorch）+ `numpy`（向量检索）；构建向量检索层与 `memory_chunk`/`injection` 落库；数据量超过约 5 万条再考虑 `faiss-cpu` 或 `sqlite-vec`。
+- **阶段五（记忆与检索层，已完成）**：新增 `fastembed`（嵌入，ONNX 轻量、无 PyTorch）+ `numpy`（向量检索）；构建向量检索层与 `memory_chunk`/`injection` 落库；数据量超过约 5 万条再考虑 `faiss-cpu` 或 `sqlite-vec`。
+- **阶段六（全局对话系统，当前）**：不新增任何依赖，沿用阶段五依赖；新增 `conversation`/`message` 两张表（`novel_id` 可空表示全局会话）；对话 API 走 SSE 流式（复用现有 streamSSE 模式）；「应用到作品」复用 `inject_idea`/`apply_injections`，禁止重复造轮子。
 - **明确不用**：`chromadb`（完整包会拖入 kubernetes/opentelemetry 等大量无用依赖）、`sentence-transformers`（会拖入数 GB 的 PyTorch）。
 
 ## 目录结构（约定）
@@ -60,7 +61,7 @@ lingmo-writer/
 
 ## 当前任务
 
-见 [docs/04-开发路线图.md](docs/04-开发路线图.md)。阶段一（Story Bible 设定库）、阶段二（人工主导闭环）、阶段三（自动驾驶）、阶段四（对话式构思注入）已完成，已各自打里程碑 commit。当前进入**记忆与检索层里程碑（阶段五）**：引入 `fastembed`（嵌入）+ `numpy`（向量检索），构建 `infrastructure/vector/` 向量检索层与 `memory_chunk`/`injection` 落库，让 `build_context` 语义召回历史片段。注意：模型权重（bge-small-zh-v1.5）不进 git，走下载脚本 + 缓存目录；嵌入/检索失败必须优雅降级，不阻塞主流程。具体见 [docs/02-技术架构.md](docs/02-技术架构.md) 与 [docs/03-数据模型.md](docs/03-数据模型.md)。
+见 [docs/04-开发路线图.md](docs/04-开发路线图.md)。阶段零～五（脚手架 / Story Bible / 人工闭环 / 自动驾驶 / 对话式构思 / 记忆与检索层）已完成，已各自打里程碑 commit。当前进入**阶段六：全局对话系统**：对话升级为全局一等公民——新增 `conversation`/`message` 表与 `/conversations` API（SSE 流式），前端改双视图（对话页默认 + 工作台），两区侧栏（全局会话 + 作品即任务列表），支持「转为作品 / 移动到作品」，assistant 消息可「应用到作品」（复用 `inject_idea`/`apply_injections`）；移除旧「对话共创」tab。零新增依赖。设计详见 [docs/05-阶段六-全局对话系统.md](docs/05-阶段六-全局对话系统.md)，架构与数据模型见 [docs/02-技术架构.md](docs/02-技术架构.md) 与 [docs/03-数据模型.md](docs/03-数据模型.md)。
 
 ## 禁止提交的内容
 
