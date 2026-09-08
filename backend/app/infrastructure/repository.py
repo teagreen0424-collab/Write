@@ -44,6 +44,18 @@ class NovelRepo:
 
     def delete(self, novel_id: str):
         obj = self.get(novel_id)
+        # 显式级联删除作品作用域下的子表数据，避免孤儿残留
+        for model in (
+            models.Character,
+            models.Location,
+            models.WorldSetting,
+            models.TimelineEvent,
+            models.Foreshadowing,
+            models.Relationship,
+            models.Chapter,
+            models.OutlineNode,
+        ):
+            self.db.query(model).filter(model.novel_id == novel_id).delete()
         self.db.delete(obj)
         self.db.commit()
 
