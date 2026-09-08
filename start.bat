@@ -1,22 +1,21 @@
 @echo off
-chcp 65001 >nul
 set "ROOT=%~dp0"
 
 echo ============================================
-echo   灵墨 Lingmo 服务启动器
+echo   Lingmo Writer - Service Launcher
 echo ============================================
 echo.
 
-echo [1/2] 启动后端 (8000)...
+echo [1/2] Starting backend (port 8000)...
 start "lingmo-backend" /min cmd /c "cd /d %ROOT%backend && .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
 
-echo [2/2] 启动前端 (5173)...
+echo [2/2] Starting frontend (port 5173)...
 start "lingmo-frontend" /min cmd /c "cd /d %ROOT%frontend && npm run dev"
 
 echo.
-echo 启动完成，稍等几秒后访问：
-echo   后端  http://127.0.0.1:8000
-echo   前端  http://localhost:5173/
+echo Services starting, wait a few seconds:
+echo   Backend  http://127.0.0.1:8000
+echo   Frontend http://localhost:5173/
 echo.
-echo 提示：关闭任务栏里最小化的两个窗口即可停止服务。
+echo Close the two minimized windows to stop.
 timeout /t 8
