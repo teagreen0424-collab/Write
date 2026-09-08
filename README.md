@@ -43,9 +43,62 @@
 | [docs/03-数据模型.md](docs/03-数据模型.md) | Story Bible 数据库 schema 与核心数据结构 | 开发 |
 | [docs/04-开发路线图.md](docs/04-开发路线图.md) | 分阶段任务清单与验收标准 | 开发/项目管理 |
 
-## 当前阶段
+## 当前状态
 
-**阶段一（MVP 地基）**：Story Bible 设定库 + 数据模型 + 基础 API + 设定管理界面。详见 [开发路线图](docs/04-开发路线图.md)。
+五个阶段（零～四）+ 记忆与检索层已全部完成并验收：
+
+| 里程碑 | 内容 |
+|------|------|
+| 阶段零 | 前后端脚手架 + LLM 连通 |
+| 阶段一 | Story Bible 设定库（六类实体 CRUD + 关系图谱） |
+| 阶段二 | 人工主导闭环（单章写作 + 设定沉淀 + 一致性检查 + 导出） |
+| 阶段三 | 自动驾驶（大纲驱动多章推进 + 暂停/注入 + 张力/漂移） |
+| 阶段四 | 对话式构思注入（自然语言 → 结构化约束） |
+| 记忆与检索层 | 向量检索（fastembed + NumPy）+ 语义召回 + memory_chunk/injection |
+
+详见 [开发路线图](docs/04-开发路线图.md)。
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.11+、Node.js 18+
+
+### 1. 后端
+
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+# 复制 .env.example 为 .env，填入 OPENAI_API_KEY（默认 DeepSeek）
+copy .env.example .env
+.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
+```
+
+### 2. 前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+# 浏览器打开 http://localhost:5173/
+```
+
+前端 dev server 会把 `/api` 代理到 `http://localhost:8000`。
+
+### 3. 嵌入模型（记忆与检索层）
+
+- 默认本地 `bge-small-zh-v1.5`（fastembed，ONNX 轻量、无 PyTorch），首次运行会自动下载到项目内 `backend/fastembed_cache/`（已加入 .gitignore，之后离线可用，无需重复联网）。
+- 若网络受限，可切云端嵌入：在 `.env` 配 `EMBEDDING_SERVICE=openai`、`EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL`。
+- 嵌入/检索失败会自动降级为「仅章级摘要链」，不影响主流程。
+
+### 4. 测试
+
+```bash
+cd backend
+.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py' -v
+```
 
 ## 关键假设（可随时推翻）
 
