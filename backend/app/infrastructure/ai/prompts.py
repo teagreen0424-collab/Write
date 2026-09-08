@@ -69,3 +69,46 @@ DRIFT_SYSTEM = (
 )
 
 DRIFT_USER = "风格基准：\n{anchor}\n\n待检测正文：\n{content}\n\n请输出文风相似度（0-1 小数，只输出数字）："
+
+# ================= 对话式构思注入 =================
+
+INJECT_IDEA_SYSTEM = (
+    "你是小说设定解析助手。把作者的自然语言构思解析成结构化设定变更，"
+    "严格只输出 JSON，不要输出任何其它文字或代码块标记。"
+)
+
+INJECT_IDEA_USER = """请把下面作者构思解析成结构化设定变更。
+
+只返回 JSON，格式如下：
+{{
+  "targets": ["目标实体名字"],
+  "changes": [
+    {{
+      "type": "character|location|world_setting|timeline_event|foreshadowing|relationship",
+      "action": "create|update",
+      "data": {{"name": "实体名（update 时用于匹配）", "其余字段": "新值"}}
+    }}
+  ],
+  "reason": "因果/动机说明"
+}}
+
+注意：对已有实体的修改，action 用 update 并在 data 里带 name 用于匹配；新实体用 create。
+
+作者构思：
+{text}
+"""
+
+INJECT_REPLAN_SYSTEM = (
+    "你是大纲规划助手。根据作者的新构思，判断哪些未生成章节的大纲概要需要调整，"
+    "严格只输出 JSON，不要输出任何其它文字或代码块标记。"
+)
+
+INJECT_REPLAN_USER = """构思变更：
+{changes}
+
+未生成章节大纲（标题 / 概要）：
+{outline}
+
+只返回 JSON：{{"outline_updates": [{{"title": "章节标题", "summary": "新概要"}}]}}
+没有需要调整的就返回空数组。
+"""

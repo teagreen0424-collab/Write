@@ -9,6 +9,7 @@ from app.interfaces.api.v1 import (
     consistency,
     export,
     health,
+    ideas,
     novels,
     outline,
     relationships,
@@ -24,6 +25,7 @@ api_router.include_router(consistency.router)
 api_router.include_router(export.router)
 api_router.include_router(outline.router)
 api_router.include_router(autopilot.router)
+api_router.include_router(ideas.router)
 
 # 六类设定实体：作品作用域下的 CRUD
 api_router.include_router(

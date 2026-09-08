@@ -2,6 +2,7 @@ import type {
   Chapter,
   Conflict,
   EntityRecord,
+  IdeaChatResult,
   Novel,
   OutlineNode,
   Relationship,
@@ -217,4 +218,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ directive }),
     }),
+
+  // 对话式构思
+  ideaChat: (novelId: string, text: string) =>
+    request<IdeaChatResult>(`${BASE}/novels/${novelId}/ideas/chat`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+  ideaApply: (novelId: string, suggestions: Record<string, unknown>[]) =>
+    request<{ applied: { type: string; action: string; id: string }[]; outline_updates: unknown[]; consistency: { conflicts: Conflict[] } }>(
+      `${BASE}/novels/${novelId}/ideas/apply`,
+      { method: 'POST', body: JSON.stringify({ suggestions }) },
+    ),
 }

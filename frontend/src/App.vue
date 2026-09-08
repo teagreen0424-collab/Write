@@ -18,13 +18,15 @@ import KnowledgeGraph from './components/KnowledgeGraph.vue'
 import WritingPanel from './components/WritingPanel.vue'
 import OutlinePanel from './components/OutlinePanel.vue'
 import AutopilotPanel from './components/AutopilotPanel.vue'
+import IdeaPanel from './components/IdeaPanel.vue'
 
 const message = useMessage()
 
 const novels = ref<Novel[]>([])
 const novelId = ref<string | null>(null)
-const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'graph'>('settings')
+const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'idea' | 'graph'>('settings')
 const focusTarget = ref<{ type: EntityType; id: string } | null>(null)
+const refreshKey = ref(0)
 
 const showCreate = ref(false)
 const createForm = ref({ title: '', genre: '', summary: '' })
@@ -66,6 +68,10 @@ function onGraphEdit(payload: { type: EntityType; id: string }) {
   activeTab.value = 'settings'
 }
 
+function onIdeaApplied() {
+  refreshKey.value++
+}
+
 onMounted(loadNovels)
 </script>
 
@@ -89,6 +95,7 @@ onMounted(loadNovels)
         <n-tab-pane name="writing" tab="写作" />
         <n-tab-pane name="outline" tab="大纲" />
         <n-tab-pane name="autopilot" tab="自动驾驶" />
+        <n-tab-pane name="idea" tab="对话共创" />
         <n-tab-pane name="graph" tab="知识图谱" />
       </n-tabs>
     </header>
@@ -98,10 +105,20 @@ onMounted(loadNovels)
         v-show="activeTab === 'settings'"
         :novel-id="novelId ?? ''"
         :focus-target="focusTarget"
+        :refresh-key="refreshKey"
       />
       <WritingPanel v-if="activeTab === 'writing'" :novel-id="novelId ?? ''" />
-      <OutlinePanel v-if="activeTab === 'outline'" :novel-id="novelId ?? ''" />
+      <OutlinePanel
+        v-if="activeTab === 'outline'"
+        :novel-id="novelId ?? ''"
+        :refresh-key="refreshKey"
+      />
       <AutopilotPanel v-if="activeTab === 'autopilot'" :novel-id="novelId ?? ''" />
+      <IdeaPanel
+        v-if="activeTab === 'idea'"
+        :novel-id="novelId ?? ''"
+        @applied="onIdeaApplied"
+      />
       <KnowledgeGraph
         v-if="activeTab === 'graph'"
         :novel-id="novelId ?? ''"

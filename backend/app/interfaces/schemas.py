@@ -305,3 +305,11 @@ class OutlineReorderRequest(BaseModel):
 
 class AutopilotInjectRequest(BaseModel):
     directive: str = Field(..., min_length=1)
+
+
+class IdeaChatRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+
+
+class IdeaApplyRequest(BaseModel):
+    suggestions: list[dict] = Field(default_factory=list)

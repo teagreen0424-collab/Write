@@ -14,7 +14,7 @@ import {
 import { api } from '../api'
 import type { OutlineLevel, OutlineNode } from '../types'
 
-const props = defineProps<{ novelId: string }>()
+const props = defineProps<{ novelId: string; refreshKey?: number }>()
 
 const message = useMessage()
 
@@ -117,6 +117,13 @@ watch(
     if (props.novelId) load()
   },
   { immediate: true },
+)
+
+watch(
+  () => props.refreshKey,
+  () => {
+    if (props.novelId) load()
+  },
 )
 </script>
 

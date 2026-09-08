@@ -225,3 +225,18 @@ export interface AutopilotEvent {
     | 'done'
   [key: string]: any
 }
+
+// ================= 对话式构思 =================
+export interface IdeaChange {
+  type: string
+  action: 'create' | 'update'
+  data: Record<string, unknown>
+}
+
+export interface IdeaChatResult {
+  text: string
+  targets: string[]
+  changes: IdeaChange[]
+  reason: string
+  matched: { name: string; matched: boolean; type?: string; id?: string }[]
+}

@@ -23,6 +23,7 @@ import {
 const props = defineProps<{
   novelId: string
   focusTarget?: { type: EntityType; id: string } | null
+  refreshKey?: number
 }>()
 
 const message = useMessage()
@@ -213,6 +214,13 @@ watch(
   () => props.focusTarget,
   (t) => {
     if (t) applyFocus(t)
+  },
+)
+
+watch(
+  () => props.refreshKey,
+  () => {
+    if (props.novelId) loadAll()
   },
 )
 
