@@ -67,7 +67,10 @@ class WritingUseCaseTest(unittest.TestCase):
             '"events":[],'
             '"foreshadowings":[{"content":"玉佩来历","status":"planted"}]}'
         )
-        with patch("app.application.settle.llm.complete", return_value=fake):
+        with (
+            patch("app.application.settle.llm.complete", return_value=fake),
+            patch("app.application.settle.write_chapter_memory", return_value=0),
+        ):
             result = settle_uc.settle_chapter(self.db, self.novel_id, chapter.id)
 
         self.assertEqual(result["summary"], "林越捡到玉佩")

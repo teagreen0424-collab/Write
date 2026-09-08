@@ -4,6 +4,7 @@ import json
 from sqlalchemy.orm import Session
 
 from app.application.consistency import consistency_check
+from app.application.memory import record_injection
 from app.domain.entities import OutlineLevel
 from app.infrastructure import repository as repos
 from app.infrastructure.ai.llm_provider import LLMProvider
@@ -190,7 +191,13 @@ def _check_text(changes: list[dict]) -> str:
     return " ".join(parts)
 
 
-def apply_injections(db: Session, novel_id: str, suggestions) -> dict:
+def apply_injections(
+    db: Session,
+    novel_id: str,
+    suggestions,
+    raw_text: str = "",
+    channel: str = "chat",
+) -> dict:
     """应用设定变更（支持 update 按名字匹配），并触发大纲重规划与一致性检查。"""
     changes = (
         suggestions
@@ -228,5 +235,16 @@ def apply_injections(db: Session, novel_id: str, suggestions) -> dict:
 
     outline_updates = _replan_outline(db, novel_id, changes, updated_types)
     consistency = consistency_check(db, novel_id, _check_text(changes))
+
+    # 记录构思注入（raw_text 非空时落 injection 表）
+    if raw_text:
+        record_injection(
+            db,
+            novel_id,
+            channel,
+            raw_text,
+            parsed_intent=changes,
+            applied_changes=applied,
+        )
 
     return {"applied": applied, "outline_updates": outline_updates, "consistency": consistency}

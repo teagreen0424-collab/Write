@@ -16,4 +16,4 @@ def chat(novel_id: str, payload: schemas.IdeaChatRequest, db: Session = Depends(
 
 @router.post("/apply")
 def apply(novel_id: str, payload: schemas.IdeaApplyRequest, db: Session = Depends(get_db)):
-    return inject_uc.apply_injections(db, novel_id, payload.suggestions)
+    return inject_uc.apply_injections(db, novel_id, payload.suggestions, raw_text=payload.text)

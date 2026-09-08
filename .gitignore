@@ -23,6 +23,9 @@ chroma_db/
 models/
 *.bin
 *.safetensors
+*.onnx
+*.tokenizer.json
+fastembed_cache/
 
 # Node
 node_modules/

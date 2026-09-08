@@ -3,6 +3,7 @@ import json
 
 from sqlalchemy.orm import Session
 
+from app.application.memory import write_chapter_memory
 from app.domain.entities import ChapterStatus
 from app.infrastructure.ai.llm_provider import LLMProvider
 from app.infrastructure.ai.prompts import SETTLE_SYSTEM, SETTLE_USER
@@ -58,6 +59,9 @@ def settle_chapter(db: Session, novel_id: str, chapter_id: str) -> dict:
     repos.ChapterRepo(db).update(
         novel_id, chapter_id, status=ChapterStatus.FINALIZED.value, summary=summary
     )
+
+    # 定稿后写入记忆（正文切片嵌入，失败降级不阻塞主流程）
+    write_chapter_memory(db, novel_id, chapter_id, chapter.content)
 
     return {
         "chapter_id": chapter_id,

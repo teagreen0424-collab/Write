@@ -54,6 +54,8 @@ class NovelRepo:
             models.Relationship,
             models.Chapter,
             models.OutlineNode,
+            models.MemoryChunk,
+            models.Injection,
         ):
             self.db.query(model).filter(model.novel_id == novel_id).delete()
         self.db.delete(obj)
@@ -302,3 +304,41 @@ class OutlineRepo:
             obj = self.get(novel_id, node_id)
             obj.sort_order = idx
         self.db.commit()
+
+
+class MemoryChunkRepo:
+    """记忆/知识块仓储（正文切片与三元组）。"""
+
+    model = models.MemoryChunk
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(self, novel_id: str, **data):
+        obj = self.model(novel_id=novel_id, **data)
+        self.db.add(obj)
+        self.db.commit()
+        self.db.refresh(obj)
+        return obj
+
+    def list_by_novel(self, novel_id: str):
+        return self.db.query(self.model).filter(self.model.novel_id == novel_id).all()
+
+
+class InjectionRepo:
+    """构思注入记录仓储。"""
+
+    model = models.Injection
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(self, novel_id: str, **data):
+        obj = self.model(novel_id=novel_id, **data)
+        self.db.add(obj)
+        self.db.commit()
+        self.db.refresh(obj)
+        return obj
+
+    def list_by_novel(self, novel_id: str):
+        return self.db.query(self.model).filter(self.model.novel_id == novel_id).all()

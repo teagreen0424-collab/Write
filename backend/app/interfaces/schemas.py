@@ -313,3 +313,4 @@ class IdeaChatRequest(BaseModel):
 
 class IdeaApplyRequest(BaseModel):
     suggestions: list[dict] = Field(default_factory=list)
+    text: str = ""

@@ -137,3 +137,27 @@ class OutlineNode(Base, TimestampMixin):
     summary: Mapped[str] = mapped_column(Text, default="")
     parent_id: Mapped[str] = mapped_column(String(36), default="", index=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class MemoryChunk(Base, TimestampMixin):
+    __tablename__ = "memory_chunk"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    novel_id: Mapped[str] = mapped_column(String(36), ForeignKey("novel.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="chapter_slice")
+    source_chapter_id: Mapped[str] = mapped_column(String(36), default="")
+    text: Mapped[str] = mapped_column(Text, default="")
+    embedding_id: Mapped[str] = mapped_column(String(36), default="")
+    vector: Mapped[list] = mapped_column(JSON, default=list)
+
+
+class Injection(Base):
+    __tablename__ = "injection"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    novel_id: Mapped[str] = mapped_column(String(36), ForeignKey("novel.id"), index=True)
+    channel: Mapped[str] = mapped_column(String(20), default="card")
+    raw_text: Mapped[str] = mapped_column(Text, default="")
+    parsed_intent: Mapped[dict] = mapped_column(JSON, default=dict)
+    applied_changes: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[str] = mapped_column(String(40), default=_now)

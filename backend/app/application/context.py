@@ -58,6 +58,21 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[:max_chars] + "\n…（已截断）"
 
 
+def _semantic_recall(db: Session, novel_id: str, query: str, top_k: int = 3) -> str:
+    """语义召回相关历史片段（失败降级为空字符串）。"""
+    if not query:
+        return ""
+    try:
+        from app.infrastructure.vector import search
+
+        results = search(db, novel_id, query, top_k=top_k)
+    except Exception:  # noqa: BLE001  检索失败降级，不影响主流程
+        return ""
+    if not results:
+        return ""
+    return "【相关历史片段】\n" + "\n".join(f"- {r['text']}" for r in results)
+
+
 def build_context(
     db: Session,
     novel_id: str,
@@ -65,7 +80,7 @@ def build_context(
     chapter_position: str = "",
     max_chars: int = 4000,
 ) -> str:
-    """按优先级装配单章生成上下文：章前指令 > 当前章定位 > 直接设定 > 摘要链。"""
+    """按优先级装配单章生成上下文：章前指令 > 当前章定位 > 直接设定 > 摘要链 > 语义召回。"""
     parts: list[str] = []
     if directive:
         parts.append("【章前指令（最高优先级，必须遵守）】\n" + directive)
@@ -79,5 +94,11 @@ def build_context(
     chain = _summary_chain(db, novel_id)
     if chain:
         parts.append("【前情摘要链】\n" + chain)
+
+    # 语义召回优先级最低，置于末尾（先被截断）
+    query = " ".join(x for x in [directive, chapter_position] if x)
+    recall = _semantic_recall(db, novel_id, query)
+    if recall:
+        parts.append(recall)
 
     return _truncate("\n\n".join(parts), max_chars)

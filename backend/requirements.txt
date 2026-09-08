@@ -1,7 +1,8 @@
-# 阶段一最小依赖（禁止引入向量库/嵌入库/PyTorch）
 fastapi
 uvicorn[standard]
 sqlalchemy
 pydantic
 pydantic-settings
 httpx  # LLM OpenAI 兼容协议 HTTP 调用
+fastembed  # 本地嵌入（bge-small-zh-v1.5，ONNX 无 PyTorch）
+numpy  # 向量余弦相似度
