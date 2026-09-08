@@ -83,16 +83,20 @@ INJECT_IDEA_USER = """请把下面作者构思解析成结构化设定变更。
 {{
   "targets": ["目标实体名字"],
   "changes": [
-    {{
-      "type": "character|location|world_setting|timeline_event|foreshadowing|relationship",
-      "action": "create|update",
-      "data": {{"name": "实体名（update 时用于匹配）", "其余字段": "新值"}}
-    }}
+    {{"type": "...", "action": "create|update", "data": {{...}}}}
   ],
   "reason": "因果/动机说明"
 }}
 
-注意：对已有实体的修改，action 用 update 并在 data 里带 name 用于匹配；新实体用 create。
+各 type 的 data 可用字段（只使用这些字段，不要编造不存在的字段）：
+- character：name、role、personality、goal、appearance、catchphrase、known_info
+- location：name、level、description
+- world_setting：name、category、description、tags
+- timeline_event：title、time_point、participants、cause_id、description
+- foreshadowing：content、status、related_characters
+- relationship：subject_id、object_id、relation_type、note
+
+注意：对已有实体的修改，action 用 update；新实体用 create。
 
 作者构思：
 {text}

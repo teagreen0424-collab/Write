@@ -113,6 +113,20 @@ def inject_idea(db: Session, novel_id: str, text: str) -> dict:
     }
 
 
+def _normalize_data(kind: str, data: dict) -> dict:
+    """归一化不同实体的名字字段：LLM 可能统一用 name，需映射到 title/content。"""
+    if not isinstance(data, dict):
+        return data
+    data = dict(data)
+    if kind == "timeline_event" and not data.get("title") and data.get("name"):
+        data["title"] = data["name"]
+        data.pop("name", None)
+    elif kind == "foreshadowing" and not data.get("content") and data.get("name"):
+        data["content"] = data["name"]
+        data.pop("name", None)
+    return data
+
+
 def _create_entity(db: Session, novel_id: str, kind: str, data: dict):
     obj = _CREATE_SCHEMA[kind](**data)
     return _REPO_MAP[kind](db).create(novel_id, **obj.model_dump())
@@ -191,7 +205,7 @@ def apply_injections(db: Session, novel_id: str, suggestions) -> dict:
             continue
         kind = ch.get("type")
         action = ch.get("action", "create")
-        data = ch.get("data") or {}
+        data = _normalize_data(kind, ch.get("data") or {})
         if kind not in _REPO_MAP:
             continue
         try:

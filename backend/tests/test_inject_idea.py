@@ -80,6 +80,36 @@ class InjectIdeaTest(unittest.TestCase):
         self.assertEqual(node.summary, "林越黑化后的新概要")
         self.assertEqual(len(result["outline_updates"]), 1)
 
+    def test_normalize_timeline_event_name(self):
+        changes = [
+            {
+                "type": "timeline_event",
+                "action": "create",
+                "data": {"name": "林越得知身世真相", "time_point": "第3章"},
+            }
+        ]
+        result = inject_uc.apply_injections(self.db, self.nid, changes)
+
+        events = repos.TimelineEventRepo(self.db).list(self.nid)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].title, "林越得知身世真相")
+        self.assertEqual(result["applied"][0]["action"], "create")
+
+    def test_normalize_foreshadowing_name(self):
+        changes = [
+            {
+                "type": "foreshadowing",
+                "action": "create",
+                "data": {"name": "林越的身世之谜", "status": "planted"},
+            }
+        ]
+        result = inject_uc.apply_injections(self.db, self.nid, changes)
+
+        foreshadowings = repos.ForeshadowingRepo(self.db).list(self.nid)
+        self.assertEqual(len(foreshadowings), 1)
+        self.assertEqual(foreshadowings[0].content, "林越的身世之谜")
+        self.assertEqual(result["applied"][0]["action"], "create")
+
 
 if __name__ == "__main__":
     unittest.main()
