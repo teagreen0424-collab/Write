@@ -31,7 +31,7 @@
 - **阶段四（对话式构思注入，已完成）**：不新增重依赖，沿用阶段三依赖；**不引入向量检索与嵌入**，不新增数据库表。
 - **阶段五（记忆与检索层，已完成）**：新增 `fastembed`（嵌入，ONNX 轻量、无 PyTorch）+ `numpy`（向量检索）；构建向量检索层与 `memory_chunk`/`injection` 落库；数据量超过约 5 万条再考虑 `faiss-cpu` 或 `sqlite-vec`。
 - **阶段六（全局对话系统，已完成）**：不新增任何依赖，沿用阶段五依赖；新增 `conversation`/`message` 两张表（`novel_id` 可空表示全局会话）；对话 API 走 SSE 流式（复用现有 streamSSE 模式）；「应用到作品」复用 `inject_idea`/`apply_injections`，禁止重复造轮子。
-- **阶段七（方向待确认）**：沿用阶段五、六依赖；候选方向见 [docs/04-开发路线图.md](docs/04-开发路线图.md)，若选定方向确需新依赖，先更新本条清单再动代码。
+- **阶段七（质量治理与一致性深化，进行中）**：不新增任何依赖，沿用阶段五、六依赖；不新增数据库表，`chapter` 只加一列 `drift_score`（`FLOAT NULL`），靠 `db.py` 里幂等的 `_ensure_columns(engine)` 用 `PRAGMA table_info` 探测后 `ALTER TABLE` 补列（`create_all` 不会给既有表加列）。去 AI 味词表以代码常量形式落在 `application/cliche.py`，不建表、不做管理界面。设计见 [docs/06-阶段七-质量治理与一致性深化.md](docs/06-阶段七-质量治理与一致性深化.md)。
 - **明确不用**：`chromadb`（完整包会拖入 kubernetes/opentelemetry 等大量无用依赖）、`sentence-transformers`（会拖入数 GB 的 PyTorch）。
 
 ## 目录结构（约定）
@@ -62,7 +62,7 @@ lingmo-writer/
 
 ## 当前任务
 
-见 [docs/04-开发路线图.md](docs/04-开发路线图.md)。阶段零～六（脚手架 / Story Bible / 人工闭环 / 自动驾驶 / 对话式构思 / 记忆与检索层 / 全局对话系统）已完成，各自打过里程碑 commit。阶段七的候选方向列在路线图末尾，选定后补设计文档并把本节改为对应阶段。架构与数据模型见 [docs/02-技术架构.md](docs/02-技术架构.md) 与 [docs/03-数据模型.md](docs/03-数据模型.md)。
+见 [docs/04-开发路线图.md](docs/04-开发路线图.md)。阶段零～六（脚手架 / Story Bible / 人工闭环 / 自动驾驶 / 对话式构思 / 记忆与检索层 / 全局对话系统）已完成，各自打过里程碑 commit。阶段七已选定方向 A，做**质量治理与一致性深化**：去 AI 味扫描与改写预览、文风锚定与漂移曲线、伏笔追踪聚合、一致性双层化（规则层 + LLM 语义层）。设计文档见 [docs/06-阶段七-质量治理与一致性深化.md](docs/06-阶段七-质量治理与一致性深化.md)，落地节奏以该文档的任务分解为准。架构与数据模型见 [docs/02-技术架构.md](docs/02-技术架构.md) 与 [docs/03-数据模型.md](docs/03-数据模型.md)。
 
 ## 禁止提交的内容
 
