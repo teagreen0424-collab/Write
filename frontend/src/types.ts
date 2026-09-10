@@ -240,3 +240,21 @@ export interface IdeaChatResult {
   reason: string
   matched: { name: string; matched: boolean; type?: string; id?: string }[]
 }
+
+// ================= 全局对话 =================
+export interface Conversation {
+  id: string
+  novel_id: string | null
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ChatMessage {
+  id: string
+  conversation_id: string
+  role: 'user' | 'assistant'
+  content: string
+  meta: Record<string, unknown> | null
+  created_at: string
+}

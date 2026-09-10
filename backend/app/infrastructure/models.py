@@ -161,3 +161,22 @@ class Injection(Base):
     parsed_intent: Mapped[dict] = mapped_column(JSON, default=dict)
     applied_changes: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[str] = mapped_column(String(40), default=_now)
+
+
+class Conversation(Base, TimestampMixin):
+    __tablename__ = "conversation"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    novel_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("novel.id"), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+
+
+class Message(Base):
+    __tablename__ = "message"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    conversation_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversation.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text, default="")
+    meta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=_now)

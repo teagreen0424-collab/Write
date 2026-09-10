@@ -1,6 +1,8 @@
 import type {
   Chapter,
+  ChatMessage,
   Conflict,
+  Conversation,
   EntityRecord,
   IdeaChatResult,
   Novel,
@@ -78,7 +80,7 @@ export async function streamSSE(
       }
       if (obj.type === 'token') handlers.onToken(obj.content)
       else if (obj.type === 'done') handlers.onDone(obj)
-      else if (obj.type === 'error') handlers.onError(obj.message)
+      else if (obj.type === 'error') handlers.onError(obj.detail ?? obj.message)
     }
   }
 }
@@ -230,4 +232,32 @@ export const api = {
       `${BASE}/novels/${novelId}/ideas/apply`,
       { method: 'POST', body: JSON.stringify({ suggestions }) },
     ),
+
+  // 全局对话
+  listConversations: () => request<Conversation[]>(`${BASE}/conversations`),
+  createConversation: (novelId?: string | null) =>
+    request<Conversation>(`${BASE}/conversations`, {
+      method: 'POST',
+      body: JSON.stringify({ novel_id: novelId ?? null }),
+    }),
+  updateConversation: (id: string, data: { title?: string; novel_id?: string }) =>
+    request<Conversation>(`${BASE}/conversations/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deleteConversation: (id: string) =>
+    request<void>(`${BASE}/conversations/${id}`, { method: 'DELETE' }),
+  listMessages: (id: string) => request<ChatMessage[]>(`${BASE}/conversations/${id}/messages`),
+  updateMessage: (id: string, messageId: string, meta: Record<string, unknown>) =>
+    request<ChatMessage>(`${BASE}/conversations/${id}/messages/${messageId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ meta }),
+    }),
+  promoteConversation: (id: string, data: { title: string; genre?: string; summary?: string }) =>
+    request<Novel>(`${BASE}/conversations/${id}/promote`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  sendMessage: (id: string, content: string, handlers: StreamHandlers) =>
+    streamSSE(`${BASE}/conversations/${id}/messages`, { content }, handlers),
 }

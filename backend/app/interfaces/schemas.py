@@ -314,3 +314,44 @@ class IdeaChatRequest(BaseModel):
 class IdeaApplyRequest(BaseModel):
     suggestions: list[dict] = Field(default_factory=list)
     text: str = ""
+
+
+# ================= 全局对话 =================
+class ConversationCreate(BaseModel):
+    novel_id: Optional[str] = None
+
+
+class ConversationUpdate(BaseModel):
+    title: Optional[str] = None
+    novel_id: Optional[str] = None
+
+
+class ConversationRead(ORMBase):
+    id: str
+    novel_id: Optional[str]
+    title: str
+    created_at: str
+    updated_at: str
+
+
+class MessageCreate(BaseModel):
+    content: str = Field(..., min_length=1)
+
+
+class MessageUpdate(BaseModel):
+    meta: Optional[dict] = None
+
+
+class MessageRead(ORMBase):
+    id: str
+    conversation_id: str
+    role: str
+    content: str
+    meta: Optional[dict]
+    created_at: str
+
+
+class PromoteRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    genre: str = ""
+    summary: str = ""

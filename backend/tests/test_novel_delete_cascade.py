@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.infrastructure import models
+from app.infrastructure import repository as repos
 from app.infrastructure.db import get_db
 from app.main import app
 
@@ -48,6 +49,8 @@ CHILD_MODELS = (
     models.Relationship,
     models.Chapter,
     models.OutlineNode,
+    models.MemoryChunk,
+    models.Injection,
 )
 
 
@@ -79,6 +82,43 @@ class NovelDeleteCascadeTest(unittest.TestCase):
 
         # 作品本身已删除，GET 返回 404
         self.assertEqual(client.get(f"/api/v1/novels/{nid}").status_code, 404)
+
+    def test_delete_novel_cascades_conversations(self):
+        novel = client.post("/api/v1/novels", json={"title": "测试作品", "genre": "玄幻"}).json()
+        nid = novel["id"]
+
+        db = Session()
+        try:
+            conv_work = repos.ConversationRepo(db).create(novel_id=nid)
+            repos.ConversationRepo(db).add_message(conv_work.id, "user", "hi")
+            conv_global = repos.ConversationRepo(db).create(novel_id=None)
+            repos.ConversationRepo(db).add_message(conv_global.id, "user", "hello")
+            work_id = conv_work.id
+            global_id = conv_global.id
+        finally:
+            db.close()
+
+        resp = client.delete(f"/api/v1/novels/{nid}")
+        self.assertEqual(resp.status_code, 204)
+
+        db = Session()
+        try:
+            # 作品会话及其消息清空
+            self.assertEqual(
+                db.query(models.Conversation).filter(models.Conversation.id == work_id).count(), 0
+            )
+            self.assertEqual(
+                db.query(models.Message).filter(models.Message.conversation_id == work_id).count(), 0
+            )
+            # 全局会话及其消息保留
+            self.assertEqual(
+                db.query(models.Conversation).filter(models.Conversation.id == global_id).count(), 1
+            )
+            self.assertEqual(
+                db.query(models.Message).filter(models.Message.conversation_id == global_id).count(), 1
+            )
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":

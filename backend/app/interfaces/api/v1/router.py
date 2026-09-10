@@ -7,6 +7,7 @@ from app.interfaces.api.v1 import (
     autopilot,
     chapters,
     consistency,
+    conversations,
     export,
     health,
     ideas,
@@ -26,6 +27,7 @@ api_router.include_router(export.router)
 api_router.include_router(outline.router)
 api_router.include_router(autopilot.router)
 api_router.include_router(ideas.router)
+api_router.include_router(conversations.router)
 
 # 六类设定实体：作品作用域下的 CRUD
 api_router.include_router(

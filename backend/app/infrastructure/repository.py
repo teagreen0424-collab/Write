@@ -1,5 +1,5 @@
 """仓储层：封装对 Story Bible 实体的增删改查。"""
-from typing import Type
+from typing import Optional, Type
 
 from fastapi import HTTPException
 from sqlalchemy import func
@@ -44,6 +44,20 @@ class NovelRepo:
 
     def delete(self, novel_id: str):
         obj = self.get(novel_id)
+        # 先删作品下的会话及其消息（message 无 novel_id，需按 conversation_id 删）
+        conv_ids = [
+            c.id
+            for c in self.db.query(models.Conversation)
+            .filter(models.Conversation.novel_id == novel_id)
+            .all()
+        ]
+        if conv_ids:
+            self.db.query(models.Message).filter(
+                models.Message.conversation_id.in_(conv_ids)
+            ).delete(synchronize_session=False)
+        self.db.query(models.Conversation).filter(
+            models.Conversation.novel_id == novel_id
+        ).delete(synchronize_session=False)
         # 显式级联删除作品作用域下的子表数据，避免孤儿残留
         for model in (
             models.Character,
@@ -342,3 +356,90 @@ class InjectionRepo:
 
     def list_by_novel(self, novel_id: str):
         return self.db.query(self.model).filter(self.model.novel_id == novel_id).all()
+
+
+class ConversationRepo:
+    """会话仓储（全局 + 作品会话），含消息读写。"""
+
+    model = models.Conversation
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def _ensure_novel(self, novel_id: str) -> None:
+        exists = self.db.query(models.Novel).filter(models.Novel.id == novel_id).first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="作品不存在")
+
+    def list(self):
+        return self.db.query(self.model).order_by(self.model.updated_at.desc()).all()
+
+    def get(self, conversation_id: str):
+        obj = self.db.query(self.model).filter(self.model.id == conversation_id).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        return obj
+
+    def create(self, novel_id: Optional[str] = None, title: str = ""):
+        if novel_id is not None:
+            self._ensure_novel(novel_id)
+        obj = self.model(novel_id=novel_id, title=title)
+        self.db.add(obj)
+        self.db.commit()
+        self.db.refresh(obj)
+        return obj
+
+    def update(self, conversation_id: str, **data):
+        obj = self.get(conversation_id)
+        if data.get("novel_id") is not None:
+            self._ensure_novel(data["novel_id"])
+        for k, v in data.items():
+            if v is not None:
+                setattr(obj, k, v)
+        self.db.commit()
+        self.db.refresh(obj)
+        return obj
+
+    def delete(self, conversation_id: str):
+        obj = self.get(conversation_id)
+        self.db.query(models.Message).filter(
+            models.Message.conversation_id == conversation_id
+        ).delete(synchronize_session=False)
+        self.db.delete(obj)
+        self.db.commit()
+
+    def add_message(self, conversation_id: str, role: str, content: str, meta=None):
+        conv = self.get(conversation_id)
+        obj = models.Message(
+            conversation_id=conversation_id, role=role, content=content, meta=meta
+        )
+        self.db.add(obj)
+        conv.updated_at = models._now()
+        self.db.commit()
+        self.db.refresh(obj)
+        return obj
+
+    def list_messages(self, conversation_id: str):
+        self.get(conversation_id)
+        return (
+            self.db.query(models.Message)
+            .filter(models.Message.conversation_id == conversation_id)
+            .order_by(models.Message.created_at)
+            .all()
+        )
+
+    def update_message(self, conversation_id: str, message_id: str, meta=None):
+        obj = (
+            self.db.query(models.Message)
+            .filter(
+                models.Message.conversation_id == conversation_id,
+                models.Message.id == message_id,
+            )
+            .first()
+        )
+        if not obj:
+            raise HTTPException(status_code=404, detail="消息不存在")
+        obj.meta = meta
+        self.db.commit()
+        self.db.refresh(obj)
+        return obj
