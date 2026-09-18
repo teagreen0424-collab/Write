@@ -1,10 +1,57 @@
 # AGENTS.md — 灵墨（Lingmo）开发上下文
 
-本文件供 Cursor / Trae 及所有开发 Agent 自动读取。开始任何编码前，先读完本文件与 [README.md](README.md)。
+本文件供 Codex / Cursor / Trae 及所有开发 Agent 自动读取。开始任何编码前，先读完本文件与 [README.md](README.md)。
+
+## 角色分工（最高优先级，先读这条）
+
+- **项目管理者（人类 + 其助手）**：own 全部文档、规划、阶段划分、验收判定，以及**全部 git 操作**。
+- **开发 Agent（Codex 等）**：只改**源代码**。**不得执行任何 git 写操作**——不 `git add`、不 `git commit`、不 `git push`、不建分支、不 `git reset`/`checkout`/`stash`。改完代码留在工作区即可，由项目管理者审阅后提交。
+- 开发 Agent 可以读 `git status` / `git log` / `git diff` 以了解上下文，但**只读不写**。
+- 文档如需改动，先向项目管理者说明理由；**不得用改文档的方式掩盖实现偏差**，也不得擅自判定「改代码还是改文档」。
 
 ## 项目是什么
 
 个人自用的中文网络小说 AI 协作写作工作台。作者主导构思，AI 负责写作执行、设定记忆与一致性维护。单用户、本地部署、非商业化。
+
+## 当前状态与已知偏差（接手的 Agent 必读）
+
+**进度**：阶段零～六已实现并验收（各有里程碑 commit）。**阶段七的代码已在工作区产出，但尚未验收**——它是「待审的实现」，不是既成事实。审查基准是 [docs/06-阶段七-质量治理与一致性深化.md](docs/06-阶段七-质量治理与一致性深化.md) 的「验收标准」，逐条对照，不要默认它已通过。
+
+**已知偏差**（详细描述见各文档的「已知偏差」章）：
+
+1. **定稿的模型调用次数**：docs/06 验收标准第 6 条要求「定稿只触发一次模型调用」，但 `application/settle.py` 在设置了文风基准后会额外调用 `check_drift`，实为**两次**。**该条已标注为待决项，由项目管理者裁决；开发 Agent 不得自行改代码或改文档来「修好」它。**
+2. **`injection` 留痕在 UI 路径上不触发**：`application/inject_idea.py` 的 `apply_injections` 仅在 `raw_text` 非空时留痕，而前端 `frontend/src/api.ts` 的 `ideaApply` 从不发送该字段。见 [docs/05-阶段六-全局对话系统.md](docs/05-阶段六-全局对话系统.md) 第 10 章。
+3. **`outline_node_id` 被丢弃**：章节更新时该字段未落库。见 docs/05 第 10 章。
+4. **定稿沉淀不是自动的**：[docs/01-PRD.md](docs/01-PRD.md) 的 F8 写「每章定稿后自动沉淀」，实现为手动调 `POST /novels/{novel_id}/chapters/{chapter_id}/settle`。规格是目标态，当前未达成，属进度问题而非缺陷。
+
+以上 1–3 条**全部待裁决**：未经项目管理者明确指令，不要动这些代码。
+
+## 常用命令
+
+后端（**必须用项目虚拟环境的解释器**，系统 Python 缺依赖会 `ModuleNotFoundError`）：
+
+```
+# 装依赖（首次，工作目录 = backend/）
+backend\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# 起后端（工作目录 = backend/）
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+
+# 跑全部测试 —— 工作目录必须是 backend/，`-s tests` 是相对路径，
+# 在仓库根执行会报 ImportError: Start directory is not importable: 'tests'
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+前端（在 `frontend/` 下）：
+
+```
+npm install
+npm run dev       # Vite 开发服务器
+npm run build     # 类型检查 + 构建
+npm run preview   # 预览构建产物
+```
+
+**前端没有测试脚本**，`npm test` 不存在，别去调它。后端测试当前基线：`Ran 60 tests ... OK`，任何改动后这个数字只能增不能减。
 
 ## 核心设计原则（不可违背）
 
@@ -31,7 +78,7 @@
 - **阶段四（对话式构思注入，已完成）**：不新增重依赖，沿用阶段三依赖；**不引入向量检索与嵌入**，不新增数据库表。
 - **阶段五（记忆与检索层，已完成）**：新增 `fastembed`（嵌入，ONNX 轻量、无 PyTorch）+ `numpy`（向量检索）；构建向量检索层与 `memory_chunk`/`injection` 落库；数据量超过约 5 万条再考虑 `faiss-cpu` 或 `sqlite-vec`。
 - **阶段六（全局对话系统，已完成）**：不新增任何依赖，沿用阶段五依赖；新增 `conversation`/`message` 两张表（`novel_id` 可空表示全局会话）；对话 API 走 SSE 流式（复用现有 streamSSE 模式）；「应用到作品」复用 `inject_idea`/`apply_injections`，禁止重复造轮子。
-- **阶段七（质量治理与一致性深化，进行中）**：不新增任何依赖，沿用阶段五、六依赖；不新增数据库表，`chapter` 只加一列 `drift_score`（`FLOAT NULL`），靠 `db.py` 里幂等的 `_ensure_columns(engine)` 用 `PRAGMA table_info` 探测后 `ALTER TABLE` 补列（`create_all` 不会给既有表加列）。去 AI 味词表以代码常量形式落在 `application/cliche.py`，不建表、不做管理界面。设计见 [docs/06-阶段七-质量治理与一致性深化.md](docs/06-阶段七-质量治理与一致性深化.md)。
+- **阶段七（质量治理与一致性深化，实现已产出、待验收）**：不新增任何依赖，沿用阶段五、六依赖；不新增数据库表，`chapter` 只加一列 `drift_score`（`FLOAT NULL`），靠 `db.py` 里幂等的 `_ensure_columns(engine)` 用 `PRAGMA table_info` 探测后 `ALTER TABLE` 补列（`create_all` 不会给既有表加列）。去 AI 味词表以代码常量形式落在 `application/cliche.py`（共 57 条），不建表、不做管理界面。设计见 [docs/06-阶段七-质量治理与一致性深化.md](docs/06-阶段七-质量治理与一致性深化.md)。
 - **明确不用**：`chromadb`（完整包会拖入 kubernetes/opentelemetry 等大量无用依赖）、`sentence-transformers`（会拖入数 GB 的 PyTorch）。
 
 ## 目录结构（约定）
@@ -62,7 +109,22 @@ lingmo-writer/
 
 ## 当前任务
 
-见 [docs/04-开发路线图.md](docs/04-开发路线图.md)。阶段零～六（脚手架 / Story Bible / 人工闭环 / 自动驾驶 / 对话式构思 / 记忆与检索层 / 全局对话系统）已完成，各自打过里程碑 commit。阶段七已选定方向 A，做**质量治理与一致性深化**：去 AI 味扫描与改写预览、文风锚定与漂移曲线、伏笔追踪聚合、一致性双层化（规则层 + LLM 语义层）。设计文档见 [docs/06-阶段七-质量治理与一致性深化.md](docs/06-阶段七-质量治理与一致性深化.md)，落地节奏以该文档的任务分解为准。架构与数据模型见 [docs/02-技术架构.md](docs/02-技术架构.md) 与 [docs/03-数据模型.md](docs/03-数据模型.md)。
+见 [docs/04-开发路线图.md](docs/04-开发路线图.md)。阶段零～六（脚手架 / Story Bible / 人工闭环 / 自动驾驶 / 对话式构思 / 记忆与检索层 / 全局对话系统）已完成，各自打过里程碑 commit。阶段七已选定方向 A，做**质量治理与一致性深化**：去 AI 味扫描与改写预览、文风锚定与漂移曲线、伏笔追踪聚合、一致性双层化（规则层 + LLM 语义层），代码已在工作区、**待验收**。设计文档见 [docs/06-阶段七-质量治理与一致性深化.md](docs/06-阶段七-质量治理与一致性深化.md)，落地节奏以该文档的任务分解为准。
+
+### 文档地图（先看「文档状态」，再决定信哪一句）
+
+| 文档 | 状态标记 | 该怎么用 |
+|------|----------|----------|
+| [docs/01-PRD.md](docs/01-PRD.md) | 基准（Spec） | 产品应有的样子，不记载进度 |
+| [docs/02-技术架构.md](docs/02-技术架构.md) | 基准（Spec） | 系统应有的结构与选型，目录结构已与代码对齐 |
+| [docs/03-数据模型.md](docs/03-数据模型.md) | 基准（Spec） | 表结构应有样子；实际以 `infrastructure/models.py` 为准 |
+| [docs/04-开发路线图.md](docs/04-开发路线图.md) | 进度台账 | **判断「做到哪了」只看这一份** |
+| [docs/05-阶段六-全局对话系统.md](docs/05-阶段六-全局对话系统.md) | 已收口 | 阶段六设计，含第 10 章「已知偏差」 |
+| [docs/06-阶段七-质量治理与一致性深化.md](docs/06-阶段七-质量治理与一致性深化.md) | 方案（Plan） | 阶段七审查基准；验收第 6 条为待决项 |
+
+四份基准文档与代码冲突时，**不要默认文档对、也不要默认代码对**，先查上表的进度台账与本文件的「当前状态与已知偏差」。
+
+架构与数据模型见 [docs/02-技术架构.md](docs/02-技术架构.md) 与 [docs/03-数据模型.md](docs/03-数据模型.md)。
 
 ## 禁止提交的内容
 
