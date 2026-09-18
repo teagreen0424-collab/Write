@@ -259,6 +259,8 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                 try:
                     sim = check_drift(db, novel_id, full)
                     if sim is not None:
+                        # 漂移分落库，供质量曲线跨会话查询
+                        ChapterRepo(db).update(novel_id, chapter.id, drift_score=sim)
                         yield _sse(
                             {
                                 "type": "drift",

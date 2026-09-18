@@ -13,6 +13,7 @@ from app.interfaces.api.v1 import (
     ideas,
     novels,
     outline,
+    quality,
     relationships,
 )
 from app.interfaces.api.v1.crud import build_scoped_crud_router
@@ -23,6 +24,7 @@ api_router.include_router(novels.router)
 api_router.include_router(relationships.router)
 api_router.include_router(chapters.router)
 api_router.include_router(consistency.router)
+api_router.include_router(quality.router)
 api_router.include_router(export.router)
 api_router.include_router(outline.router)
 api_router.include_router(autopilot.router)

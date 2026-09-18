@@ -1,12 +1,16 @@
 import type {
   Chapter,
   ChatMessage,
+  ClicheResult,
   Conflict,
   Conversation,
+  DeepCheckResult,
   EntityRecord,
+  ForeshadowingTracking,
   IdeaChatResult,
   Novel,
   OutlineNode,
+  QualityCurve,
   Relationship,
   SettleResult,
   Suggestion,
@@ -180,6 +184,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ content }),
     }),
+  checkConsistencyDeep: (novelId: string, content: string) =>
+    request<DeepCheckResult>(`${BASE}/novels/${novelId}/consistency/deep`, {
+      method: 'POST',
+      body: JSON.stringify({ content }),
+    }),
+
+  // 质量治理（阶段七）
+  scanCliche: (novelId: string, content: string) =>
+    request<ClicheResult>(`${BASE}/novels/${novelId}/quality/cliche`, {
+      method: 'POST',
+      body: JSON.stringify({ content }),
+    }),
+  getQualityCurve: (novelId: string) =>
+    request<QualityCurve>(`${BASE}/novels/${novelId}/quality/curve`),
+  getForeshadowings: (novelId: string) =>
+    request<ForeshadowingTracking>(`${BASE}/novels/${novelId}/quality/foreshadowings`),
 
   // 导出
   exportMarkdown: (novelId: string) => fetchText(`${BASE}/novels/${novelId}/export/markdown`),

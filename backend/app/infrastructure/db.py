@@ -1,7 +1,7 @@
 """数据库连接与会话管理。"""
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
@@ -43,3 +43,26 @@ def init_db() -> None:
     from app.infrastructure import models  # noqa: F401  # 注册模型
 
     models.Base.metadata.create_all(bind=engine)
+    _ensure_columns(engine)
+
+
+def _ensure_columns(target_engine) -> None:
+    """为已存在的表补齐后加的列（create_all 不会给既有表补列）。
+
+    幂等：先读 PRAGMA table_info，缺列才执行 ALTER TABLE。
+    目前仅需为 chapter 补 drift_score。
+    """
+    if not str(target_engine.url).startswith("sqlite"):
+        return
+    expected = {"chapter": {"drift_score": "FLOAT"}}
+    with target_engine.begin() as conn:
+        for table, columns in expected.items():
+            rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+            if not rows:
+                continue  # 表尚不存在，交由 create_all 建表
+            existing = {row[1] for row in rows}
+            for column, ddl_type in columns.items():
+                if column not in existing:
+                    conn.execute(
+                        text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
+                    )

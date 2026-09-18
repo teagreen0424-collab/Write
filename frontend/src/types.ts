@@ -173,6 +173,7 @@ export interface Chapter {
   status: 'draft' | 'finalized'
   summary: string
   tension_score: number | null
+  drift_score: number | null
   directive: string
   created_at: string
   updated_at: string
@@ -186,6 +187,12 @@ export interface Conflict {
   entity_id: string
 }
 
+// 正文分段：冲突一种底色、套路命中一种底色
+export interface Segment {
+  text: string
+  kind: 'plain' | 'conflict' | 'cliche'
+}
+
 export interface Suggestion {
   type: 'character' | 'timeline_event' | 'foreshadowing'
   data: Record<string, unknown>
@@ -195,6 +202,8 @@ export interface SettleResult {
   chapter_id: string
   summary: string
   suggestions: Suggestion[]
+  drift: number | null
+  conflicts: Conflict[]
 }
 
 // ================= 大纲 / 自动驾驶 =================
@@ -257,4 +266,72 @@ export interface ChatMessage {
   content: string
   meta: Record<string, unknown> | null
   created_at: string
+}
+
+// ================= 质量治理（阶段七） =================
+export interface ClicheHit {
+  term: string
+  category: string
+  start: number
+  end: number
+}
+
+export interface ClicheResult {
+  hits: ClicheHit[]
+  total: number
+  density: number
+  by_category: Record<string, number>
+}
+
+export interface QualityCurvePoint {
+  seq: number
+  title: string
+  status: string
+  tension_score: number | null
+  drift_score: number | null
+}
+
+export interface QualityCurve {
+  chapters: QualityCurvePoint[]
+  anchor_set: boolean
+  drift_threshold: number
+}
+
+export interface ForeshadowingTrack {
+  id: string
+  content: string
+  status: 'planted' | 'suspended' | 'consumed'
+  related_characters: unknown[]
+  planted_chapter_id: string
+  consumed_chapter_id: string
+  planted_seq: number | null
+  suspended_chapters: number | null
+  long_pending: boolean
+}
+
+export interface ForeshadowingTracking {
+  groups: {
+    planted: ForeshadowingTrack[]
+    suspended: ForeshadowingTrack[]
+    consumed: ForeshadowingTrack[]
+  }
+  latest_seq: number
+  chapter_count: number
+  long_pending_threshold: { chapters: number; ratio: number }
+}
+
+export interface DeepCheckConflict {
+  rule: string
+  type: string
+  excerpt: string
+  reason: string
+  severity: 'high' | 'medium' | 'low'
+  chunk_index: number
+}
+
+export interface DeepCheckResult {
+  conflicts: DeepCheckConflict[]
+  chunks_checked: number
+  chunks_skipped: number
+  truncated: boolean
 }

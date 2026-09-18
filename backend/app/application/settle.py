@@ -3,6 +3,8 @@ import json
 
 from sqlalchemy.orm import Session
 
+from app.application.auto_pilot import check_drift
+from app.application.consistency import consistency_check
 from app.application.memory import write_chapter_memory
 from app.domain.entities import ChapterStatus
 from app.infrastructure.ai.llm_provider import LLMProvider
@@ -63,15 +65,33 @@ def settle_chapter(db: Session, novel_id: str, chapter_id: str) -> dict:
     # 定稿后写入记忆（正文切片嵌入，失败降级不阻塞主流程）
     write_chapter_memory(db, novel_id, chapter_id, chapter.content)
 
+    # 文风漂移：有基准才比对并写 drift_score，无基准则留空
+    novel = repos.NovelRepo(db).get(novel_id)
+    drift = None
+    if (novel.style_anchor or "").strip():
+        drift = check_drift(db, novel_id, chapter.content)
+        if drift is not None:
+            repos.ChapterRepo(db).update(novel_id, chapter_id, drift_score=drift)
+
+    # 定稿主流程只跑规则层一致性检查，语义层由「深度检查」按需触发
+    conflicts = consistency_check(db, novel_id, chapter.content).get("conflicts", [])
+
     return {
         "chapter_id": chapter_id,
         "summary": summary,
         "suggestions": _build_suggestions(data),
+        "drift": drift,
+        "conflicts": conflicts,
     }
 
 
-def apply_suggestions(db: Session, novel_id: str, suggestions: list[dict]) -> dict:
-    """作者确认后，将设定变更建议落库到对应实体表。"""
+def apply_suggestions(
+    db: Session, novel_id: str, suggestions: list[dict], chapter_id: str = ""
+) -> dict:
+    """作者确认后，将设定变更建议落库到对应实体表。
+
+    chapter_id 为当前定稿章节，落库伏笔时写入 planted_chapter_id。
+    """
     created: list[dict] = []
     for s in suggestions:
         if not isinstance(s, dict):
@@ -89,7 +109,10 @@ def apply_suggestions(db: Session, novel_id: str, suggestions: list[dict]) -> di
                 created.append({"type": kind, "id": entity.id})
             elif kind == "foreshadowing":
                 obj = schemas.ForeshadowingCreate(**data)
-                entity = repos.ForeshadowingRepo(db).create(novel_id, **obj.model_dump())
+                payload = obj.model_dump()
+                if chapter_id and not payload.get("planted_chapter_id"):
+                    payload["planted_chapter_id"] = chapter_id
+                entity = repos.ForeshadowingRepo(db).create(novel_id, **payload)
                 created.append({"type": kind, "id": entity.id})
         except Exception:  # noqa: BLE001  跳过校验不通过的建议
             continue

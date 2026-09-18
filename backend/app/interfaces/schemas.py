@@ -243,6 +243,7 @@ class ChapterRead(ORMBase):
     status: str
     summary: str
     tension_score: Optional[float]
+    drift_score: Optional[float]
     directive: str
     created_at: str
     updated_at: str
@@ -262,6 +263,7 @@ class ContinueChapterRequest(BaseModel):
 class RewritePassageRequest(BaseModel):
     passage: str = Field(..., min_length=1)
     intent: str = ""
+    preview: bool = False
 
 
 class SettleApplyRequest(BaseModel):
@@ -270,6 +272,69 @@ class SettleApplyRequest(BaseModel):
 
 class ConsistencyRequest(BaseModel):
     content: str = Field(..., min_length=1)
+
+
+# ================= 质量治理（阶段七） =================
+class ClicheRequest(BaseModel):
+    content: str = Field(..., min_length=1)
+
+
+class ClicheHit(BaseModel):
+    term: str
+    category: str
+    start: int
+    end: int
+
+
+class ClicheResponse(BaseModel):
+    hits: list[ClicheHit]
+    total: int
+    density: float
+    by_category: dict[str, int]
+
+
+class QualityCurvePoint(BaseModel):
+    seq: int
+    title: str
+    status: str
+    tension_score: Optional[float]
+    drift_score: Optional[float]
+
+
+class QualityCurveResponse(BaseModel):
+    chapters: list[QualityCurvePoint]
+    anchor_set: bool
+    drift_threshold: float
+
+
+class ForeshadowingTrack(ORMBase):
+    id: str
+    content: str
+    status: str
+    related_characters: list
+    planted_chapter_id: str
+    consumed_chapter_id: str
+    planted_seq: Optional[int]
+    suspended_chapters: Optional[int]
+    long_pending: bool
+
+
+class ForeshadowingGroups(BaseModel):
+    planted: list[ForeshadowingTrack]
+    suspended: list[ForeshadowingTrack]
+    consumed: list[ForeshadowingTrack]
+
+
+class LongPendingThreshold(BaseModel):
+    chapters: int
+    ratio: float
+
+
+class ForeshadowingTrackingResponse(BaseModel):
+    groups: ForeshadowingGroups
+    latest_seq: int
+    chapter_count: int
+    long_pending_threshold: LongPendingThreshold
 
 
 # ================= Outline =================

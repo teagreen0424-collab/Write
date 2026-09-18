@@ -70,6 +70,23 @@ DRIFT_SYSTEM = (
 
 DRIFT_USER = "风格基准：\n{anchor}\n\n待检测正文：\n{content}\n\n请输出文风相似度（0-1 小数，只输出数字）："
 
+# ================= 一致性语义复核（深度检查） =================
+
+DEEP_CHECK_SYSTEM = (
+    "你是中文小说的一致性审校员。对照给定设定，判断正文是否与人物设定、时间线、"
+    "世界观冲突。严格只输出 JSON，不要输出任何其它文字或代码块标记。"
+)
+
+DEEP_CHECK_USER = """设定：
+{setting}
+
+正文片段：
+{chunk}
+
+只返回 JSON：{{"conflicts": [{{"type": "人设|时间线|设定", "excerpt": "冲突原句", "reason": "判定依据", "severity": "high|medium|low"}}]}}
+没有冲突返回空数组。
+"""
+
 # ================= 对话式构思注入 =================
 
 INJECT_IDEA_SYSTEM = (

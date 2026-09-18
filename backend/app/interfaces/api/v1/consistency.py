@@ -14,3 +14,11 @@ def check_consistency(
     novel_id: str, payload: schemas.ConsistencyRequest, db: Session = Depends(get_db)
 ):
     return consistency_uc.consistency_check(db, novel_id, payload.content)
+
+
+@router.post("/consistency/deep")
+def deep_check(
+    novel_id: str, payload: schemas.ConsistencyRequest, db: Session = Depends(get_db)
+):
+    """LLM 语义复核（按需触发，单次上限 8 块），结果不落库。"""
+    return consistency_uc.deep_check(db, novel_id, payload.content)

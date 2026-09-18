@@ -16,6 +16,7 @@ import { api } from '../api'
 import {
   ENTITY_TYPES,
   getEntityConfig,
+  type Chapter,
   type EntityRecord,
   type EntityType,
 } from '../types'
@@ -41,6 +42,42 @@ const emptyEntities = (): Record<EntityType, EntityRecord[]> => ({
 })
 const allEntities = ref<Record<EntityType, EntityRecord[]>>(emptyEntities())
 const form = ref<Record<string, any>>({})
+
+// 文风基准：决定定稿时是否计算文风漂移分
+const styleAnchor = ref('')
+const anchorChapterId = ref<string | null>(null)
+const chapters = ref<Chapter[]>([])
+const anchorSet = computed(() => styleAnchor.value.trim().length > 0)
+const chapterOptions = computed(() =>
+  chapters.value.map((c) => ({ label: `第${c.seq}章 ${c.title}`, value: c.id })),
+)
+
+// 从选中章节取正文前 800 字作为基准
+function pickAnchorChapter(id: string | null) {
+  anchorChapterId.value = id
+  const chapter = chapters.value.find((c) => c.id === id)
+  if (chapter) styleAnchor.value = (chapter.content || '').slice(0, 800)
+}
+
+async function saveAnchor() {
+  try {
+    await api.updateNovel(props.novelId, { style_anchor: styleAnchor.value })
+    message.success('已保存文风基准')
+  } catch (e) {
+    message.error((e as Error).message)
+  }
+}
+
+async function loadNovelMeta() {
+  try {
+    const novels = await api.listNovels()
+    const novel = novels.find((n) => n.id === props.novelId)
+    styleAnchor.value = novel?.style_anchor ?? ''
+    chapters.value = await api.listChapters(props.novelId)
+  } catch (e) {
+    message.error((e as Error).message)
+  }
+}
 
 const config = computed(() => getEntityConfig(selectedType.value))
 const entities = computed(() => allEntities.value[selectedType.value])
@@ -204,7 +241,9 @@ watch(
   () => {
     if (props.novelId) {
       resetForm()
+      anchorChapterId.value = null
       loadAll()
+      loadNovelMeta()
     }
   },
   { immediate: true },
@@ -229,11 +268,41 @@ onMounted(resetForm)
 
 <template>
   <div class="settings-panel">
-    <div class="type-sidebar">
-      <n-menu :options="typeMenuOptions" v-model:value="selectedType" />
+    <div class="style-anchor">
+      <div class="anchor-header">
+        <span>文风基准</span>
+        <n-button size="small" type="primary" @click="saveAnchor">保存基准</n-button>
+      </div>
+      <div class="anchor-row">
+        <n-select
+          :value="anchorChapterId"
+          :options="chapterOptions"
+          placeholder="从章节取基准（取该章正文前 800 字）"
+          style="width: 320px"
+          clearable
+          @update:value="pickAnchorChapter"
+        />
+        <span v-if="!anchorSet" class="anchor-hint">
+          未设置文风基准：定稿时不计算文风漂移分，质量曲线无漂移线。
+        </span>
+        <span v-else class="anchor-hint ok">
+          已设置基准（{{ styleAnchor.length }} 字）：定稿时自动比对并记录漂移分。
+        </span>
+      </div>
+      <n-input
+        v-model:value="styleAnchor"
+        type="textarea"
+        :autosize="{ minRows: 2, maxRows: 4 }"
+        placeholder="粘贴一段代表本书文风的文字（如开篇前 800 字）"
+      />
     </div>
 
-    <div class="main">
+    <div class="body">
+      <div class="type-sidebar">
+        <n-menu :options="typeMenuOptions" v-model:value="selectedType" />
+      </div>
+
+      <div class="main">
       <div class="list-pane">
         <div class="pane-header">
           <span>{{ config.label }}列表</span>
@@ -299,6 +368,7 @@ onMounted(resetForm)
           <n-button v-if="editingId" type="error" @click="remove">删除</n-button>
         </div>
       </div>
+      </div>
     </div>
   </div>
 </template>
@@ -306,7 +376,38 @@ onMounted(resetForm)
 <style scoped>
 .settings-panel {
   display: flex;
+  flex-direction: column;
   height: 100%;
+}
+.style-anchor {
+  border-bottom: 1px solid #e5e5e5;
+  padding: 12px 16px;
+}
+.anchor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.anchor-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.anchor-hint {
+  color: #d07830;
+  font-size: 12px;
+}
+.anchor-hint.ok {
+  color: #18a058;
+}
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
 }
 .type-sidebar {
   width: 140px;

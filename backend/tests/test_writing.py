@@ -1,4 +1,5 @@
 """阶段二单元测试：build_context / settle_chapter / consistency_check。"""
+import json
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.application import consistency as consistency_uc
 from app.application import context as context_uc
 from app.application import settle as settle_uc
+from app.application import writing as writing_uc
 from app.infrastructure import models
 from app.infrastructure import repository as repos
 
@@ -19,6 +21,15 @@ engine = create_engine(
 )
 models.Base.metadata.create_all(bind=engine)
 Session = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+
+def _parse_sse(stream) -> list[dict]:
+    """把 SSE 文本行解析为事件字典。"""
+    events = []
+    for line in stream:
+        if line.startswith("data: "):
+            events.append(json.loads(line[len("data: ") :]))
+    return events
 
 
 class WritingUseCaseTest(unittest.TestCase):
@@ -87,6 +98,72 @@ class WritingUseCaseTest(unittest.TestCase):
         self.assertEqual(len(result["created"]), 2)
         self.assertEqual(len(repos.CharacterRepo(self.db).list(self.novel_id)), 1)
         self.assertEqual(len(repos.ForeshadowingRepo(self.db).list(self.novel_id)), 1)
+
+    def test_rewrite_preview_not_persisted(self):
+        chapter = repos.ChapterRepo(self.db).create(
+            self.novel_id, seq=1, title="第一章", content="开头。原文段落内容。结尾。"
+        )
+        with patch(
+            "app.application.writing.llm.stream_complete", return_value=iter(["改写后"])
+        ):
+            events = _parse_sse(
+                writing_uc.rewrite_passage(
+                    self.db, self.novel_id, chapter.id, "原文段落内容", preview=True
+                )
+            )
+
+        self.assertFalse(any(e["type"] == "error" for e in events))
+        done = next(e for e in events if e["type"] == "done")
+        self.assertTrue(done["preview"])
+        self.assertEqual(done["content"], "开头。改写后。结尾。")
+        # 预览不落库：正文保持原文
+        self.assertEqual(
+            repos.ChapterRepo(self.db).get(self.novel_id, chapter.id).content,
+            "开头。原文段落内容。结尾。",
+        )
+
+    def test_rewrite_default_persists(self):
+        chapter = repos.ChapterRepo(self.db).create(
+            self.novel_id, seq=1, title="第一章", content="开头。原文段落内容。结尾。"
+        )
+        with patch(
+            "app.application.writing.llm.stream_complete", return_value=iter(["改写后"])
+        ):
+            events = _parse_sse(
+                writing_uc.rewrite_passage(
+                    self.db, self.novel_id, chapter.id, "原文段落内容"
+                )
+            )
+
+        done = next(e for e in events if e["type"] == "done")
+        self.assertNotIn("preview", done)
+        self.assertEqual(
+            repos.ChapterRepo(self.db).get(self.novel_id, chapter.id).content,
+            "开头。改写后。结尾。",
+        )
+
+    def test_settle_single_llm_call_with_anchor(self):
+        repos.NovelRepo(self.db).update(self.novel_id, style_anchor="简练古风")
+        chapter = repos.ChapterRepo(self.db).create(
+            self.novel_id, seq=1, title="第一章", content="林越在青云山下捡到一枚玉佩。"
+        )
+        fake = (
+            '{"summary":"林越捡到玉佩","characters":[],'
+            '"events":[],"foreshadowings":[]}'
+        )
+        with (
+            patch("app.application.settle.llm.complete", return_value=fake) as mocked,
+            patch("app.application.settle.write_chapter_memory", return_value=0),
+            patch("app.application.settle.check_drift", return_value=0.42),
+        ):
+            result = settle_uc.settle_chapter(self.db, self.novel_id, chapter.id)
+
+        # 定稿主流程只调用一次模型（设定抽取），语义复核不参与
+        self.assertEqual(mocked.call_count, 1)
+        self.assertEqual(result["drift"], 0.42)
+        self.assertEqual(
+            repos.ChapterRepo(self.db).get(self.novel_id, chapter.id).drift_score, 0.42
+        )
 
 
 if __name__ == "__main__":

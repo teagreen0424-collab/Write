@@ -101,8 +101,13 @@ def rewrite_passage(
     chapter_id: str,
     passage: str,
     intent: str = "",
+    preview: bool = False,
 ):
-    """改写指定段落：流式输出改写结果，替换原文对应段落。"""
+    """改写指定段落：流式输出改写结果。
+
+    preview 为 True 时只返回改写结果与拼好的整章内容，不写库；
+    默认 False 保持原行为，直接替换原文对应段落并落库。
+    """
     try:
         repo = ChapterRepo(db)
         chapter = repo.get(novel_id, chapter_id)
@@ -126,6 +131,17 @@ def rewrite_passage(
             yield sse({"type": "token", "content": chunk})
 
         new_content = chapter.content.replace(passage, full, 1)
+        if preview:
+            yield sse(
+                {
+                    "type": "done",
+                    "preview": True,
+                    "content": new_content,
+                    "chapter": _chapter_dict(chapter),
+                }
+            )
+            return
+
         repo.update(novel_id, chapter_id, content=new_content)
         updated = repo.get(novel_id, chapter_id)
         yield sse({"type": "done", "chapter": _chapter_dict(updated)})

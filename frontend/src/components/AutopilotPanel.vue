@@ -16,7 +16,10 @@ const done = ref(0)
 const total = ref(0)
 const directive = ref('')
 const driftWarnings = ref<{ seq: number; score: number; message: string }[]>([])
-const tensionList = ref<{ seq: number; score: number }[]>([])
+// 质量曲线：每章张力与漂移（初始来自 GET /quality/curve，运行时由 SSE 追加）
+const curvePoints = ref<{ seq: number; tension: number | null; drift: number | null }[]>([])
+const driftThreshold = ref(0.6)
+const anchorSet = ref(false)
 
 const chartRef = ref<HTMLDivElement | null>(null)
 let chart: echarts.ECharts | null = null
@@ -24,22 +27,74 @@ let chart: echarts.ECharts | null = null
 function renderChart() {
   if (!chart) return
   chart.setOption({
-    title: { text: '张力曲线', left: 'center', textStyle: { fontSize: 14 } },
-    xAxis: { type: 'category', data: tensionList.value.map((t) => `第${t.seq}章`) },
-    yAxis: { type: 'value', min: 0, max: 10 },
+    title: { text: '张力 / 漂移曲线', left: 'center', textStyle: { fontSize: 14 } },
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['张力', '漂移'], top: 22 },
+    xAxis: { type: 'category', data: curvePoints.value.map((p) => `第${p.seq}章`) },
+    yAxis: [
+      { type: 'value', name: '张力', min: 0, max: 10 },
+      { type: 'value', name: '漂移相似度', min: 0, max: 1 },
+    ],
     series: [
-      { type: 'line', data: tensionList.value.map((t) => t.score), smooth: true, areaStyle: {} },
+      {
+        name: '张力',
+        type: 'line',
+        yAxisIndex: 0,
+        data: curvePoints.value.map((p) => p.tension),
+        smooth: true,
+        areaStyle: {},
+        connectNulls: true,
+      },
+      {
+        name: '漂移',
+        type: 'line',
+        yAxisIndex: 1,
+        data: curvePoints.value.map((p) => p.drift),
+        smooth: true,
+        connectNulls: true,
+        // 阈值参考线，低于此值视为文风漂移
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          lineStyle: { color: '#d03050', type: 'dashed' },
+          data: [{ yAxis: driftThreshold.value, label: { formatter: '漂移阈值' } }],
+        },
+      },
     ],
   })
 }
 
-async function loadTension() {
+// 按 seq upsert 曲线点，保证初始数据与 SSE 追加数据合并
+function upsertPoint(seq: number, patch: { tension?: number | null; drift?: number | null }) {
+  const found = curvePoints.value.find((p) => p.seq === seq)
+  if (found) {
+    if (patch.tension !== undefined) found.tension = patch.tension
+    if (patch.drift !== undefined) found.drift = patch.drift
+  } else {
+    curvePoints.value.push({
+      seq,
+      tension: patch.tension ?? null,
+      drift: patch.drift ?? null,
+    })
+    curvePoints.value.sort((a, b) => a.seq - b.seq)
+  }
+}
+
+async function loadCurve() {
   if (!props.novelId) return
-  const chapters = await api.listChapters(props.novelId)
-  tensionList.value = chapters
-    .filter((c) => c.tension_score != null)
-    .map((c) => ({ seq: c.seq, score: c.tension_score as number }))
-  renderChart()
+  try {
+    const res = await api.getQualityCurve(props.novelId)
+    driftThreshold.value = res.drift_threshold
+    anchorSet.value = res.anchor_set
+    curvePoints.value = res.chapters.map((c) => ({
+      seq: c.seq,
+      tension: c.tension_score,
+      drift: c.drift_score,
+    }))
+    renderChart()
+  } catch (e) {
+    message.error((e as Error).message)
+  }
 }
 
 function handleEvent(ev: AutopilotEvent) {
@@ -53,10 +108,12 @@ function handleEvent(ev: AutopilotEvent) {
       progressText.value = `第${ev.seq}章生成完成`
       break
     case 'tension':
-      tensionList.value.push({ seq: ev.seq, score: ev.score })
+      upsertPoint(ev.seq, { tension: ev.score })
       renderChart()
       break
     case 'drift':
+      upsertPoint(ev.seq, { drift: ev.score })
+      renderChart()
       if (ev.warning) {
         driftWarnings.value.push({
           seq: ev.seq,
@@ -85,12 +142,12 @@ function start() {
   done.value = 0
   total.value = 0
   driftWarnings.value = []
-  tensionList.value = []
+  curvePoints.value = []
   progressText.value = '启动中…'
-  loadTension()
+  loadCurve()
   streamEvents(`/api/v1/novels/${props.novelId}/autopilot/sse`, handleEvent).finally(() => {
     running.value = false
-    loadTension()
+    loadCurve()
   })
 }
 
@@ -128,7 +185,7 @@ async function inject() {
 
 onMounted(() => {
   if (chartRef.value) chart = echarts.init(chartRef.value)
-  loadTension()
+  loadCurve()
 })
 
 onBeforeUnmount(() => {
@@ -139,7 +196,7 @@ onBeforeUnmount(() => {
 watch(
   () => props.novelId,
   () => {
-    if (props.novelId) loadTension()
+    if (props.novelId) loadCurve()
   },
 )
 </script>
@@ -171,6 +228,9 @@ watch(
     </div>
 
     <div ref="chartRef" class="chart"></div>
+    <div v-if="!anchorSet" class="anchor-hint">
+      未设置文风基准，暂不计算漂移分（可在「设定」面板的「文风基准」区配置）
+    </div>
 
     <div v-if="driftWarnings.length" class="drift-warnings">
       <div class="drift-title">文风漂移告警</div>
@@ -210,6 +270,11 @@ watch(
 .chart {
   width: 100%;
   height: 280px;
+}
+.anchor-hint {
+  color: #999;
+  font-size: 12px;
+  margin-top: 4px;
 }
 .drift-warnings {
   margin-top: 12px;

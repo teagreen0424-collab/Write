@@ -18,6 +18,7 @@ import KnowledgeGraph from './KnowledgeGraph.vue'
 import WritingPanel from './WritingPanel.vue'
 import OutlinePanel from './OutlinePanel.vue'
 import AutopilotPanel from './AutopilotPanel.vue'
+import ForeshadowingTracking from './ForeshadowingTracking.vue'
 
 const props = defineProps<{ initialNovelId?: string | null }>()
 const emit = defineEmits<{ (e: 'back'): void }>()
@@ -26,7 +27,9 @@ const message = useMessage()
 
 const novels = ref<Novel[]>([])
 const novelId = ref<string | null>(null)
-const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'graph'>('settings')
+const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'foreshadowing' | 'graph'>(
+  'settings',
+)
 const focusTarget = ref<{ type: EntityType; id: string } | null>(null)
 const refreshKey = ref(0)
 
@@ -100,6 +103,7 @@ onMounted(loadNovels)
         <n-tab-pane name="writing" tab="写作" />
         <n-tab-pane name="outline" tab="大纲" />
         <n-tab-pane name="autopilot" tab="自动驾驶" />
+        <n-tab-pane name="foreshadowing" tab="伏笔追踪" />
         <n-tab-pane name="graph" tab="知识图谱" />
       </n-tabs>
     </header>
@@ -118,6 +122,7 @@ onMounted(loadNovels)
         :refresh-key="refreshKey"
       />
       <AutopilotPanel v-if="activeTab === 'autopilot'" :novel-id="novelId ?? ''" />
+      <ForeshadowingTracking v-if="activeTab === 'foreshadowing'" :novel-id="novelId ?? ''" />
       <KnowledgeGraph
         v-if="activeTab === 'graph'"
         :novel-id="novelId ?? ''"

@@ -124,6 +124,7 @@ class Chapter(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), default=ChapterStatus.DRAFT.value)
     summary: Mapped[str] = mapped_column(Text, default="")
     tension_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    drift_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     directive: Mapped[str] = mapped_column(Text, default="")
 
 

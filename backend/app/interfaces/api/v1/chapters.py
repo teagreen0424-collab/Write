@@ -74,7 +74,7 @@ def rewrite_passage(
 ):
     return _streaming(
         lambda db: writing_uc.rewrite_passage(
-            db, novel_id, chapter_id, payload.passage, payload.intent
+            db, novel_id, chapter_id, payload.passage, payload.intent, payload.preview
         )
     )
 
@@ -89,4 +89,4 @@ def settle_chapter(novel_id: str, chapter_id: str, db: Session = Depends(get_db)
 def settle_apply(
     novel_id: str, chapter_id: str, payload: schemas.SettleApplyRequest, db: Session = Depends(get_db)
 ):
-    return settle_uc.apply_suggestions(db, novel_id, payload.suggestions)
+    return settle_uc.apply_suggestions(db, novel_id, payload.suggestions, chapter_id)
