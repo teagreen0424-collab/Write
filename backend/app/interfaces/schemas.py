@@ -254,6 +254,7 @@ class WriteChapterRequest(BaseModel):
     title: str = ""
     directive: str = ""
     outline_node_id: str = ""
+    previous_chapter_id: str = ""
 
 
 class ContinueChapterRequest(BaseModel):
@@ -378,6 +379,9 @@ class IdeaChatRequest(BaseModel):
 
 class IdeaApplyRequest(BaseModel):
     suggestions: list[dict] = Field(default_factory=list)
+    raw_text: str = ""
+    channel: str = "chat"
+    # 兼容旧客户端曾使用的 text 字段；新调用统一发送 raw_text。
     text: str = ""
 
 

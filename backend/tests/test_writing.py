@@ -3,6 +3,7 @@ import json
 import unittest
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -13,6 +14,7 @@ from app.application import settle as settle_uc
 from app.application import writing as writing_uc
 from app.infrastructure import models
 from app.infrastructure import repository as repos
+from app.main import app
 
 engine = create_engine(
     "sqlite://",
@@ -21,6 +23,7 @@ engine = create_engine(
 )
 models.Base.metadata.create_all(bind=engine)
 Session = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+client = TestClient(app)
 
 
 def _parse_sse(stream) -> list[dict]:
@@ -142,7 +145,124 @@ class WritingUseCaseTest(unittest.TestCase):
             "开头。改写后。结尾。",
         )
 
-    def test_settle_single_llm_call_with_anchor(self):
+    def test_write_route_persists_outline_node_id(self):
+        outline = repos.OutlineRepo(self.db).create(
+            self.novel_id, title="第一卷", level="volume"
+        )
+        with (
+            patch("app.interfaces.api.v1.chapters.SessionLocal", side_effect=Session),
+            patch("app.application.writing.llm.stream_complete", return_value=iter(["正文"])),
+        ):
+            response = client.post(
+                f"/api/v1/novels/{self.novel_id}/chapters/write",
+                json={"title": "第一章", "outline_node_id": outline.id},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('"type": "done"', response.text)
+        chapters = repos.ChapterRepo(self.db).list(self.novel_id)
+        self.assertEqual(len(chapters), 1)
+        self.assertEqual(chapters[0].outline_node_id, outline.id)
+
+    def test_write_route_without_outline_node_id_keeps_empty_value(self):
+        with (
+            patch("app.interfaces.api.v1.chapters.SessionLocal", side_effect=Session),
+            patch("app.application.writing.llm.stream_complete", return_value=iter(["正文"])),
+        ):
+            response = client.post(
+                f"/api/v1/novels/{self.novel_id}/chapters/write",
+                json={"title": "第一章"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        chapters = repos.ChapterRepo(self.db).list(self.novel_id)
+        self.assertEqual(len(chapters), 1)
+        self.assertEqual(chapters[0].outline_node_id, "")
+
+    def test_write_next_chapter_includes_continuity_context(self):
+        previous = repos.ChapterRepo(self.db).create(
+            self.novel_id,
+            seq=1,
+            title="雨夜相遇",
+            content="章首身份：林越是外卖员。" + "中段经历" * 1000 + "上一章结尾线索",
+            status="draft",
+        )
+        with (
+            patch("app.interfaces.api.v1.chapters.SessionLocal", side_effect=Session),
+            patch(
+                "app.application.writing.llm.stream_complete",
+                return_value=iter(["承接后的第二章正文"]),
+            ) as stream,
+        ):
+            response = client.post(
+                f"/api/v1/novels/{self.novel_id}/chapters/write",
+                json={"previous_chapter_id": previous.id},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        messages = stream.call_args.args[0]
+        self.assertIn("必须把给出的上一章视为已经发生", messages[0]["content"])
+        self.assertIn("【必须直接承接的上一章】", messages[1]["content"])
+        self.assertIn("章首身份：林越是外卖员", messages[1]["content"])
+        self.assertIn("上一章结尾线索", messages[1]["content"])
+        self.assertIn("不得再次写成第一次", messages[1]["content"])
+        self.assertIn("未沉淀，以正文为准", messages[1]["content"])
+        chapters = repos.ChapterRepo(self.db).list(self.novel_id)
+        self.assertEqual(len(chapters), 2)
+        self.assertEqual(chapters[1].seq, 2)
+        self.assertEqual(chapters[1].title, "第2章")
+        self.assertEqual(chapters[1].content, "承接后的第二章正文")
+
+    def test_write_next_chapter_rejects_non_latest_previous_chapter(self):
+        first = repos.ChapterRepo(self.db).create(
+            self.novel_id, seq=1, title="第一章", content="第一章正文"
+        )
+        repos.ChapterRepo(self.db).create(
+            self.novel_id, seq=2, title="第二章", content="第二章正文"
+        )
+        with (
+            patch("app.interfaces.api.v1.chapters.SessionLocal", side_effect=Session),
+            patch("app.application.writing.llm.stream_complete") as stream,
+        ):
+            response = client.post(
+                f"/api/v1/novels/{self.novel_id}/chapters/write",
+                json={"previous_chapter_id": first.id},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("只能从最新章节生成下一章", response.text)
+        stream.assert_not_called()
+        self.assertEqual(len(repos.ChapterRepo(self.db).list(self.novel_id)), 2)
+
+    def test_delete_chapter_cleans_memory_and_foreshadowing_references(self):
+        chapter = repos.ChapterRepo(self.db).create(
+            self.novel_id, seq=1, title="第一章", content="将被删除的正文"
+        )
+        repos.MemoryChunkRepo(self.db).create(
+            self.novel_id,
+            kind="chapter_slice",
+            source_chapter_id=chapter.id,
+            text="派生记忆",
+            embedding_id="",
+            vector=[],
+        )
+        foreshadowing = repos.ForeshadowingRepo(self.db).create(
+            self.novel_id,
+            content="仍需保留的伏笔",
+            planted_chapter_id=chapter.id,
+            consumed_chapter_id=chapter.id,
+        )
+
+        repos.ChapterRepo(self.db).delete(self.novel_id, chapter.id)
+
+        self.assertEqual(repos.ChapterRepo(self.db).list(self.novel_id), [])
+        memories = repos.MemoryChunkRepo(self.db).list_by_novel(self.novel_id)
+        self.assertFalse(any(item.source_chapter_id == chapter.id for item in memories))
+        kept = repos.ForeshadowingRepo(self.db).get(self.novel_id, foreshadowing.id)
+        self.assertEqual(kept.planted_chapter_id, "")
+        self.assertEqual(kept.consumed_chapter_id, "")
+
+    def test_settle_with_anchor_calls_extraction_and_drift_once(self):
         repos.NovelRepo(self.db).update(self.novel_id, style_anchor="简练古风")
         chapter = repos.ChapterRepo(self.db).create(
             self.novel_id, seq=1, title="第一章", content="林越在青云山下捡到一枚玉佩。"
@@ -152,18 +272,41 @@ class WritingUseCaseTest(unittest.TestCase):
             '"events":[],"foreshadowings":[]}'
         )
         with (
-            patch("app.application.settle.llm.complete", return_value=fake) as mocked,
+            patch("app.application.settle.llm.complete", return_value=fake) as extraction,
             patch("app.application.settle.write_chapter_memory", return_value=0),
-            patch("app.application.settle.check_drift", return_value=0.42),
+            patch("app.application.settle.check_drift", return_value=0.42) as drift,
+            patch("app.application.consistency.deep_check") as deep_check,
         ):
             result = settle_uc.settle_chapter(self.db, self.novel_id, chapter.id)
 
-        # 定稿主流程只调用一次模型（设定抽取），语义复核不参与
-        self.assertEqual(mocked.call_count, 1)
+        extraction.assert_called_once()
+        drift.assert_called_once_with(self.db, self.novel_id, chapter.content)
+        deep_check.assert_not_called()
         self.assertEqual(result["drift"], 0.42)
         self.assertEqual(
             repos.ChapterRepo(self.db).get(self.novel_id, chapter.id).drift_score, 0.42
         )
+
+    def test_settle_without_anchor_skips_drift_and_deep_check(self):
+        chapter = repos.ChapterRepo(self.db).create(
+            self.novel_id, seq=1, title="第一章", content="林越走进青云山。"
+        )
+        fake = (
+            '{"summary":"林越进山","characters":[],'
+            '"events":[],"foreshadowings":[]}'
+        )
+        with (
+            patch("app.application.settle.llm.complete", return_value=fake) as extraction,
+            patch("app.application.settle.write_chapter_memory", return_value=0),
+            patch("app.application.settle.check_drift") as drift,
+            patch("app.application.consistency.deep_check") as deep_check,
+        ):
+            result = settle_uc.settle_chapter(self.db, self.novel_id, chapter.id)
+
+        extraction.assert_called_once()
+        drift.assert_not_called()
+        deep_check.assert_not_called()
+        self.assertIsNone(result["drift"])
 
 
 if __name__ == "__main__":

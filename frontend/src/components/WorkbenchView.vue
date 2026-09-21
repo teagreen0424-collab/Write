@@ -32,6 +32,7 @@ const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'foresh
 )
 const focusTarget = ref<{ type: EntityType; id: string } | null>(null)
 const refreshKey = ref(0)
+const writingDirty = ref(false)
 
 const showCreate = ref(false)
 const createForm = ref({ title: '', genre: '', summary: '' })
@@ -77,6 +78,19 @@ function onGraphEdit(payload: { type: EntityType; id: string }) {
   activeTab.value = 'settings'
 }
 
+function changeTab(value: string) {
+  const next = value as typeof activeTab.value
+  if (
+    activeTab.value === 'writing' &&
+    next !== 'writing' &&
+    writingDirty.value &&
+    !window.confirm('当前章节有未保存修改，确定离开写作页吗？')
+  ) {
+    return
+  }
+  activeTab.value = next
+}
+
 onMounted(loadNovels)
 </script>
 
@@ -98,7 +112,7 @@ onMounted(loadNovels)
           <n-button type="primary" size="small" @click="openCreate">新建作品</n-button>
         </div>
       </div>
-      <n-tabs v-model:value="activeTab" type="line">
+      <n-tabs :value="activeTab" type="line" @update:value="changeTab">
         <n-tab-pane name="settings" tab="设定面板" />
         <n-tab-pane name="writing" tab="写作" />
         <n-tab-pane name="outline" tab="大纲" />
@@ -115,7 +129,11 @@ onMounted(loadNovels)
         :focus-target="focusTarget"
         :refresh-key="refreshKey"
       />
-      <WritingPanel v-if="activeTab === 'writing'" :novel-id="novelId ?? ''" />
+      <WritingPanel
+        v-if="activeTab === 'writing'"
+        :novel-id="novelId ?? ''"
+        @dirty-change="writingDirty = $event"
+      />
       <OutlinePanel
         v-if="activeTab === 'outline'"
         :novel-id="novelId ?? ''"

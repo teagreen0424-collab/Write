@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   NButton,
   NCheckbox,
@@ -13,6 +13,7 @@ import {
   useMessage,
 } from 'naive-ui'
 import { api, streamSSE } from '../api'
+import { chapterLabel, countCharacters } from '../utils/chapter'
 import type {
   Chapter,
   ClicheHit,
@@ -24,6 +25,7 @@ import type {
 } from '../types'
 
 const props = defineProps<{ novelId: string }>()
+const emit = defineEmits<{ (e: 'dirty-change', dirty: boolean): void }>()
 
 const message = useMessage()
 
@@ -33,11 +35,12 @@ const title = ref('')
 const directive = ref('')
 const content = ref('')
 const contentRef = ref<HTMLTextAreaElement | null>(null)
+const savedSnapshot = ref({ title: '', directive: '', content: '' })
 
 const streaming = ref(false)
 const streamText = ref('')
 const conflicts = ref<Conflict[]>([])
-const rewriteIntent = ref('')
+const rewriteIntent = ref('去AI味')
 
 // 去 AI 味扫描与语义深度检查
 const clicheHits = ref<ClicheHit[]>([])
@@ -57,6 +60,11 @@ const previewNew = ref('')
 const previewFullContent = ref('')
 
 const showSettle = ref(false)
+const showDelete = ref(false)
+const showWriteNext = ref(false)
+const deleting = ref(false)
+const nextTitle = ref('')
+const nextDirective = ref('')
 const settleSummary = ref('')
 const suggestions = ref<Suggestion[]>([])
 const checkedSuggestion = ref<boolean[]>([])
@@ -67,6 +75,49 @@ const REWRITE_INTENT_OPTIONS = [
   { label: '去 AI 味', value: '去AI味' },
   { label: '压缩', value: '压缩' },
 ]
+
+const selectedChapter = computed(() => chapters.value.find((c) => c.id === selectedId.value) ?? null)
+const isLatestChapter = computed(
+  () => !!selectedId.value && chapters.value[chapters.value.length - 1]?.id === selectedId.value,
+)
+const chapterWords = computed(() => countCharacters(content.value))
+const totalWords = computed(() =>
+  chapters.value.reduce((total, chapter) => {
+    const chapterContent = chapter.id === selectedId.value ? content.value : chapter.content
+    return total + countCharacters(chapterContent)
+  }, 0),
+)
+const isDirty = computed(
+  () =>
+    !!selectedId.value &&
+    (title.value !== savedSnapshot.value.title ||
+      directive.value !== savedSnapshot.value.directive ||
+      content.value !== savedSnapshot.value.content),
+)
+
+function rememberSaved() {
+  savedSnapshot.value = {
+    title: title.value,
+    directive: directive.value,
+    content: content.value,
+  }
+}
+
+function confirmDiscard(): boolean {
+  return !isDirty.value || window.confirm('当前章节有未保存修改，确定放弃并离开吗？')
+}
+
+function requireSaved(action: string): boolean {
+  if (!isDirty.value) return true
+  message.warning(`请先保存当前修改，再${action}`)
+  return false
+}
+
+function handleBeforeUnload(event: BeforeUnloadEvent) {
+  if (!isDirty.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
 
 const segments = computed<Segment[]>(() => {
   const text = content.value
@@ -108,19 +159,23 @@ function clearMarks() {
   deepMeta.value = null
 }
 
-function selectChapter(c: Chapter) {
+function selectChapter(c: Chapter, force = false) {
+  if (!force && c.id !== selectedId.value && !confirmDiscard()) return
   selectedId.value = c.id
   title.value = c.title
   content.value = c.content
   directive.value = c.directive
+  rememberSaved()
   clearMarks()
 }
 
-function startNew() {
+function startNew(force = false) {
+  if (!force && !confirmDiscard()) return
   selectedId.value = null
   title.value = ''
   directive.value = ''
   content.value = ''
+  rememberSaved()
   clearMarks()
   streamText.value = ''
 }
@@ -132,25 +187,34 @@ async function reloadAndReselect() {
     content.value = c.content
     title.value = c.title
     directive.value = c.directive
+    rememberSaved()
     clearMarks()
   }
 }
 
-async function doWrite() {
+async function generateChapter(
+  previousChapterId = '',
+  chapterTitle = title.value,
+  chapterDirective = directive.value,
+) {
   if (streaming.value) return
   streaming.value = true
   streamText.value = ''
   clearMarks()
   await streamSSE(
     `/api/v1/novels/${props.novelId}/chapters/write`,
-    { title: title.value, directive: directive.value },
+    {
+      title: chapterTitle,
+      directive: chapterDirective,
+      previous_chapter_id: previousChapterId,
+    },
     {
       onToken: (t) => (streamText.value += t),
       onDone: async () => {
         streaming.value = false
         await loadChapters()
         const last = chapters.value[chapters.value.length - 1]
-        if (last) selectChapter(last)
+        if (last) selectChapter(last, true)
         streamText.value = ''
         message.success('已生成新章')
       },
@@ -162,8 +226,29 @@ async function doWrite() {
   )
 }
 
-async function doContinue() {
+async function doWrite() {
+  await generateChapter()
+}
+
+async function doWriteNext() {
+  if (!selectedId.value || !requireSaved('生成下一章')) return
+  if (!isLatestChapter.value) {
+    message.warning('只能从最后一章继续生成，请先选择章节列表中的最后一章')
+    return
+  }
+  nextTitle.value = ''
+  nextDirective.value = ''
+  showWriteNext.value = true
+}
+
+async function confirmWriteNext() {
   if (!selectedId.value || streaming.value) return
+  showWriteNext.value = false
+  await generateChapter(selectedId.value, nextTitle.value, nextDirective.value)
+}
+
+async function doContinue() {
+  if (!selectedId.value || streaming.value || !requireSaved('续写本章')) return
   streaming.value = true
   streamText.value = ''
   await streamSSE(
@@ -194,7 +279,7 @@ function getSelection(): string {
 }
 
 async function doRewrite() {
-  if (!selectedId.value || streaming.value) return
+  if (!selectedId.value || streaming.value || !requireSaved('改写选中内容')) return
   const passage = getSelection().trim()
   if (!passage) {
     message.error('请先在正文中选中要改写的段落')
@@ -234,6 +319,7 @@ async function applyPreview() {
       content: previewFullContent.value,
     })
     content.value = previewFullContent.value
+    rememberSaved()
     showPreview.value = false
     await loadChapters()
     message.success('已应用改写')
@@ -264,7 +350,7 @@ async function doScanCliche() {
   }
 }
 
-// 语义深度检查（一次模型调用，结果不落库）
+// 语义深度检查（每个有效分块一次模型调用，最多 8 次，结果不落库）
 async function doDeepCheck() {
   if (!content.value.trim()) return
   deepLoading.value = true
@@ -304,15 +390,38 @@ function locateExcerpt(excerpt: string) {
 async function saveContent() {
   if (!selectedId.value) return
   try {
-    await api.updateChapter(props.novelId, selectedId.value, {
+    const updated = await api.updateChapter(props.novelId, selectedId.value, {
       title: title.value,
       content: content.value,
       directive: directive.value,
     })
+    title.value = updated.title
+    directive.value = updated.directive
+    content.value = updated.content
+    rememberSaved()
     message.success('已保存')
     await loadChapters()
   } catch (e) {
     message.error((e as Error).message)
+  }
+}
+
+async function deleteChapter() {
+  if (!selectedId.value || deleting.value || streaming.value) return
+  const deletedIndex = chapters.value.findIndex((chapter) => chapter.id === selectedId.value)
+  deleting.value = true
+  try {
+    await api.deleteChapter(props.novelId, selectedId.value)
+    await loadChapters()
+    const next = chapters.value[Math.min(deletedIndex, chapters.value.length - 1)]
+    if (next) selectChapter(next, true)
+    else startNew(true)
+    showDelete.value = false
+    message.success('章节已删除')
+  } catch (e) {
+    message.error((e as Error).message)
+  } finally {
+    deleting.value = false
   }
 }
 
@@ -329,7 +438,7 @@ async function doConsistency() {
 }
 
 async function doSettle() {
-  if (!selectedId.value) return
+  if (!selectedId.value || !requireSaved('定稿沉淀')) return
   try {
     const res = await api.settleChapter(props.novelId, selectedId.value)
     settleSummary.value = res.summary
@@ -384,19 +493,27 @@ watch(
   () => props.novelId,
   () => {
     if (props.novelId) {
-      startNew()
+      startNew(true)
       loadChapters()
     }
   },
   { immediate: true },
 )
+
+watch(isDirty, (dirty) => emit('dirty-change', dirty), { immediate: true })
+
+onMounted(() => window.addEventListener('beforeunload', handleBeforeUnload))
+onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnload))
 </script>
 
 <template>
   <div class="writing-panel">
     <div class="chapter-sidebar">
       <div class="pane-header">
-        <span>章节</span>
+        <div>
+          <div>章节</div>
+          <div class="book-stats">{{ chapters.length }} 章 · {{ totalWords }} 字</div>
+        </div>
         <n-button size="small" type="primary" @click="startNew">新章</n-button>
       </div>
       <n-empty v-if="!chapters.length" description="暂无章节" />
@@ -408,7 +525,7 @@ watch(
           @click="selectChapter(c)"
         >
           <div class="chapter-item">
-            <span>第{{ c.seq }}章 {{ c.title }}</span>
+            <span>{{ chapterLabel(c) }}</span>
             <n-tag size="tiny" :type="c.status === 'finalized' ? 'success' : 'default'">
               {{ c.status === 'finalized' ? '已定稿' : '草稿' }}
             </n-tag>
@@ -421,9 +538,26 @@ watch(
       <div class="editor-toolbar">
         <n-input v-model:value="title" placeholder="章节标题" class="title-input" />
         <n-input v-model:value="directive" placeholder="章前指令（如：让 A 与 B 决裂）" class="directive-input" />
-        <div class="btn-row">
+        <div class="toolbar-groups">
+        <div class="btn-row primary-actions">
           <n-button type="primary" :loading="streaming" @click="doWrite">写新章</n-button>
-          <n-button :disabled="!selectedId" :loading="streaming" @click="doContinue">续写</n-button>
+          <n-button
+            :disabled="!selectedId || !isLatestChapter"
+            :loading="streaming"
+            :title="isLatestChapter ? '从当前最后一章继续生成' : '请选择章节列表中的最后一章'"
+            @click="doWriteNext"
+          >
+            生成下一章
+          </n-button>
+          <n-button :disabled="!selectedId" :loading="streaming" @click="doContinue">
+            续写本章
+          </n-button>
+          <n-button :disabled="!selectedId || !isDirty" @click="saveContent">保存</n-button>
+          <span v-if="selectedId" class="save-state" :class="{ dirty: isDirty }">
+            {{ isDirty ? '未保存' : '已保存' }}
+          </span>
+        </div>
+        <div class="btn-row edit-actions">
           <n-select
             v-model:value="rewriteIntent"
             :options="REWRITE_INTENT_OPTIONS"
@@ -432,16 +566,34 @@ watch(
             clearable
           />
           <n-button :disabled="!selectedId" @click="doRewrite">改写选中</n-button>
-          <n-button :disabled="!selectedId" @click="saveContent">保存</n-button>
+        </div>
+        <div class="btn-row quality-actions">
           <n-button :disabled="!selectedId" @click="doScanCliche">套路扫描</n-button>
           <n-button :disabled="!selectedId" @click="doConsistency">一致性检查</n-button>
           <n-button :disabled="!selectedId" :loading="deepLoading" @click="doDeepCheck">
             深度检查
           </n-button>
-          <span class="cost-hint">深度检查 = 一次模型调用</span>
+          <span class="cost-hint">按有效分块调用模型，最多 8 次</span>
           <n-button type="success" :disabled="!selectedId" @click="doSettle">定稿沉淀</n-button>
+        </div>
+        <div class="btn-row file-actions">
           <n-button @click="doExport('markdown')">导出 MD</n-button>
           <n-button @click="doExport('txt')">导出 TXT</n-button>
+          <n-button
+            type="error"
+            secondary
+            :disabled="!selectedId || streaming"
+            @click="showDelete = true"
+          >
+            删除章节
+          </n-button>
+        </div>
+        </div>
+        <div v-if="selectedId" class="next-chapter-hint">
+          <template v-if="isLatestChapter">
+            “生成下一章”会携带上一章章首、结尾、最近剧情和作品设定；“续写本章”会追加到当前正文。
+          </template>
+          <template v-else>如需生成下一章，请先选择章节列表中的最后一章。</template>
         </div>
       </div>
 
@@ -457,6 +609,7 @@ watch(
           class="content-editor"
           placeholder="在此写作，或点击上方按钮生成"
         ></textarea>
+        <div class="editor-status">本章 {{ chapterWords }} 字</div>
       </div>
       <div v-else class="editor-empty">
         <n-empty description="选择章节或点击「新章」开始写作" />
@@ -547,6 +700,47 @@ watch(
       </template>
     </n-modal>
 
+    <n-modal v-model:show="showDelete" preset="card" title="删除章节" style="width: 460px">
+      <p>
+        确定删除“{{ selectedChapter ? chapterLabel(selectedChapter) : '' }}”吗？该章约
+        {{ chapterWords }} 字，删除后无法恢复。
+      </p>
+      <p v-if="isDirty" class="delete-warning">当前未保存的修改也会一并丢失。</p>
+      <template #footer>
+        <div class="modal-actions">
+          <n-button @click="showDelete = false">取消</n-button>
+          <n-button type="error" :loading="deleting" @click="deleteChapter">确认删除</n-button>
+        </div>
+      </template>
+    </n-modal>
+
+    <n-modal v-model:show="showWriteNext" preset="card" title="生成下一章" style="width: 560px">
+      <div class="next-form">
+        <label>
+          <span>下一章标题（可选）</span>
+          <n-input v-model:value="nextTitle" placeholder="留空则自动使用章节序号" />
+        </label>
+        <label>
+          <span>下一章指令（可选，最高优先级）</span>
+          <n-input
+            v-model:value="nextDirective"
+            type="textarea"
+            :autosize="{ minRows: 3, maxRows: 6 }"
+            placeholder="例如：黑西装男人跟踪吴迪，推进上一章留下的悬念"
+          />
+        </label>
+        <p class="next-modal-hint">
+          系统会同时携带上一章章首、结尾、最近剧情、Story Bible 与未解决伏笔，避免重复开局或改写既有能力规则。
+        </p>
+      </div>
+      <template #footer>
+        <div class="modal-actions">
+          <n-button @click="showWriteNext = false">取消</n-button>
+          <n-button type="primary" @click="confirmWriteNext">开始生成</n-button>
+        </div>
+      </template>
+    </n-modal>
+
     <n-modal v-model:show="showSettle" preset="card" title="设定变更建议" style="width: 560px">
       <p class="settle-summary">摘要：{{ settleSummary }}</p>
       <div v-if="suggestions.length">
@@ -589,6 +783,12 @@ watch(
   justify-content: space-between;
   gap: 8px;
 }
+.book-stats {
+  margin-top: 2px;
+  color: #888;
+  font-size: 12px;
+  font-weight: 400;
+}
 .chapter-sidebar :deep(.n-list-item.active) {
   background: #e8f4ff;
 }
@@ -617,9 +817,32 @@ watch(
   flex-wrap: wrap;
   align-items: center;
 }
+.toolbar-groups {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+.toolbar-groups > .btn-row:not(:last-child) {
+  padding-right: 16px;
+  border-right: 1px solid #e5e5e5;
+}
+.save-state {
+  color: #18a058;
+  font-size: 12px;
+}
+.save-state.dirty {
+  color: #d07830;
+}
+.next-chapter-hint {
+  color: #666;
+  font-size: 12px;
+}
 .editor-body {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 .content-editor {
   width: 100%;
@@ -632,6 +855,32 @@ watch(
   line-height: 1.7;
   resize: none;
   box-sizing: border-box;
+}
+.editor-status {
+  padding-top: 6px;
+  color: #777;
+  font-size: 12px;
+  text-align: right;
+}
+.delete-warning {
+  color: #d03050;
+}
+.next-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.next-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-weight: 600;
+}
+.next-modal-hint {
+  margin: 0;
+  color: #666;
+  font-size: 12px;
+  line-height: 1.6;
 }
 .editor-empty {
   padding: 40px;

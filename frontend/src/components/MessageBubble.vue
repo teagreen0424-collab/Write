@@ -16,6 +16,42 @@ const appliedInfo = ref<Record<string, unknown> | null>(
 const isAssistant = computed(() => props.message.role === 'assistant')
 const canApply = computed(() => isAssistant.value && !!props.novelId)
 
+interface InlinePart {
+  text: string
+  bold: boolean
+}
+
+interface ContentBlock {
+  type: 'paragraph' | 'list'
+  lines: InlinePart[][]
+}
+
+function parseInline(text: string): InlinePart[] {
+  const parts: InlinePart[] = []
+  const pattern = /\*\*(.+?)\*\*/g
+  let position = 0
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index ?? 0
+    if (index > position) parts.push({ text: text.slice(position, index), bold: false })
+    parts.push({ text: match[1], bold: true })
+    position = index + match[0].length
+  }
+  if (position < text.length) parts.push({ text: text.slice(position), bold: false })
+  return parts.length ? parts : [{ text, bold: false }]
+}
+
+const contentBlocks = computed<ContentBlock[]>(() => {
+  const paragraphs = props.message.content.trim().split(/\n\s*\n/)
+  return paragraphs.filter(Boolean).map((paragraph) => {
+    const lines = paragraph.split('\n')
+    const isList = lines.every((line) => /^\s*[-*]\s+/.test(line))
+    return {
+      type: isList ? 'list' : 'paragraph',
+      lines: lines.map((line) => parseInline(isList ? line.replace(/^\s*[-*]\s+/, '') : line)),
+    }
+  })
+})
+
 async function onApplied(summary: { type: string; action: string; id: string }[]) {
   const meta = { applied: summary, at: new Date().toISOString() }
   try {
@@ -32,7 +68,25 @@ async function onApplied(summary: { type: string; action: string; id: string }[]
 <template>
   <div class="bubble-row" :class="message.role">
     <div class="bubble" :class="message.role">
-      <div class="content">{{ message.content }}</div>
+      <div class="content">
+        <template v-for="(block, blockIndex) in contentBlocks" :key="blockIndex">
+          <ul v-if="block.type === 'list'">
+            <li v-for="(line, lineIndex) in block.lines" :key="lineIndex">
+              <span v-for="(part, partIndex) in line" :key="partIndex" :class="{ strong: part.bold }">
+                {{ part.text }}
+              </span>
+            </li>
+          </ul>
+          <p v-else>
+            <template v-for="(line, lineIndex) in block.lines" :key="lineIndex">
+              <span v-for="(part, partIndex) in line" :key="partIndex" :class="{ strong: part.bold }">
+                {{ part.text }}
+              </span>
+              <br v-if="lineIndex < block.lines.length - 1" />
+            </template>
+          </p>
+        </template>
+      </div>
       <div v-if="isAssistant" class="footer">
         <n-tag v-if="appliedInfo?.applied" type="success" size="small">已落地</n-tag>
         <n-button
@@ -86,7 +140,21 @@ async function onApplied(summary: { type: string; action: string; id: string }[]
   color: #1f2937;
 }
 .content {
-  white-space: pre-wrap;
+  white-space: normal;
+}
+.content p {
+  margin: 0 0 0.75em;
+}
+.content p:last-child,
+.content ul:last-child {
+  margin-bottom: 0;
+}
+.content ul {
+  margin: 0 0 0.75em;
+  padding-left: 1.4em;
+}
+.strong {
+  font-weight: 700;
 }
 .footer {
   margin-top: 6px;

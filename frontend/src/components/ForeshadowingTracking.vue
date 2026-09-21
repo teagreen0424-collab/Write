@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { NButton, NEmpty, NSelect, NTag, useMessage } from 'naive-ui'
 import { api } from '../api'
+import { chapterLabel } from '../utils/chapter'
 import type { Chapter, ForeshadowingTrack, ForeshadowingTracking } from '../types'
 
 const props = defineProps<{ novelId: string }>()
@@ -14,7 +15,7 @@ const currentChapterId = ref<string | null>(null)
 const loading = ref(false)
 
 const chapterOptions = computed(() =>
-  chapters.value.map((c) => ({ label: `第${c.seq}章 ${c.title}`, value: c.id })),
+  chapters.value.map((c) => ({ label: chapterLabel(c), value: c.id })),
 )
 
 // 三个分组：已悬置（需重点关注）排前

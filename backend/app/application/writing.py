@@ -7,6 +7,8 @@ from app.application.context import build_context
 from app.infrastructure.ai.llm_provider import LLMProvider
 from app.infrastructure.ai.prompts import (
     CONTINUE_SYSTEM,
+    NEXT_CHAPTER_SYSTEM,
+    NEXT_CHAPTER_USER,
     REWRITE_INTENTS,
     REWRITE_SYSTEM,
     WRITE_SYSTEM,
@@ -25,22 +27,65 @@ def _chapter_dict(chapter) -> dict:
     return schemas.ChapterRead.model_validate(chapter).model_dump()
 
 
+def _chapter_context(content: str, max_chars: int = 7000) -> str:
+    """保留上一章章首与结尾，兼顾身份建立和结尾钩子。"""
+    if len(content) <= max_chars:
+        return content
+    head_chars = 3000
+    tail_chars = max_chars - head_chars
+    return content[:head_chars] + "\n\n…（上一章中段已省略）…\n\n" + content[-tail_chars:]
+
+
+def _recent_history(chapters: list, previous) -> str:
+    """给出上一章之前最多两章的短脉络，未定稿章节用首尾片段降级。"""
+    earlier = [chapter for chapter in chapters if chapter.seq < previous.seq][-2:]
+    if not earlier:
+        return "无（当前从第一章继续）"
+    lines: list[str] = []
+    for chapter in earlier:
+        brief = (chapter.summary or "").strip()
+        if not brief:
+            compact = (chapter.content or "").strip()
+            if len(compact) > 600:
+                compact = compact[:300] + "…" + compact[-300:]
+            brief = compact or "无摘要"
+        lines.append(f"第{chapter.seq}章《{chapter.title}》：{brief}")
+    return "\n".join(lines)
+
+
 def write_chapter(
     db: Session,
     novel_id: str,
     directive: str = "",
     title: str = "",
     outline_node_id: str = "",
+    previous_chapter_id: str = "",
 ):
-    """新建一章：生成 seq/title/content，流式输出，落库为 draft。"""
+    """新建一章：可承接指定上一章结尾，流式输出并落库为 draft。"""
     try:
         repo = ChapterRepo(db)
         seq = repo.next_seq(novel_id)
         position = f"第 {seq} 章" + (f"《{title}》" if title else "")
         context = build_context(db, novel_id, directive, position)
+        system_prompt = WRITE_SYSTEM
+        user_prompt = f"{context}\n\n请开始撰写本章正文："
+        if previous_chapter_id:
+            previous = repo.get(novel_id, previous_chapter_id)
+            chapters = repo.list(novel_id)
+            latest = chapters[-1] if chapters else None
+            if latest is None or previous.id != latest.id:
+                raise ValueError("只能从最新章节生成下一章，请先选择章节列表中的最后一章")
+            system_prompt = NEXT_CHAPTER_SYSTEM
+            user_prompt = NEXT_CHAPTER_USER.format(
+                context=context,
+                recent_history=_recent_history(chapters, previous),
+                previous_title=previous.title or f"第{previous.seq}章",
+                previous_summary=(previous.summary or "未沉淀，以正文为准"),
+                previous_content=_chapter_context(previous.content),
+            )
         messages = [
-            {"role": "system", "content": WRITE_SYSTEM},
-            {"role": "user", "content": f"{context}\n\n请开始撰写本章正文："},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ]
 
         full = ""

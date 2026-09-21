@@ -13,6 +13,7 @@ import {
   useMessage,
 } from 'naive-ui'
 import { api } from '../api'
+import { chapterLabel } from '../utils/chapter'
 import {
   ENTITY_TYPES,
   getEntityConfig,
@@ -49,7 +50,7 @@ const anchorChapterId = ref<string | null>(null)
 const chapters = ref<Chapter[]>([])
 const anchorSet = computed(() => styleAnchor.value.trim().length > 0)
 const chapterOptions = computed(() =>
-  chapters.value.map((c) => ({ label: `第${c.seq}章 ${c.title}`, value: c.id })),
+  chapters.value.map((c) => ({ label: chapterLabel(c), value: c.id })),
 )
 
 // 从选中章节取正文前 800 字作为基准
@@ -139,6 +140,12 @@ function resetForm() {
 }
 
 function startCreate() {
+  editingId.value = null
+  resetForm()
+}
+
+function changeType(value: string) {
+  selectedType.value = value as EntityType
   editingId.value = null
   resetForm()
 }
@@ -283,10 +290,10 @@ onMounted(resetForm)
           @update:value="pickAnchorChapter"
         />
         <span v-if="!anchorSet" class="anchor-hint">
-          未设置文风基准：定稿时不计算文风漂移分，质量曲线无漂移线。
+          未设置文风基准：点击“定稿沉淀”时不计算文风漂移分，质量曲线无漂移线。
         </span>
         <span v-else class="anchor-hint ok">
-          已设置基准（{{ styleAnchor.length }} 字）：定稿时自动比对并记录漂移分。
+          已设置基准（{{ styleAnchor.length }} 字）：点击“定稿沉淀”时比对并记录漂移分。
         </span>
       </div>
       <n-input
@@ -299,7 +306,11 @@ onMounted(resetForm)
 
     <div class="body">
       <div class="type-sidebar">
-        <n-menu :options="typeMenuOptions" v-model:value="selectedType" />
+        <n-menu
+          :options="typeMenuOptions"
+          :value="selectedType"
+          @update:value="changeType"
+        />
       </div>
 
       <div class="main">
@@ -333,14 +344,14 @@ onMounted(resetForm)
             <n-input
               v-if="f.type === 'text'"
               v-model:value="form[f.key]"
-              :placeholder="f.placeholder"
+              :placeholder="f.placeholder || `请输入${f.label}`"
             />
             <n-input
               v-else-if="f.type === 'textarea'"
               v-model:value="form[f.key]"
               type="textarea"
               :autosize="{ minRows: 2, maxRows: 6 }"
-              :placeholder="f.placeholder"
+              :placeholder="f.placeholder || `请输入${f.label}`"
             />
             <n-select
               v-else-if="f.type === 'select'"

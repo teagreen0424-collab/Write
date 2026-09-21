@@ -216,6 +216,32 @@ class ChapterRepo:
 
     def delete(self, novel_id: str, chapter_id: str):
         obj = self.get(novel_id, chapter_id)
+        # 删除章节时同步清理它派生出的记忆，避免后续检索召回已经删除的正文。
+        self.db.query(models.MemoryChunk).filter(
+            models.MemoryChunk.novel_id == novel_id,
+            models.MemoryChunk.source_chapter_id == chapter_id,
+        ).delete(synchronize_session=False)
+        # 伏笔本身属于 Story Bible，只解除对已删除章节的引用，不删除伏笔记录。
+        planted = (
+            self.db.query(models.Foreshadowing)
+            .filter(
+                models.Foreshadowing.novel_id == novel_id,
+                models.Foreshadowing.planted_chapter_id == chapter_id,
+            )
+            .all()
+        )
+        consumed = (
+            self.db.query(models.Foreshadowing)
+            .filter(
+                models.Foreshadowing.novel_id == novel_id,
+                models.Foreshadowing.consumed_chapter_id == chapter_id,
+            )
+            .all()
+        )
+        for item in planted:
+            item.planted_chapter_id = ""
+        for item in consumed:
+            item.consumed_chapter_id = ""
         self.db.delete(obj)
         self.db.commit()
 

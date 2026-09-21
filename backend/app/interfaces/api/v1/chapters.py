@@ -56,7 +56,16 @@ def _streaming(generator_factory):
 
 @router.post("/write")
 def write_chapter(novel_id: str, payload: schemas.WriteChapterRequest):
-    return _streaming(lambda db: writing_uc.write_chapter(db, novel_id, payload.directive, payload.title))
+    return _streaming(
+        lambda db: writing_uc.write_chapter(
+            db,
+            novel_id,
+            directive=payload.directive,
+            title=payload.title,
+            outline_node_id=payload.outline_node_id,
+            previous_chapter_id=payload.previous_chapter_id,
+        )
+    )
 
 
 @router.post("/{chapter_id}/continue")

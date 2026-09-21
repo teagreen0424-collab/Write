@@ -57,7 +57,7 @@ async function apply() {
   }
   applying.value = true
   try {
-    const r = await api.ideaApply(props.novelId, suggestions)
+    const r = await api.ideaApply(props.novelId, suggestions, props.text, 'chat')
     message.success(`已应用 ${r.applied.length} 条变更`)
     emit('applied', r.applied)
   } catch (e) {

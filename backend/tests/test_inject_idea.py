@@ -9,6 +9,8 @@ from sqlalchemy.pool import StaticPool
 from app.application import inject_idea as inject_uc
 from app.infrastructure import models
 from app.infrastructure import repository as repos
+from app.interfaces import schemas
+from app.interfaces.api.v1 import ideas as ideas_api
 
 engine = create_engine(
     "sqlite://",
@@ -109,6 +111,49 @@ class InjectIdeaTest(unittest.TestCase):
         self.assertEqual(len(foreshadowings), 1)
         self.assertEqual(foreshadowings[0].content, "林越的身世之谜")
         self.assertEqual(result["applied"][0]["action"], "create")
+
+    def test_apply_route_records_one_chat_injection_with_raw_text(self):
+        raw_text = "让林越改为以复仇为目标。"
+        payload = schemas.IdeaApplyRequest(
+            suggestions=[
+                {
+                    "type": "character",
+                    "action": "create",
+                    "data": {"name": "林越", "goal": "复仇"},
+                }
+            ],
+            raw_text=raw_text,
+            channel="chat",
+        )
+
+        result = ideas_api.apply(self.nid, payload, self.db)
+
+        chars = repos.CharacterRepo(self.db).list(self.nid)
+        injections = repos.InjectionRepo(self.db).list_by_novel(self.nid)
+        self.assertEqual(len(result["applied"]), 1)
+        self.assertEqual(chars[0].goal, "复仇")
+        self.assertEqual(len(injections), 1)
+        self.assertEqual(injections[0].channel, "chat")
+        self.assertEqual(injections[0].raw_text, raw_text)
+
+    def test_apply_route_empty_raw_text_keeps_legacy_behavior(self):
+        payload = schemas.IdeaApplyRequest(
+            suggestions=[
+                {
+                    "type": "location",
+                    "action": "create",
+                    "data": {"name": "青云山"},
+                }
+            ]
+        )
+
+        result = ideas_api.apply(self.nid, payload, self.db)
+
+        locations = repos.LocationRepo(self.db).list(self.nid)
+        injections = repos.InjectionRepo(self.db).list_by_novel(self.nid)
+        self.assertEqual(len(result["applied"]), 1)
+        self.assertEqual(locations[0].name, "青云山")
+        self.assertEqual(injections, [])
 
 
 if __name__ == "__main__":
