@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.domain.entities import ChapterStatus, ForeshadowStatus, OutlineLevel
@@ -126,6 +126,37 @@ class Chapter(Base, TimestampMixin):
     tension_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     drift_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     directive: Mapped[str] = mapped_column(Text, default="")
+
+
+class ChapterRevision(Base):
+    """章节历史版本：覆盖既有作者内容前保存的旧状态快照。
+
+    版本记录不可编辑：只在覆盖前插入，恢复时也只读取不修改。
+    审阅字段（status/summary/tension_score/drift_score）仅供查看，恢复时只回写作者字段。
+    """
+
+    __tablename__ = "chapter_revision"
+    __table_args__ = (
+        UniqueConstraint("chapter_id", "revision_no", name="uq_chapter_revision_no"),
+        Index("ix_chapter_revision_scope", "novel_id", "chapter_id", "revision_no"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    novel_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("novel.id"), index=True
+    )
+    chapter_id: Mapped[str] = mapped_column(String(36), index=True)
+    revision_no: Mapped[int] = mapped_column(Integer, default=1)
+    source: Mapped[str] = mapped_column(String(32), default="manual_save")
+    title: Mapped[str] = mapped_column(String(200), default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    directive: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default=ChapterStatus.DRAFT.value)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    tension_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    drift_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    word_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[str] = mapped_column(String(40), default=_now)
 
 
 class OutlineNode(Base, TimestampMixin):

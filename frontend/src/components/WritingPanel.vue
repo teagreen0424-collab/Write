@@ -14,6 +14,7 @@ import {
 } from 'naive-ui'
 import { api, streamSSE } from '../api'
 import { chapterLabel, countCharacters } from '../utils/chapter'
+import ChapterRevisionPanel from './ChapterRevisionPanel.vue'
 import type {
   Chapter,
   ClicheHit,
@@ -62,6 +63,7 @@ const previewFullContent = ref('')
 const showSettle = ref(false)
 const showDelete = ref(false)
 const showWriteNext = ref(false)
+const showRevisions = ref(false)
 const deleting = ref(false)
 const nextTitle = ref('')
 const nextDirective = ref('')
@@ -161,6 +163,7 @@ function clearMarks() {
 
 function selectChapter(c: Chapter, force = false) {
   if (!force && c.id !== selectedId.value && !confirmDiscard()) return
+  if (c.id !== selectedId.value) showRevisions.value = false
   selectedId.value = c.id
   title.value = c.title
   content.value = c.content
@@ -171,6 +174,7 @@ function selectChapter(c: Chapter, force = false) {
 
 function startNew(force = false) {
   if (!force && !confirmDiscard()) return
+  showRevisions.value = false
   selectedId.value = null
   title.value = ''
   directive.value = ''
@@ -180,16 +184,28 @@ function startNew(force = false) {
   streamText.value = ''
 }
 
-async function reloadAndReselect() {
+async function reloadAndReselect(chapter?: Chapter) {
   await loadChapters()
-  const c = chapters.value.find((x) => x.id === selectedId.value)
+  const c = chapter ?? chapters.value.find((x) => x.id === selectedId.value)
   if (c) {
+    selectedId.value = c.id
     content.value = c.content
     title.value = c.title
     directive.value = c.directive
+    // 恢复后清空一致性/套路标记，并把内容视为已保存
     rememberSaved()
     clearMarks()
   }
+}
+
+// 恢复历史版本：后端已把恢复前状态另存为快照，这里只需重载并清空标记
+async function onRestored(chapter: Chapter) {
+  await reloadAndReselect(chapter)
+}
+
+function openRevisionHistory() {
+  if (!selectedId.value || !requireSaved('查看版本历史')) return
+  showRevisions.value = true
 }
 
 async function generateChapter(
@@ -311,12 +327,13 @@ async function doRewrite() {
   )
 }
 
-// 应用改写：仅此时才落库
+// 应用改写：仅此时才落库，来源记为 rewrite_apply
 async function applyPreview() {
   if (!selectedId.value) return
   try {
     await api.updateChapter(props.novelId, selectedId.value, {
       content: previewFullContent.value,
+      revision_source: 'rewrite_apply',
     })
     content.value = previewFullContent.value
     rememberSaved()
@@ -394,6 +411,7 @@ async function saveContent() {
       title: title.value,
       content: content.value,
       directive: directive.value,
+      revision_source: 'manual_save',
     })
     title.value = updated.title
     directive.value = updated.directive
@@ -514,7 +532,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
           <div>章节</div>
           <div class="book-stats">{{ chapters.length }} 章 · {{ totalWords }} 字</div>
         </div>
-        <n-button size="small" type="primary" @click="startNew">新章</n-button>
+        <n-button size="small" type="primary" @click="startNew()">新章</n-button>
       </div>
       <n-empty v-if="!chapters.length" description="暂无章节" />
       <n-list v-else clickable hoverable>
@@ -575,6 +593,10 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
           </n-button>
           <span class="cost-hint">按有效分块调用模型，最多 8 次</span>
           <n-button type="success" :disabled="!selectedId" @click="doSettle">定稿沉淀</n-button>
+        </div>
+        <div class="btn-row version-actions">
+          <n-button :disabled="!selectedId" @click="openRevisionHistory">版本历史</n-button>
+          <span class="cost-hint">覆盖正文前会自动保存旧版本</span>
         </div>
         <div class="btn-row file-actions">
           <n-button @click="doExport('markdown')">导出 MD</n-button>
@@ -705,6 +727,9 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         确定删除“{{ selectedChapter ? chapterLabel(selectedChapter) : '' }}”吗？该章约
         {{ chapterWords }} 字，删除后无法恢复。
       </p>
+      <p class="delete-warning">
+        该章的<b>历史版本也会一并删除</b>，本阶段没有回收站。
+      </p>
       <p v-if="isDirty" class="delete-warning">当前未保存的修改也会一并丢失。</p>
       <template #footer>
         <div class="modal-actions">
@@ -756,6 +781,16 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         </div>
       </template>
     </n-modal>
+
+    <ChapterRevisionPanel
+      v-model:show="showRevisions"
+      :novel-id="props.novelId"
+      :chapter-id="selectedId"
+      :chapter-title="title"
+      :current-content="content"
+      :current-status="selectedChapter?.status ?? 'draft'"
+      @restored="onRestored"
+    />
   </div>
 </template>
 
@@ -904,6 +939,11 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 .cost-hint {
   color: #999;
   font-size: 12px;
+}
+.version-actions {
+  border-top: 1px dashed #eee;
+  padding-top: 8px;
+  margin-top: 8px;
 }
 .marks {
   margin-top: 12px;

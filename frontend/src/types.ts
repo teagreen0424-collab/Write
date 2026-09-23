@@ -187,6 +187,51 @@ export interface Conflict {
   entity_id: string
 }
 
+// ================= 章节版本（阶段八第一轮） =================
+export type RevisionSource =
+  | 'manual_save'
+  | 'rewrite_apply'
+  | 'continue'
+  | 'rewrite'
+  | 'restore'
+
+/** PUT 更新章节时允许前端指定的来源，其余来源由后端写作用例决定 */
+export type RevisionSourceInput = 'manual_save' | 'rewrite_apply'
+
+/** 版本列表项：不包含正文 */
+export interface ChapterRevisionMeta {
+  id: string
+  novel_id: string
+  chapter_id: string
+  revision_no: number
+  source: RevisionSource
+  title: string
+  directive: string
+  status: 'draft' | 'finalized'
+  summary: string
+  tension_score: number | null
+  drift_score: number | null
+  word_count: number
+  created_at: string
+}
+
+/** 单个版本详情：包含完整正文 */
+export interface ChapterRevision extends ChapterRevisionMeta {
+  content: string
+}
+
+export const REVISION_SOURCE_LABELS: Record<RevisionSource, string> = {
+  manual_save: '手工保存',
+  rewrite_apply: '改写应用',
+  continue: '续写',
+  rewrite: '直接改写',
+  restore: '恢复前快照',
+}
+
+export function revisionSourceLabel(source: string): string {
+  return REVISION_SOURCE_LABELS[source as RevisionSource] ?? source
+}
+
 // 正文分段：冲突一种底色、套路命中一种底色
 export interface Segment {
   text: string

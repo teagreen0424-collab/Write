@@ -67,6 +67,7 @@ class NovelRepo:
             models.Foreshadowing,
             models.Relationship,
             models.Chapter,
+            models.ChapterRevision,
             models.OutlineNode,
             models.MemoryChunk,
             models.Injection,
@@ -221,6 +222,11 @@ class ChapterRepo:
             models.MemoryChunk.novel_id == novel_id,
             models.MemoryChunk.source_chapter_id == chapter_id,
         ).delete(synchronize_session=False)
+        # 章节删除仍是永久删除：历史版本一并清理，不保留回收站。
+        self.db.query(models.ChapterRevision).filter(
+            models.ChapterRevision.novel_id == novel_id,
+            models.ChapterRevision.chapter_id == chapter_id,
+        ).delete(synchronize_session=False)
         # 伏笔本身属于 Story Bible，只解除对已删除章节的引用，不删除伏笔记录。
         planted = (
             self.db.query(models.Foreshadowing)
@@ -255,6 +261,87 @@ class ChapterRepo:
             )
             .order_by(self.model.seq)
             .all()
+        )
+
+
+class ChapterRevisionRepo:
+    """章节历史版本仓储。
+
+    与其它仓储不同，本仓储的写方法只把对象加入当前会话，**不自行 commit**，
+    由 application/revisions.py 保证「快照 + 章节更新」落在同一次事务里。
+    """
+
+    model = models.ChapterRevision
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def list_by_chapter(self, novel_id: str, chapter_id: str):
+        """按版本号倒序列出某章全部版本。"""
+        return (
+            self.db.query(self.model)
+            .filter(self.model.novel_id == novel_id, self.model.chapter_id == chapter_id)
+            .order_by(self.model.revision_no.desc())
+            .all()
+        )
+
+    def get(self, novel_id: str, chapter_id: str, revision_id: str):
+        """在作品 + 章节双重作用域下读取单个版本，跨作用域一律 404。"""
+        obj = (
+            self.db.query(self.model)
+            .filter(
+                self.model.id == revision_id,
+                self.model.novel_id == novel_id,
+                self.model.chapter_id == chapter_id,
+            )
+            .first()
+        )
+        if not obj:
+            raise HTTPException(status_code=404, detail="章节版本不存在")
+        return obj
+
+    def next_revision_no(self, chapter_id: str) -> int:
+        """该章下一个可用版本号（从 1 开始）。"""
+        max_no = (
+            self.db.query(func.max(self.model.revision_no))
+            .filter(self.model.chapter_id == chapter_id)
+            .scalar()
+        )
+        return (max_no or 0) + 1
+
+    def add_snapshot(self, chapter, source: str, word_count: int):
+        """把章节当前状态作为快照加入当前事务，不提交。"""
+        obj = self.model(
+            novel_id=chapter.novel_id,
+            chapter_id=chapter.id,
+            revision_no=self.next_revision_no(chapter.id),
+            source=source,
+            title=chapter.title or "",
+            content=chapter.content or "",
+            directive=chapter.directive or "",
+            status=chapter.status or "",
+            summary=chapter.summary or "",
+            tension_score=chapter.tension_score,
+            drift_score=chapter.drift_score,
+            word_count=word_count,
+        )
+        self.db.add(obj)
+        return obj
+
+    def delete_by_chapter(self, novel_id: str, chapter_id: str) -> int:
+        """按章节清理版本（恢复正文前让旧记忆失效时也走这里）。"""
+        return (
+            self.db.query(self.model)
+            .filter(self.model.novel_id == novel_id, self.model.chapter_id == chapter_id)
+            .delete(synchronize_session=False)
+        )
+
+    def delete_by_novel(self, novel_id: str) -> int:
+        """按作品清理版本。"""
+        return (
+            self.db.query(self.model)
+            .filter(self.model.novel_id == novel_id)
+            .delete(synchronize_session=False)
         )
 
 

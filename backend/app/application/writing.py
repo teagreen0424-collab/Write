@@ -4,6 +4,11 @@ import json
 from sqlalchemy.orm import Session
 
 from app.application.context import build_context
+from app.application.revisions import (
+    SOURCE_CONTINUE,
+    SOURCE_REWRITE,
+    update_chapter_with_revision,
+)
 from app.infrastructure.ai.llm_provider import LLMProvider
 from app.infrastructure.ai.prompts import (
     CONTINUE_SYSTEM,
@@ -133,8 +138,14 @@ def continue_chapter(
             full += chunk
             yield sse({"type": "token", "content": chunk})
 
-        repo.update(novel_id, chapter_id, content=chapter.content + full)
-        updated = repo.get(novel_id, chapter_id)
+        # 追加正文属于覆盖既有作者内容：先留旧版本，再与追加同一事务提交
+        updated = update_chapter_with_revision(
+            db,
+            novel_id,
+            chapter_id,
+            {"content": chapter.content + full},
+            SOURCE_CONTINUE,
+        )
         yield sse({"type": "done", "chapter": _chapter_dict(updated)})
     except Exception as exc:  # noqa: BLE001
         yield sse({"type": "error", "message": str(exc)})
@@ -187,8 +198,10 @@ def rewrite_passage(
             )
             return
 
-        repo.update(novel_id, chapter_id, content=new_content)
-        updated = repo.get(novel_id, chapter_id)
+        # 替换正文属于覆盖既有作者内容：先留旧版本，再与替换同一事务提交
+        updated = update_chapter_with_revision(
+            db, novel_id, chapter_id, {"content": new_content}, SOURCE_REWRITE
+        )
         yield sse({"type": "done", "chapter": _chapter_dict(updated)})
     except Exception as exc:  # noqa: BLE001
         yield sse({"type": "error", "message": str(exc)})

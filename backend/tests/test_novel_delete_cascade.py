@@ -1,4 +1,4 @@
-"""单元测试：删除作品时级联清理 8 张子表，避免孤儿数据残留。"""
+"""单元测试：删除作品时级联清理作品作用域下的子表（含章节历史版本），避免孤儿数据残留。"""
 import unittest
 
 from fastapi.testclient import TestClient
@@ -48,6 +48,7 @@ CHILD_MODELS = (
     models.Foreshadowing,
     models.Relationship,
     models.Chapter,
+    models.ChapterRevision,
     models.OutlineNode,
     models.MemoryChunk,
     models.Injection,
@@ -76,7 +77,7 @@ class NovelDeleteCascadeTest(unittest.TestCase):
         resp = client.delete(f"/api/v1/novels/{nid}")
         self.assertEqual(resp.status_code, 204)
 
-        # 8 张子表均无该 novel_id 残留
+        # 11 张子表均无该 novel_id 残留
         for model in CHILD_MODELS:
             self.assertEqual(_count(model, nid), 0)
 

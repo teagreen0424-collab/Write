@@ -1,5 +1,7 @@
 import type {
   Chapter,
+  ChapterRevision,
+  ChapterRevisionMeta,
   ChatMessage,
   ClicheResult,
   Conflict,
@@ -12,11 +14,17 @@ import type {
   OutlineNode,
   QualityCurve,
   Relationship,
+  RevisionSourceInput,
   SettleResult,
   Suggestion,
 } from './types'
 
 const BASE = '/api/v1'
+
+/** 章节更新载荷：revision_source 决定覆盖前快照的来源，不落库到 chapter 表 */
+export interface ChapterUpdatePayload extends Record<string, unknown> {
+  revision_source?: RevisionSourceInput
+}
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   const resp = await fetch(url, {
@@ -159,13 +167,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  updateChapter: (novelId: string, id: string, data: Record<string, unknown>) =>
+  updateChapter: (novelId: string, id: string, data: ChapterUpdatePayload) =>
     request<Chapter>(`${BASE}/novels/${novelId}/chapters/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
   deleteChapter: (novelId: string, id: string) =>
     request<void>(`${BASE}/novels/${novelId}/chapters/${id}`, { method: 'DELETE' }),
+
+  // 章节版本
+  listChapterRevisions: (novelId: string, chapterId: string) =>
+    request<ChapterRevisionMeta[]>(`${BASE}/novels/${novelId}/chapters/${chapterId}/revisions`),
+  getChapterRevision: (novelId: string, chapterId: string, revisionId: string) =>
+    request<ChapterRevision>(
+      `${BASE}/novels/${novelId}/chapters/${chapterId}/revisions/${revisionId}`,
+    ),
+  restoreChapterRevision: (novelId: string, chapterId: string, revisionId: string) =>
+    request<Chapter>(`${BASE}/novels/${novelId}/chapters/${chapterId}/revisions/${revisionId}/restore`, {
+      method: 'POST',
+    }),
 
   // 定稿沉淀
   settleChapter: (novelId: string, chapterId: string) =>

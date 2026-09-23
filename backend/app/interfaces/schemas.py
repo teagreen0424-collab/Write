@@ -3,7 +3,12 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domain.entities import ChapterStatus, ForeshadowStatus, OutlineLevel
+from app.domain.entities import (
+    ChapterStatus,
+    ForeshadowStatus,
+    OutlineLevel,
+    RevisionSource,
+)
 
 
 class ORMBase(BaseModel):
@@ -231,6 +236,9 @@ class ChapterUpdate(BaseModel):
     summary: Optional[str] = None
     directive: Optional[str] = None
     outline_node_id: Optional[str] = None
+    # 仅用于接口编排：决定覆盖前快照的来源，不落库到 chapter 表。
+    # 旧调用不传时保持兼容，默认按手工保存留档；只接受 manual_save / rewrite_apply。
+    revision_source: RevisionSource = RevisionSource.MANUAL_SAVE
 
 
 class ChapterRead(ORMBase):
@@ -247,6 +255,31 @@ class ChapterRead(ORMBase):
     directive: str
     created_at: str
     updated_at: str
+
+
+# ================= 章节版本（阶段八第一轮） =================
+class ChapterRevisionMeta(ORMBase):
+    """版本列表项：不返回完整正文，避免一次拉回整章历史。"""
+
+    id: str
+    novel_id: str
+    chapter_id: str
+    revision_no: int
+    source: str
+    title: str
+    directive: str
+    status: str
+    summary: str
+    tension_score: Optional[float]
+    drift_score: Optional[float]
+    word_count: int
+    created_at: str
+
+
+class ChapterRevisionRead(ChapterRevisionMeta):
+    """单个版本详情：包含完整正文。"""
+
+    content: str
 
 
 # ================= 写作 / 定稿 / 一致性 =================
