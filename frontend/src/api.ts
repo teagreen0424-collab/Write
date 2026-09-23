@@ -4,9 +4,12 @@ import type {
   ChapterRevisionMeta,
   ChatMessage,
   ClicheResult,
+  BookSummary,
   Conflict,
   Conversation,
   DeepCheckResult,
+  DeliveryPreflight,
+  DeliveryRequest,
   EntityRecord,
   ForeshadowingTracking,
   IdeaChatResult,
@@ -224,6 +227,22 @@ export const api = {
   // 导出
   exportMarkdown: (novelId: string) => fetchText(`${BASE}/novels/${novelId}/export/markdown`),
   exportTxt: (novelId: string) => fetchText(`${BASE}/novels/${novelId}/export/txt`),
+  getBookSummary: (novelId: string) =>
+    request<BookSummary>(`${BASE}/novels/${novelId}/book/summary`),
+  preflightExport: (novelId: string, data: DeliveryRequest) =>
+    request<DeliveryPreflight>(`${BASE}/novels/${novelId}/export/preflight`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+  downloadBookFile: async (novelId: string, data: DeliveryRequest): Promise<Blob> => {
+    const resp = await fetch(`${BASE}/novels/${novelId}/export/file`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+    })
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => null)
+      throw new Error(typeof body?.detail === 'string' ? body.detail : `HTTP ${resp.status}`)
+    }
+    return resp.blob()
+  },
 
   // 大纲
   listOutline: (novelId: string) =>

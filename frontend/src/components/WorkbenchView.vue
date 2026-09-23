@@ -19,6 +19,7 @@ import WritingPanel from './WritingPanel.vue'
 import OutlinePanel from './OutlinePanel.vue'
 import AutopilotPanel from './AutopilotPanel.vue'
 import ForeshadowingTracking from './ForeshadowingTracking.vue'
+import BookDeliveryPanel from './BookDeliveryPanel.vue'
 
 const props = defineProps<{ initialNovelId?: string | null }>()
 const emit = defineEmits<{ (e: 'back'): void }>()
@@ -27,7 +28,7 @@ const message = useMessage()
 
 const novels = ref<Novel[]>([])
 const novelId = ref<string | null>(null)
-const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'foreshadowing' | 'graph'>(
+const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'foreshadowing' | 'graph' | 'delivery'>(
   'settings',
 )
 const focusTarget = ref<{ type: EntityType; id: string } | null>(null)
@@ -119,6 +120,7 @@ onMounted(loadNovels)
         <n-tab-pane name="autopilot" tab="自动驾驶" />
         <n-tab-pane name="foreshadowing" tab="伏笔追踪" />
         <n-tab-pane name="graph" tab="知识图谱" />
+        <n-tab-pane name="delivery" tab="成品交付" />
       </n-tabs>
     </header>
 
@@ -146,6 +148,7 @@ onMounted(loadNovels)
         :novel-id="novelId ?? ''"
         @edit="onGraphEdit"
       />
+      <BookDeliveryPanel v-if="activeTab === 'delivery'" :novel-id="novelId ?? ''" />
     </main>
 
     <n-modal v-model:show="showCreate" preset="card" title="新建作品" style="width: 480px">

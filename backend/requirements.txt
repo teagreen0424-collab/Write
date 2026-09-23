@@ -6,3 +6,4 @@ pydantic-settings
 httpx  # LLM OpenAI 兼容协议 HTTP 调用
 fastembed  # 本地嵌入（bge-small-zh-v1.5，ONNX 无 PyTorch）
 numpy  # 向量余弦相似度
+python-docx  # 阶段八 DOCX 成品导出

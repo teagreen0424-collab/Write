@@ -1,5 +1,5 @@
 """接口层：请求/响应模型（Pydantic）。"""
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -280,6 +280,15 @@ class ChapterRevisionRead(ChapterRevisionMeta):
     """单个版本详情：包含完整正文。"""
 
     content: str
+
+
+# ================= 成品交付（阶段八第二轮） =================
+class DeliveryRequest(BaseModel):
+    format: Literal["markdown", "txt", "docx"] = "markdown"
+    scope: Literal["all", "volume", "chapters"] = "all"
+    volume_id: str = ""
+    chapter_ids: list[str] = Field(default_factory=list)
+    include_drafts: bool = False
 
 
 # ================= 写作 / 定稿 / 一致性 =================

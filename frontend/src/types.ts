@@ -220,6 +220,66 @@ export interface ChapterRevision extends ChapterRevisionMeta {
   content: string
 }
 
+// ================= 成品交付（阶段八第二轮） =================
+export type DeliveryFormat = 'markdown' | 'txt' | 'docx'
+export type DeliveryScope = 'all' | 'volume' | 'chapters'
+
+export interface DeliveryRequest {
+  format: DeliveryFormat
+  scope: DeliveryScope
+  volume_id: string
+  chapter_ids: string[]
+  include_drafts: boolean
+}
+
+export interface BookChapterSummary {
+  id: string
+  seq: number
+  title: string
+  status: 'draft' | 'finalized'
+  word_count: number
+  outline_node_id: string
+  volume_id: string
+  volume_title: string
+  tension_score: number | null
+  drift_score: number | null
+}
+
+export interface BookSummary {
+  novel_id: string
+  title: string
+  chapter_count: number
+  word_count: number
+  draft_count: number
+  finalized_count: number
+  volumes: { id: string; title: string }[]
+  chapters: BookChapterSummary[]
+}
+
+export interface DeliveryFinding {
+  id: string
+  seq?: number
+  title?: string
+  content?: string
+  status?: string
+}
+
+export interface DeliveryRuleConflict extends Conflict {
+  chapter_id: string
+  seq: number
+  title: string
+}
+
+export interface DeliveryPreflight {
+  chapter_count: number
+  word_count: number
+  draft_chapters: DeliveryFinding[]
+  unbound_chapters: DeliveryFinding[]
+  unresolved_foreshadowings: DeliveryFinding[]
+  rule_conflicts: DeliveryRuleConflict[]
+  ready: boolean
+}
+
 export const REVISION_SOURCE_LABELS: Record<RevisionSource, string> = {
   manual_save: '手工保存',
   rewrite_apply: '改写应用',

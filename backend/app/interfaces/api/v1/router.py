@@ -8,6 +8,7 @@ from app.interfaces.api.v1 import (
     chapters,
     consistency,
     conversations,
+    delivery,
     export,
     health,
     ideas,
@@ -26,6 +27,7 @@ api_router.include_router(chapters.router)
 api_router.include_router(consistency.router)
 api_router.include_router(quality.router)
 api_router.include_router(export.router)
+api_router.include_router(delivery.router)
 api_router.include_router(outline.router)
 api_router.include_router(autopilot.router)
 api_router.include_router(ideas.router)
