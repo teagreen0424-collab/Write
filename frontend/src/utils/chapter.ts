@@ -1,7 +1,9 @@
 import type { Chapter } from '../types'
 
 export function countCharacters(text: string): number {
-  return text.replace(/\s/g, '').length
+  // Python 后端用 str.split() 去空白、len() 数 Unicode 字符；JS 的 \s 和 length
+  // 分别会误判部分空白字符、把 emoji/扩展汉字计为 2，需显式对齐。
+  return Array.from(text.replace(/[\p{White_Space}\u001c-\u001f]/gu, '')).length
 }
 
 export function chapterLabel(chapter: Chapter): string {

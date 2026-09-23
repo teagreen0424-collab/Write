@@ -52,7 +52,7 @@ npm run build     # 类型检查 + 构建
 npm run preview   # 预览构建产物
 ```
 
-**前端没有测试脚本**，`npm test` 不存在，别去调它。阶段八第二轮自检后，后端测试共 108 项通过（原 68 项不得减少）；前端另用 `npm.cmd run build` 与 `npx.cmd vue-tsc --noEmit` 检查。
+**前端没有测试脚本**，`npm test` 不存在，别去调它。阶段八复核后，后端测试共 109 项通过（原 68 项不得减少）；前端另用 `npm.cmd run build` 与 `npx.cmd vue-tsc --noEmit` 检查。
 
 ## 核心设计原则（不可违背）
 

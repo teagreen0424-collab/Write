@@ -138,6 +138,9 @@ def _parse_sse_auto(gen) -> list[dict]:
 
 # ================= 1. 快照触发条件 =================
 class SnapshotTriggerTest(RevisionTestBase):
+    def test_word_count_uses_unicode_characters_and_python_whitespace(self):
+        self.assertEqual(revisions_uc.count_words("吴迪😀𠀀\u0085\u001c下一章"), 7)
+
     def test_manual_content_change_saves_previous_version(self):
         chapter = self._chapter()
 
