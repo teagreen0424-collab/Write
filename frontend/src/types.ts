@@ -471,3 +471,17 @@ export interface DeepCheckResult {
   chunks_skipped: number
   truncated: boolean
 }
+
+export interface OutlineCheckIssue {
+  kind: 'missing' | 'changed' | 'contradiction'
+  severity: 'high' | 'medium' | 'low'
+  outline_point: string
+  excerpt: string
+  reason: string
+}
+
+export interface OutlineCheckResult {
+  issues: OutlineCheckIssue[]
+  truncated: boolean
+  outline_title: string
+}

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.application import revisions as revisions_uc
 from app.application import settle as settle_uc
 from app.application import writing as writing_uc
+from app.application import outline_check as outline_check_uc
 from app.infrastructure.db import SessionLocal, get_db
 from app.infrastructure.repository import ChapterRepo, ChapterRevisionRepo
 from app.interfaces import schemas
@@ -98,6 +99,15 @@ def write_chapter(novel_id: str, payload: schemas.WriteChapterRequest):
             previous_chapter_id=payload.previous_chapter_id,
         )
     )
+
+
+@router.post("/{chapter_id}/outline-check", response_model=schemas.OutlineCheckResult)
+def check_chapter_outline(
+    novel_id: str, chapter_id: str, payload: schemas.OutlineCheckRequest,
+    db: Session = Depends(get_db),
+):
+    """作者按需检查本章与绑定大纲；单次模型调用，不落库。"""
+    return outline_check_uc.check_chapter_outline(db, novel_id, chapter_id, payload.content)
 
 
 @router.post("/{chapter_id}/continue")

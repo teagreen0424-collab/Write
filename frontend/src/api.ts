@@ -15,6 +15,7 @@ import type {
   ForeshadowingTracking,
   IdeaChatResult,
   Novel,
+  OutlineCheckResult,
   OutlineNode,
   OutlineApplyResult,
   OutlineVolumeDraft,
@@ -212,6 +213,11 @@ export const api = {
     }),
   checkConsistencyDeep: (novelId: string, content: string) =>
     request<DeepCheckResult>(`${BASE}/novels/${novelId}/consistency/deep`, {
+      method: 'POST',
+      body: JSON.stringify({ content }),
+    }),
+  checkChapterOutline: (novelId: string, chapterId: string, content: string) =>
+    request<OutlineCheckResult>(`${BASE}/novels/${novelId}/chapters/${chapterId}/outline-check`, {
       method: 'POST',
       body: JSON.stringify({ content }),
     }),

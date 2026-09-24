@@ -167,7 +167,10 @@ class WritingUseCaseTest(unittest.TestCase):
         chapters = repos.ChapterRepo(self.db).list(self.novel_id)
         self.assertEqual(len(chapters), 1)
         self.assertEqual(chapters[0].outline_node_id, outline.id)
-        self.assertIn("本章必须出现的剧情要点", stream.call_args.args[0][1]["content"])
+        prompt = stream.call_args.args[0][1]["content"]
+        self.assertIn("【本章大纲目标（尚未发生，必须推进）】", prompt)
+        self.assertIn("本章必须出现的剧情要点", prompt)
+        self.assertLess(prompt.index("【本章大纲目标"), prompt.index("请开始撰写本章正文"))
 
     def test_write_route_rejects_non_chapter_outline_node(self):
         volume = repos.OutlineRepo(self.db).create(
@@ -200,6 +203,29 @@ class WritingUseCaseTest(unittest.TestCase):
         self.assertEqual(len(chapters), 1)
         self.assertEqual(chapters[0].outline_node_id, "")
 
+    def test_long_directive_does_not_hide_selected_outline_target(self):
+        volume = repos.OutlineRepo(self.db).create(
+            self.novel_id, title="第一卷", level="volume"
+        )
+        outline = repos.OutlineRepo(self.db).create(
+            self.novel_id, title="第二章", level="chapter", parent_id=volume.id,
+            summary="落地后必须闻到消毒水混着铁锈的气味",
+        )
+        previous = repos.ChapterRepo(self.db).create(
+            self.novel_id, seq=1, title="第一章", content="上一章结尾还挂在树上", status="draft"
+        )
+        with patch.object(writing_uc.llm, "stream_complete", return_value=iter(["正文"])) as stream:
+            events = _parse_sse(writing_uc.write_chapter(
+                self.db, self.novel_id, directive="长指令" * 1200,
+                outline_node_id=outline.id, previous_chapter_id=previous.id,
+            ))
+
+        self.assertEqual(events[-1]["type"], "done")
+        prompt = stream.call_args.args[0][1]["content"]
+        self.assertIn("落地后必须闻到消毒水混着铁锈的气味", prompt)
+        self.assertLess(prompt.index("上一章结尾还挂在树上"), prompt.index("【本章大纲目标"))
+        self.assertLess(prompt.index("【本章大纲目标"), prompt.index("【续章硬约束】"))
+
     def test_write_next_chapter_includes_continuity_context(self):
         volume = repos.OutlineRepo(self.db).create(
             self.novel_id, title="第一卷", level="volume"
@@ -212,7 +238,7 @@ class WritingUseCaseTest(unittest.TestCase):
             self.novel_id,
             seq=1,
             title="雨夜相遇",
-            content="章首身份：林越是外卖员。" + "中段经历" * 1000 + "上一章结尾线索",
+            content="章首身份：林越是外卖员。" + "中段经历" * 2500 + "上一章结尾线索",
             status="draft",
         )
         with (
@@ -232,10 +258,16 @@ class WritingUseCaseTest(unittest.TestCase):
         self.assertIn("必须把给出的上一章视为已经发生", messages[0]["content"])
         self.assertIn("【必须直接承接的上一章】", messages[1]["content"])
         self.assertIn("章首身份：林越是外卖员", messages[1]["content"])
+        self.assertIn("上一章中段已省略", messages[1]["content"])
         self.assertIn("上一章结尾线索", messages[1]["content"])
         self.assertIn("不得再次写成第一次", messages[1]["content"])
         self.assertIn("未沉淀，以正文为准", messages[1]["content"])
         self.assertIn("落地后有消毒水混着铁锈的气味", messages[1]["content"])
+        self.assertLess(
+            messages[1]["content"].index("上一章结尾线索"),
+            messages[1]["content"].index("【本章大纲目标"),
+        )
+        self.assertIn("具体人物、物件、气味、数字、地点及因果线索不可随意替换", messages[1]["content"])
         self.assertIn("章级大纲的具体场面与上一章已发生事实冲突", messages[0]["content"])
         chapters = repos.ChapterRepo(self.db).list(self.novel_id)
         self.assertEqual(len(chapters), 2)

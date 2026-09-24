@@ -21,6 +21,7 @@ import type {
   ClicheResult,
   Conflict,
   DeepCheckConflict,
+  OutlineCheckResult,
   OutlineNode,
   Segment,
   Suggestion,
@@ -54,6 +55,8 @@ const deepMeta = ref<{
   truncated: boolean
 } | null>(null)
 const deepLoading = ref(false)
+const outlineCheckResult = ref<OutlineCheckResult | null>(null)
+const outlineCheckLoading = ref(false)
 
 // 改写预览（不落库，确认后才应用）
 const showPreview = ref(false)
@@ -80,6 +83,12 @@ const REWRITE_INTENT_OPTIONS = [
   { label: '去 AI 味', value: '去AI味' },
   { label: '压缩', value: '压缩' },
 ]
+
+const OUTLINE_ISSUE_LABEL = {
+  missing: '遗漏',
+  changed: '替换',
+  contradiction: '矛盾',
+}
 
 const selectedChapter = computed(() => chapters.value.find((c) => c.id === selectedId.value) ?? null)
 const isLatestChapter = computed(
@@ -173,6 +182,7 @@ function clearMarks() {
   cliche.value = null
   deepConflicts.value = []
   deepMeta.value = null
+  outlineCheckResult.value = null
 }
 
 function selectChapter(c: Chapter, force = false) {
@@ -422,6 +432,28 @@ async function doDeepCheck() {
   }
 }
 
+// 按需检查当前编辑稿与绑定大纲的契合度；不保存、不修改正文。
+async function doOutlineCheck() {
+  if (outlineCheckLoading.value || !selectedId.value || !selectedChapter.value?.outline_node_id || !content.value.trim()) return
+  const chapterId = selectedId.value
+  const checkedContent = content.value
+  outlineCheckLoading.value = true
+  outlineCheckResult.value = null
+  try {
+    const result = await api.checkChapterOutline(props.novelId, chapterId, checkedContent)
+    if (selectedId.value !== chapterId || content.value !== checkedContent) return
+    outlineCheckResult.value = result
+    if (result.issues.length) message.warning(`大纲契合检查发现 ${result.issues.length} 处待核对项`)
+    else message.success('未发现明显大纲偏差，仍请人工校对')
+  } catch (e) {
+    if (selectedId.value === chapterId && content.value === checkedContent) {
+      message.error((e as Error).message)
+    }
+  } finally {
+    outlineCheckLoading.value = false
+  }
+}
+
 // 点击深度检查结果，滚动定位到正文片段
 function locateExcerpt(excerpt: string) {
   if (!excerpt) return
@@ -553,6 +585,7 @@ watch(
 )
 
 watch(isDirty, (dirty) => emit('dirty-change', dirty), { immediate: true })
+watch(content, () => { outlineCheckResult.value = null })
 
 onMounted(() => window.addEventListener('beforeunload', handleBeforeUnload))
 onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnload))
@@ -626,6 +659,13 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
             深度检查
           </n-button>
           <span class="cost-hint">按有效分块调用模型，最多 8 次</span>
+          <n-button
+            :disabled="!selectedId || !selectedChapter?.outline_node_id || !content.trim()"
+            :loading="outlineCheckLoading"
+            title="按需调用模型 1 次；仅提示与绑定大纲的偏差，不修改正文"
+            @click="doOutlineCheck"
+          >大纲契合检查</n-button>
+          <span class="cost-hint">本项调用模型 1 次</span>
           <n-button type="success" :disabled="!selectedId" @click="doSettle">定稿沉淀</n-button>
         </div>
         <div class="btn-row version-actions">
@@ -699,7 +739,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         </div>
       </div>
 
-      <div v-if="conflicts.length || deepMeta" class="result-cols">
+      <div v-if="conflicts.length || deepMeta || outlineCheckResult" class="result-cols">
         <div v-if="conflicts.length" class="result-col result-conflicts">
           <div class="result-title">规则层一致性冲突</div>
           <n-list>
@@ -730,6 +770,28 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
                 </div>
                 <div class="deep-excerpt">{{ d.excerpt }}</div>
                 <div class="deep-reason">依据：{{ d.reason }}</div>
+              </div>
+            </n-list-item>
+          </n-list>
+        </div>
+
+        <div v-if="outlineCheckResult" class="result-col result-outline">
+          <div class="result-title">
+            大纲契合检查 · {{ outlineCheckResult.outline_title }}
+            <n-tag v-if="outlineCheckResult.truncated" type="warning" size="tiny">仅检查章首与章尾</n-tag>
+          </div>
+          <n-empty v-if="!outlineCheckResult.issues.length" description="未发现明显偏差，仍需人工校对" />
+          <n-list v-else>
+            <n-list-item v-for="(issue, i) in outlineCheckResult.issues" :key="i">
+              <div class="deep-item" @click="locateExcerpt(issue.excerpt)">
+                <div class="deep-head">
+                  <n-tag size="small" :type="issue.severity === 'high' ? 'error' : 'warning'">
+                    {{ OUTLINE_ISSUE_LABEL[issue.kind] }}
+                  </n-tag>
+                  <span>{{ issue.outline_point }}</span>
+                </div>
+                <div v-if="issue.excerpt" class="deep-excerpt">正文：{{ issue.excerpt }}</div>
+                <div class="deep-reason">{{ issue.reason }}</div>
               </div>
             </n-list-item>
           </n-list>
@@ -1049,13 +1111,14 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 }
 .result-cols {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   margin-top: 12px;
   align-items: flex-start;
 }
 .result-col {
   flex: 1;
-  min-width: 0;
+  min-width: 280px;
   border-radius: 4px;
   padding: 12px;
   max-height: 240px;
@@ -1067,6 +1130,9 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 .result-deep {
   border: 1px solid #c0d8f0;
 }
+.result-outline {
+  border: 1px solid #a9d9ba;
+}
 .result-title {
   font-weight: 600;
   margin-bottom: 8px;
@@ -1076,6 +1142,9 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 }
 .result-deep .result-title {
   color: #2080f0;
+}
+.result-outline .result-title {
+  color: #18a058;
 }
 .deep-meta {
   color: #999;

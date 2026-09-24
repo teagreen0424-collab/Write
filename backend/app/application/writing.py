@@ -60,6 +60,20 @@ def _recent_history(chapters: list, previous) -> str:
     return "\n".join(lines)
 
 
+def _outline_contract(outline) -> str:
+    """把本章大纲放在正文前的临近位置，避免被长前情冲淡。"""
+    if outline is None:
+        return ""
+    summary = (outline.summary or "").strip()
+    return (
+        "【本章大纲目标（尚未发生，必须推进）】\n"
+        f"标题：{outline.title}\n"
+        f"概要：{summary or '未填写'}\n"
+        "概要中的具体人物、物件、气味、数字、地点及因果线索不可随意替换。"
+        "若与上一章已发生事实冲突，先保留已发生事实，再用合理过渡推进大纲目标。"
+    )
+
+
 def write_chapter(
     db: Session,
     novel_id: str,
@@ -83,6 +97,7 @@ def write_chapter(
                 return
         seq = repo.next_seq(novel_id)
         position = f"第 {seq} 章" + (f"《{title}》" if title else "")
+        outline = None
         if outline_node_id:
             outline = OutlineRepo(db).get(novel_id, outline_node_id)
             if outline.level != "chapter":
@@ -90,9 +105,10 @@ def write_chapter(
             position += f"\n章级大纲：《{outline.title}》"
             if outline.summary:
                 position += f"\n本章剧情要点：{outline.summary}"
+        outline_contract = _outline_contract(outline)
         context = build_context(db, novel_id, directive, position)
         system_prompt = WRITE_SYSTEM
-        user_prompt = f"{context}\n\n请开始撰写本章正文："
+        user_prompt = f"{context}\n\n{outline_contract}\n\n请开始撰写本章正文："
         if previous_chapter_id:
             previous = repo.get(novel_id, previous_chapter_id)
             chapters = repo.list(novel_id)
@@ -106,6 +122,7 @@ def write_chapter(
                 previous_title=previous.title or f"第{previous.seq}章",
                 previous_summary=(previous.summary or "未沉淀，以正文为准"),
                 previous_content=_chapter_context(previous.content),
+                outline_contract=outline_contract,
             )
         messages = [
             {"role": "system", "content": system_prompt},

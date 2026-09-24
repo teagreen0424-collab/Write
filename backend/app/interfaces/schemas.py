@@ -299,6 +299,24 @@ class WriteChapterRequest(BaseModel):
     previous_chapter_id: str = ""
 
 
+class OutlineCheckRequest(BaseModel):
+    content: Optional[str] = None
+
+
+class OutlineCheckIssue(BaseModel):
+    kind: Literal["missing", "changed", "contradiction"]
+    severity: Literal["high", "medium", "low"]
+    outline_point: str = Field(..., min_length=1, max_length=500)
+    excerpt: str = Field(default="", max_length=300)
+    reason: str = Field(..., min_length=1, max_length=800)
+
+
+class OutlineCheckResult(BaseModel):
+    issues: list[OutlineCheckIssue] = Field(default_factory=list, max_length=6)
+    truncated: bool = False
+    outline_title: str = ""
+
+
 class ContinueChapterRequest(BaseModel):
     directive: str = ""
 
