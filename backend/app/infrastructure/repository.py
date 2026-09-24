@@ -44,6 +44,9 @@ class NovelRepo:
 
     def delete(self, novel_id: str):
         obj = self.get(novel_id)
+        self.db.query(models.ChatAction).filter(
+            models.ChatAction.novel_id == novel_id
+        ).delete(synchronize_session=False)
         # 先删作品下的会话及其消息（message 无 novel_id，需按 conversation_id 删）
         conv_ids = [
             c.id
@@ -52,6 +55,15 @@ class NovelRepo:
             .all()
         ]
         if conv_ids:
+            message_ids = [
+                m.id for m in self.db.query(models.Message.id).filter(
+                    models.Message.conversation_id.in_(conv_ids)
+                ).all()
+            ]
+            if message_ids:
+                self.db.query(models.ChatAction).filter(
+                    models.ChatAction.message_id.in_(message_ids)
+                ).delete(synchronize_session=False)
             self.db.query(models.Message).filter(
                 models.Message.conversation_id.in_(conv_ids)
             ).delete(synchronize_session=False)
@@ -360,12 +372,34 @@ class OutlineRepo:
 
     def list_all(self, novel_id: str):
         self._ensure_novel(novel_id)
-        return (
+        nodes = (
             self.db.query(self.model)
             .filter(self.model.novel_id == novel_id)
-            .order_by(self.model.sort_order)
             .all()
         )
+        children: dict[str, list] = {}
+        for node in nodes:
+            children.setdefault(node.parent_id, []).append(node)
+        for siblings in children.values():
+            siblings.sort(key=lambda node: (node.sort_order, node.created_at, node.id))
+
+        ordered = []
+        visited: set[str] = set()
+
+        def visit(node):
+            if node.id in visited:
+                return
+            visited.add(node.id)
+            ordered.append(node)
+            for child in children.get(node.id, []):
+                visit(child)
+
+        for root in children.get("", []):
+            visit(root)
+        # 兼容旧数据中的孤立节点，同时防止异常父链导致节点从列表消失。
+        for node in sorted(nodes, key=lambda item: (item.sort_order, item.created_at, item.id)):
+            visit(node)
+        return ordered
 
     def children(self, novel_id: str, parent_id: str = ""):
         self._ensure_novel(novel_id)
@@ -505,6 +539,8 @@ class ConversationRepo:
     def update(self, conversation_id: str, **data):
         obj = self.get(conversation_id)
         if data.get("novel_id") is not None:
+            if obj.novel_id and data["novel_id"] != obj.novel_id:
+                raise HTTPException(status_code=400, detail="已绑定作品的会话不能移动到其他作品")
             self._ensure_novel(data["novel_id"])
         for k, v in data.items():
             if v is not None:
@@ -515,6 +551,15 @@ class ConversationRepo:
 
     def delete(self, conversation_id: str):
         obj = self.get(conversation_id)
+        message_ids = [
+            m.id for m in self.db.query(models.Message.id).filter(
+                models.Message.conversation_id == conversation_id
+            ).all()
+        ]
+        if message_ids:
+            self.db.query(models.ChatAction).filter(
+                models.ChatAction.message_id.in_(message_ids)
+            ).delete(synchronize_session=False)
         self.db.query(models.Message).filter(
             models.Message.conversation_id == conversation_id
         ).delete(synchronize_session=False)
@@ -552,7 +597,7 @@ class ConversationRepo:
         )
         if not obj:
             raise HTTPException(status_code=404, detail="消息不存在")
-        obj.meta = meta
+        obj.meta = {**(obj.meta or {}), **(meta or {})}
         self.db.commit()
         self.db.refresh(obj)
         return obj

@@ -1,20 +1,36 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { NButton, NTag, useMessage } from 'naive-ui'
 import { api } from '../api'
-import type { ChatMessage } from '../types'
+import type { Chapter, ChatMessage, OutlineApplyResult } from '../types'
 import ApplySuggestionCard from './ApplySuggestionCard.vue'
+import OutlinePlanCard from './OutlinePlanCard.vue'
+import ChapterWriteCard from './ChapterWriteCard.vue'
 
 const props = defineProps<{ message: ChatMessage; novelId: string | null }>()
+const emit = defineEmits<{
+  (e: 'open-outline', novelId: string): void
+  (e: 'open-writing', novelId: string, chapterId: string): void
+}>()
 
 const toast = useMessage()
 const showApply = ref(false)
+const showSettings = ref(false)
+const showOutline = ref(false)
+const showWriting = ref(false)
+const outlineResult = ref<OutlineApplyResult | null>(null)
+const chapterResult = ref<{ chapter_id: string; title: string } | null>(null)
+const settingsApplied = ref(false)
+const outlineDeleted = ref(false)
+const chapterDeleted = ref(false)
 const appliedInfo = ref<Record<string, unknown> | null>(
   props.message.meta && (props.message.meta as any).applied ? props.message.meta : null,
 )
 
 const isAssistant = computed(() => props.message.role === 'assistant')
-const canApply = computed(() => isAssistant.value && !!props.novelId)
+const canApply = computed(
+  () => isAssistant.value && !!props.novelId && !props.message.id.startsWith('local-'),
+)
 
 interface InlinePart {
   text: string
@@ -63,6 +79,50 @@ async function onApplied(summary: { type: string; action: string; id: string }[]
     toast.error((e as Error).message)
   }
 }
+
+watch(
+  () => [props.novelId, props.message.id],
+  async () => {
+    outlineResult.value = null
+    chapterResult.value = null
+    settingsApplied.value = false
+    outlineDeleted.value = false
+    chapterDeleted.value = false
+    if (!props.novelId || !isAssistant.value || props.message.id.startsWith('local-')) return
+    try {
+      const actions = await api.listMessageActions(props.message.conversation_id, props.message.id)
+      const outline = actions.find((action) => action.action_type === 'outline')
+      if (outline?.result_summary?.volume_id) {
+        outlineResult.value = outline.result_summary as unknown as OutlineApplyResult
+        outlineDeleted.value = outline.target_deleted
+      }
+      const chapter = actions.find((action) => action.action_type === 'chapter')
+      if (chapter?.result_summary?.chapter_id) {
+        chapterResult.value = chapter.result_summary as unknown as { chapter_id: string; title: string }
+        chapterDeleted.value = chapter.target_deleted
+      }
+      settingsApplied.value = actions.some((action) => action.action_type === 'settings')
+    } catch {
+      // 动作标签读取失败不影响消息展示。
+    }
+  },
+  { immediate: true },
+)
+
+function onOutlineApplied(result: OutlineApplyResult) {
+  outlineResult.value = result
+  showOutline.value = false
+}
+
+function onChapterApplied(chapter: Chapter) {
+  chapterResult.value = { chapter_id: chapter.id, title: chapter.title }
+  showWriting.value = false
+}
+
+function onSettingsApplied() {
+  settingsApplied.value = true
+  showSettings.value = false
+}
 </script>
 
 <template>
@@ -99,6 +159,37 @@ async function onApplied(summary: { type: string; action: string; id: string }[]
         >
           应用到作品
         </n-button>
+        <n-button
+          v-if="outlineResult && novelId"
+          size="tiny"
+          quaternary
+          :disabled="outlineDeleted"
+          @click="emit('open-outline', novelId)"
+        >{{ outlineDeleted ? '大纲目标已删除' : '大纲已落地 · 查看' }}</n-button>
+        <n-button
+          v-else
+          size="tiny"
+          quaternary
+          :disabled="!canApply"
+          :title="canApply ? '将这条讨论生成一卷可编辑大纲预览' : '先转为作品'"
+          @click="showOutline = !showOutline"
+        >生成大纲</n-button>
+        <n-button
+          v-if="chapterResult && novelId"
+          size="tiny" quaternary :disabled="chapterDeleted"
+          @click="emit('open-writing', novelId, chapterResult.chapter_id)"
+        >{{ chapterDeleted ? '章节目标已删除' : '章节已落地 · 查看' }}</n-button>
+        <n-button
+          v-else size="tiny" quaternary :disabled="!canApply"
+          :title="canApply ? '确认指令后生成一章草稿' : '先转为作品'"
+          @click="showWriting = !showWriting"
+        >写这一章</n-button>
+        <n-tag v-if="settingsApplied" type="success" size="small">设定已提炼</n-tag>
+        <n-button
+          v-else size="tiny" quaternary :disabled="!canApply"
+          :title="canApply ? '提炼人物、世界观与伏笔草稿' : '先转为作品'"
+          @click="showSettings = !showSettings"
+        >提炼设定</n-button>
       </div>
     </div>
     <ApplySuggestionCard
@@ -107,6 +198,34 @@ async function onApplied(summary: { type: string; action: string; id: string }[]
       :text="message.content"
       @applied="onApplied"
       @cancel="showApply = false"
+    />
+    <div v-if="showOutline && canApply" class="outline-card">
+      <OutlinePlanCard
+        :novel-id="novelId!"
+        :conversation-id="message.conversation_id"
+        :message-id="message.id"
+        @applied="onOutlineApplied"
+        @cancel="showOutline = false"
+      />
+    </div>
+    <ChapterWriteCard
+      v-if="showWriting && canApply"
+      :novel-id="novelId!"
+      :conversation-id="message.conversation_id"
+      :message-id="message.id"
+      :source-text="message.content"
+      @applied="onChapterApplied"
+      @cancel="showWriting = false"
+    />
+    <ApplySuggestionCard
+      v-if="showSettings && canApply"
+      :novel-id="novelId!"
+      :text="message.content"
+      :conversation-id="message.conversation_id"
+      :message-id="message.id"
+      settings-only
+      @applied="onSettingsApplied"
+      @cancel="showSettings = false"
     />
   </div>
 </template>
@@ -155,6 +274,14 @@ async function onApplied(summary: { type: string; action: string; id: string }[]
 }
 .strong {
   font-weight: 700;
+}
+.outline-card {
+  width: min(680px, 90vw);
+  padding: 12px;
+  background: #fafafa;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  margin-top: 8px;
 }
 .footer {
   margin-top: 6px;

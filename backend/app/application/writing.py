@@ -2,6 +2,7 @@
 import json
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.application.context import build_context
 from app.application.revisions import (
@@ -18,7 +19,8 @@ from app.infrastructure.ai.prompts import (
     REWRITE_SYSTEM,
     WRITE_SYSTEM,
 )
-from app.infrastructure.repository import ChapterRepo
+from app.infrastructure.repository import ChapterRepo, OutlineRepo
+from app.infrastructure import models
 from app.interfaces import schemas
 
 llm = LLMProvider()
@@ -65,12 +67,29 @@ def write_chapter(
     title: str = "",
     outline_node_id: str = "",
     previous_chapter_id: str = "",
+    action_message_id: str = "",
+    expected_latest_id: str = "",
 ):
     """新建一章：可承接指定上一章结尾，流式输出并落库为 draft。"""
     try:
         repo = ChapterRepo(db)
+        if action_message_id:
+            existing = db.query(models.ChatAction).filter(
+                models.ChatAction.message_id == action_message_id,
+                models.ChatAction.action_type == "chapter",
+            ).first()
+            if existing:
+                yield sse({"type": "done", "chapter": _chapter_dict(repo.get(novel_id, existing.result_id))})
+                return
         seq = repo.next_seq(novel_id)
         position = f"第 {seq} 章" + (f"《{title}》" if title else "")
+        if outline_node_id:
+            outline = OutlineRepo(db).get(novel_id, outline_node_id)
+            if outline.level != "chapter":
+                raise ValueError("只能绑定章级大纲节点")
+            position += f"\n章级大纲：《{outline.title}》"
+            if outline.summary:
+                position += f"\n本章剧情要点：{outline.summary}"
         context = build_context(db, novel_id, directive, position)
         system_prompt = WRITE_SYSTEM
         user_prompt = f"{context}\n\n请开始撰写本章正文："
@@ -98,17 +117,43 @@ def write_chapter(
             full += chunk
             yield sse({"type": "token", "content": chunk})
 
-        chapter = repo.create(
-            novel_id,
-            seq=seq,
-            title=title or f"第{seq}章",
-            content=full,
-            status="draft",
-            directive=directive,
-            outline_node_id=outline_node_id,
+        data = dict(
+            seq=seq, title=title or f"第{seq}章", content=full,
+            status="draft", directive=directive, outline_node_id=outline_node_id,
         )
+        if action_message_id:
+            latest = repo.list(novel_id)
+            current_latest_id = latest[-1].id if latest else ""
+            if current_latest_id != expected_latest_id:
+                raise ValueError("生成期间最新章节发生变化，请重新确认后再写")
+            try:
+                action = models.ChatAction(
+                    message_id=action_message_id, novel_id=novel_id,
+                    action_type="chapter", status="done", result_id="", result_summary={},
+                )
+                db.add(action)
+                db.flush()  # 占用唯一键后才建章，重试不会多写一章。
+                chapter = models.Chapter(novel_id=novel_id, **data)
+                db.add(chapter)
+                db.flush()
+                action.result_id = chapter.id
+                action.result_summary = {"chapter_id": chapter.id, "title": chapter.title}
+                db.commit()
+                db.refresh(chapter)
+            except IntegrityError:
+                db.rollback()
+                existing = db.query(models.ChatAction).filter(
+                    models.ChatAction.message_id == action_message_id,
+                    models.ChatAction.action_type == "chapter",
+                ).first()
+                if not existing:
+                    raise
+                chapter = repo.get(novel_id, existing.result_id)
+        else:
+            chapter = repo.create(novel_id, **data)
         yield sse({"type": "done", "chapter": _chapter_dict(chapter)})
     except Exception as exc:  # noqa: BLE001
+        db.rollback()
         yield sse({"type": "error", "message": str(exc)})
 
 

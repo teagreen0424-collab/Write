@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.infrastructure.db import get_db
 from app.infrastructure.repository import RelationshipRepo
+from app.application import setting_index
 from app.interfaces import schemas
 
 router = APIRouter(prefix="/novels/{novel_id}/relationships", tags=["relationship"])
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/novels/{novel_id}/relationships", tags=["relationshi
 def create_relationship(
     novel_id: str, payload: schemas.RelationshipCreate, db: Session = Depends(get_db)
 ):
-    return RelationshipRepo(db).create(novel_id, **payload.model_dump())
+    return setting_index.create_setting(db, RelationshipRepo, novel_id, **payload.model_dump())
 
 
 @router.get("", response_model=list[schemas.RelationshipRead])
@@ -23,4 +24,4 @@ def list_relationships(novel_id: str, db: Session = Depends(get_db)):
 
 @router.delete("/{relationship_id}", status_code=204)
 def delete_relationship(novel_id: str, relationship_id: str, db: Session = Depends(get_db)):
-    RelationshipRepo(db).delete(novel_id, relationship_id)
+    setting_index.delete_setting(db, RelationshipRepo, novel_id, relationship_id)

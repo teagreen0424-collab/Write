@@ -55,6 +55,38 @@ class OutlineApiTest(unittest.TestCase):
         nodes = {n["id"]: n for n in client.get(base).json()}
         self.assertLess(nodes[c2["id"]]["sort_order"], nodes[c1["id"]]["sort_order"])
 
+    def test_outline_list_follows_reading_order_across_acts(self):
+        nid = self._create_novel()
+        base = f"/api/v1/novels/{nid}/outline"
+
+        vol = client.post(base, json={"title": "第一卷", "level": "volume"}).json()
+        act1 = client.post(base, json={"title": "第一幕", "level": "act", "parent_id": vol["id"]}).json()
+        act2 = client.post(base, json={"title": "第二幕", "level": "act", "parent_id": vol["id"]}).json()
+        chapters = []
+        for act in (act1, act2):
+            for index in range(2):
+                chapter = client.post(base, json={
+                    "title": f"{act['title']}第{index + 1}章",
+                    "level": "chapter",
+                    "parent_id": act["id"],
+                }).json()
+                chapters.append(chapter)
+
+        r = client.get(base)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(
+            [node["id"] for node in r.json()],
+            [vol["id"], act1["id"], chapters[0]["id"], chapters[1]["id"],
+             act2["id"], chapters[2]["id"], chapters[3]["id"]],
+        )
+
+        r = client.post(f"{base}/reorder", json={"ordered_ids": [act2["id"], act1["id"]]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(
+            [node["id"] for node in client.get(base).json() if node["level"] == "chapter"],
+            [chapters[2]["id"], chapters[3]["id"], chapters[0]["id"], chapters[1]["id"]],
+        )
+
     def test_hierarchy_validation(self):
         nid = self._create_novel()
         base = f"/api/v1/novels/{nid}/outline"

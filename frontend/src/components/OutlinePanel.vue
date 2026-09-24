@@ -13,6 +13,7 @@ import {
 } from 'naive-ui'
 import { api } from '../api'
 import type { OutlineLevel, OutlineNode } from '../types'
+import OutlinePlanCard from './OutlinePlanCard.vue'
 
 const props = defineProps<{ novelId: string; refreshKey?: number }>()
 
@@ -20,6 +21,7 @@ const message = useMessage()
 
 const nodes = ref<OutlineNode[]>([])
 const showModal = ref(false)
+const showPlanner = ref(false)
 const editingId = ref<string | null>(null)
 const form = ref({ title: '', level: 'chapter' as OutlineLevel, summary: '', parent_id: '' })
 
@@ -111,6 +113,11 @@ async function move(node: OutlineNode, dir: -1 | 1) {
   await load()
 }
 
+async function onPlanApplied() {
+  showPlanner.value = false
+  await load()
+}
+
 watch(
   () => props.novelId,
   () => {
@@ -131,9 +138,19 @@ watch(
   <div class="outline-panel">
     <div class="toolbar">
       <n-button size="small" type="primary" @click="openCreate('', 'volume')">新增卷</n-button>
+      <n-button size="small" @click="showPlanner = true">AI 生成一卷</n-button>
     </div>
 
-    <n-empty v-if="!nodes.length" description="暂无大纲，请先新增卷" />
+    <n-empty v-if="!nodes.length" description="暂无大纲，请新增卷或生成一卷预览" />
+
+    <n-modal v-model:show="showPlanner" preset="card" title="AI 大纲预览" style="width: min(800px, 94vw)">
+      <OutlinePlanCard
+        v-if="showPlanner"
+        :novel-id="novelId"
+        @applied="onPlanApplied"
+        @cancel="showPlanner = false"
+      />
+    </n-modal>
 
     <div v-for="vol in volumes" :key="vol.id" class="node volume">
       <div class="row">

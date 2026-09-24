@@ -3,11 +3,22 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.domain.entities import OutlineLevel
+from app.application import outline_plan
 from app.infrastructure.db import get_db
 from app.infrastructure.repository import OutlineRepo
 from app.interfaces import schemas
 
 router = APIRouter(prefix="/novels/{novel_id}/outline", tags=["outline"])
+
+
+@router.post("/preview", response_model=schemas.OutlineVolumeDraft)
+def preview_outline(novel_id: str, payload: schemas.OutlinePreviewRequest, db: Session = Depends(get_db)):
+    return outline_plan.preview_outline(db, novel_id, payload.source_text)
+
+
+@router.post("/apply")
+def apply_outline(novel_id: str, payload: schemas.OutlineApplyRequest, db: Session = Depends(get_db)):
+    return outline_plan.apply_outline(db, novel_id, payload.plan)
 
 
 def _validate_parent(db: Session, novel_id: str, level: str, parent_id: str) -> None:

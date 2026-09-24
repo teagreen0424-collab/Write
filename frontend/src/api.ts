@@ -1,5 +1,6 @@
 import type {
   Chapter,
+  ChatAction,
   ChapterRevision,
   ChapterRevisionMeta,
   ChatMessage,
@@ -15,6 +16,8 @@ import type {
   IdeaChatResult,
   Novel,
   OutlineNode,
+  OutlineApplyResult,
+  OutlineVolumeDraft,
   QualityCurve,
   Relationship,
   RevisionSourceInput,
@@ -264,6 +267,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ordered_ids: orderedIds }),
     }),
+  previewOutline: (novelId: string, sourceText: string) =>
+    request<OutlineVolumeDraft>(`${BASE}/novels/${novelId}/outline/preview`, {
+      method: 'POST', body: JSON.stringify({ source_text: sourceText }),
+    }),
+  applyOutline: (novelId: string, plan: OutlineVolumeDraft) =>
+    request<OutlineApplyResult>(`${BASE}/novels/${novelId}/outline/apply`, {
+      method: 'POST', body: JSON.stringify({ plan }),
+    }),
+  rebuildSettingIndex: (novelId: string) =>
+    request<{ indexed: number; failed: number }>(`${BASE}/novels/${novelId}/memory/rebuild-settings`, {
+      method: 'POST',
+    }),
 
   // 自动驾驶
   autopilotStatus: (novelId: string) =>
@@ -312,6 +327,30 @@ export const api = {
   deleteConversation: (id: string) =>
     request<void>(`${BASE}/conversations/${id}`, { method: 'DELETE' }),
   listMessages: (id: string) => request<ChatMessage[]>(`${BASE}/conversations/${id}/messages`),
+  listMessageActions: (id: string, messageId: string) =>
+    request<ChatAction[]>(`${BASE}/conversations/${id}/messages/${messageId}/actions`),
+  previewMessageSettings: (id: string, messageId: string) =>
+    request<IdeaChatResult>(`${BASE}/conversations/${id}/messages/${messageId}/settings/preview`, {
+      method: 'POST',
+    }),
+  applyMessageSettings: (id: string, messageId: string, suggestions: Record<string, unknown>[]) =>
+    request<{ applied: { type: string; action: string; id: string }[] }>(
+      `${BASE}/conversations/${id}/messages/${messageId}/settings/apply`,
+      { method: 'POST', body: JSON.stringify({ suggestions }) },
+    ),
+  previewMessageOutline: (id: string, messageId: string) =>
+    request<OutlineVolumeDraft>(`${BASE}/conversations/${id}/messages/${messageId}/outline/preview`, {
+      method: 'POST',
+    }),
+  applyMessageOutline: (id: string, messageId: string, plan: OutlineVolumeDraft) =>
+    request<OutlineApplyResult>(`${BASE}/conversations/${id}/messages/${messageId}/outline/apply`, {
+      method: 'POST', body: JSON.stringify({ plan }),
+    }),
+  writeMessageChapter: (
+    id: string, messageId: string,
+    data: { title: string; directive: string; outline_node_id: string; previous_chapter_id: string },
+    handlers: StreamHandlers,
+  ) => streamSSE(`${BASE}/conversations/${id}/messages/${messageId}/chapter/write`, data, handlers),
   updateMessage: (id: string, messageId: string, meta: Record<string, unknown>) =>
     request<ChatMessage>(`${BASE}/conversations/${id}/messages/${messageId}`, {
       method: 'PATCH',

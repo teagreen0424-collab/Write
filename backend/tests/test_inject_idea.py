@@ -44,6 +44,38 @@ class InjectIdeaTest(unittest.TestCase):
         self.assertEqual(result["reason"], "因为他知道了身世真相")
         self.assertEqual(len(result["changes"]), 1)
 
+    def test_preview_repairs_new_character_mislabeled_update_without_name(self):
+        fake = (
+            '{"targets":["吴迪"],"changes":[{"type":"character","action":"update",'
+            '"data":{"goal":"找到工作"}}],"reason":"测试"}'
+        )
+        with patch.object(inject_uc.llm, "complete", return_value=fake):
+            result = inject_uc.inject_idea(self.db, self.nid, "吴迪想找到工作")
+        self.assertEqual(result["changes"][0]["action"], "create")
+        self.assertEqual(result["changes"][0]["data"]["name"], "吴迪")
+        self.assertEqual(repos.CharacterRepo(self.db).list(self.nid), [])
+
+    def test_preview_keeps_existing_character_update(self):
+        repos.CharacterRepo(self.db).create(self.nid, name="吴迪", goal="活下去")
+        fake = (
+            '{"targets":["吴迪"],"changes":[{"type":"character","action":"update",'
+            '"data":{"goal":"找到工作"}}],"reason":"测试"}'
+        )
+        with patch.object(inject_uc.llm, "complete", return_value=fake):
+            result = inject_uc.inject_idea(self.db, self.nid, "吴迪想找到工作")
+        self.assertEqual(result["changes"][0]["action"], "update")
+        self.assertEqual(result["changes"][0]["data"]["name"], "吴迪")
+
+    def test_preview_normalizes_invalid_foreshadowing_status(self):
+        fake = (
+            '{"targets":[],"changes":[{"type":"foreshadowing","action":"create",'
+            '"data":{"content":"瞬移后的陌生气味","status":"已埋下（第一章）"}}],'
+            '"reason":"测试"}'
+        )
+        with patch.object(inject_uc.llm, "complete", return_value=fake):
+            result = inject_uc.inject_idea(self.db, self.nid, "设计伏笔")
+        self.assertEqual(result["changes"][0]["data"]["status"], "planted")
+
     def test_apply_update_existing_entity(self):
         repos.CharacterRepo(self.db).create(self.nid, name="林越", personality="温和")
         changes = [

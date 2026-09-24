@@ -5,8 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.application.consistency import consistency_check
 from app.application.memory import record_injection
-from app.domain.entities import OutlineLevel
+from app.application import setting_index
+from app.domain.entities import ForeshadowStatus, OutlineLevel
 from app.infrastructure import repository as repos
+from app.infrastructure import models
 from app.infrastructure.ai.llm_provider import LLMProvider
 from app.infrastructure.ai.prompts import (
     INJECT_IDEA_SYSTEM,
@@ -105,12 +107,35 @@ def inject_idea(db: Session, novel_id: str, text: str) -> dict:
     targets = data.get("targets") or []
     changes = data.get("changes") or []
     reason = data.get("reason") or ""
+    matched = _match_targets(db, novel_id, targets)
+    # 模型偶尔把首次出现的人物标成 update，且只在 targets 中给出姓名。
+    # 预览中补齐唯一目标并展示实际将执行的 create/update，仍由作者确认。
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        item = change.get("data")
+        if not isinstance(item, dict):
+            continue
+        if change.get("type") == "foreshadowing":
+            if item.get("status") not in {status.value for status in ForeshadowStatus}:
+                item["status"] = ForeshadowStatus.PLANTED.value
+            continue
+        if change.get("type") != "character":
+            continue
+        if not item.get("name") and len(matched) == 1:
+            target = matched[0]
+            if not target["matched"] or target.get("type") == "character":
+                item["name"] = target["name"]
+        if change.get("action") == "update" and item.get("name"):
+            hit = _find_by_name(db, novel_id, item["name"])
+            if not hit or hit["type"] != "character":
+                change["action"] = "create"
     return {
         "text": text,
         "targets": targets,
         "changes": changes,
         "reason": reason,
-        "matched": _match_targets(db, novel_id, targets),
+        "matched": matched,
     }
 
 
@@ -128,15 +153,18 @@ def _normalize_data(kind: str, data: dict) -> dict:
     return data
 
 
-def _create_entity(db: Session, novel_id: str, kind: str, data: dict):
+def _create_entity(db: Session, novel_id: str, kind: str, data: dict, *, commit: bool = True):
     obj = _CREATE_SCHEMA[kind](**data)
-    return _REPO_MAP[kind](db).create(novel_id, **obj.model_dump())
+    return setting_index.create_setting(db, _REPO_MAP[kind], novel_id, commit=commit, **obj.model_dump())
 
 
-def _update_entity(db: Session, novel_id: str, kind: str, entity_id: str, data: dict):
+def _update_entity(
+    db: Session, novel_id: str, kind: str, entity_id: str, data: dict, *, commit: bool = True,
+):
     obj = _UPDATE_SCHEMA[kind](**data)
-    return _REPO_MAP[kind](db).update(
-        novel_id, entity_id, **obj.model_dump(exclude_unset=True, mode="json")
+    return setting_index.update_setting(
+        db, _REPO_MAP[kind], novel_id, entity_id, commit=commit,
+        **obj.model_dump(exclude_unset=True, mode="json"),
     )
 
 
@@ -147,7 +175,10 @@ def _unfinished_chapter_nodes(db: Session, novel_id: str):
     return [n for n in nodes if n.level == OutlineLevel.CHAPTER.value and n.id not in generated_ids]
 
 
-def _replan_outline(db: Session, novel_id: str, changes: list[dict], updated_types: set) -> list[dict]:
+def _replan_outline(
+    db: Session, novel_id: str, changes: list[dict], updated_types: set,
+    *, commit: bool = True,
+) -> list[dict]:
     """对影响人物/世界观等的 update 变更，调整未生成章节大纲的概要。"""
     if not (updated_types & {"character", "world_setting", "location"}):
         return []
@@ -175,7 +206,11 @@ def _replan_outline(db: Session, novel_id: str, changes: list[dict], updated_typ
         summary = u.get("summary")
         node = by_title.get(title) if isinstance(u, dict) else None
         if node and summary:
-            repos.OutlineRepo(db).update(novel_id, node.id, summary=summary)
+            if commit:
+                repos.OutlineRepo(db).update(novel_id, node.id, summary=summary)
+            else:
+                node.summary = summary
+                db.flush()
             applied.append({"node_id": node.id, "title": title, "summary": summary})
     return applied
 
@@ -197,6 +232,7 @@ def apply_injections(
     suggestions,
     raw_text: str = "",
     channel: str = "chat",
+    atomic: bool = False,
 ) -> dict:
     """应用设定变更（支持 update 按名字匹配），并触发大纲重规划与一致性检查。"""
     changes = (
@@ -214,6 +250,8 @@ def apply_injections(
         action = ch.get("action", "create")
         data = _normalize_data(kind, ch.get("data") or {})
         if kind not in _REPO_MAP:
+            if atomic:
+                raise ValueError(f"不支持的设定类型：{kind}")
             continue
         try:
             if action == "update":
@@ -221,30 +259,35 @@ def apply_injections(
                 name = data.get(name_field) if name_field else None
                 hit = _find_by_name(db, novel_id, name) if name else None
                 if hit and hit["type"] == kind:
-                    _update_entity(db, novel_id, kind, hit["entity"].id, data)
+                    _update_entity(db, novel_id, kind, hit["entity"].id, data, commit=not atomic)
                     applied.append({"type": kind, "action": "update", "id": hit["entity"].id})
                     updated_types.add(kind)
                 else:
-                    entity = _create_entity(db, novel_id, kind, data)
+                    entity = _create_entity(db, novel_id, kind, data, commit=not atomic)
                     applied.append({"type": kind, "action": "create", "id": entity.id})
             else:
-                entity = _create_entity(db, novel_id, kind, data)
+                entity = _create_entity(db, novel_id, kind, data, commit=not atomic)
                 applied.append({"type": kind, "action": "create", "id": entity.id})
-        except Exception:  # noqa: BLE001  跳过校验不通过的变更
+        except Exception:  # noqa: BLE001  旧接口跳过无效变更；原子路径整单失败
+            if atomic:
+                raise
             continue
 
-    outline_updates = _replan_outline(db, novel_id, changes, updated_types)
+    outline_updates = _replan_outline(db, novel_id, changes, updated_types, commit=not atomic)
     consistency = consistency_check(db, novel_id, _check_text(changes))
 
     # 记录构思注入（raw_text 非空时落 injection 表）
     if raw_text:
-        record_injection(
-            db,
-            novel_id,
-            channel,
-            raw_text,
-            parsed_intent=changes,
-            applied_changes=applied,
-        )
+        if atomic:
+            db.add(models.Injection(
+                novel_id=novel_id, channel=channel, raw_text=raw_text,
+                parsed_intent=changes, applied_changes=applied,
+            ))
+            db.flush()
+        else:
+            record_injection(
+                db, novel_id, channel, raw_text,
+                parsed_intent=changes, applied_changes=applied,
+            )
 
     return {"applied": applied, "outline_updates": outline_updates, "consistency": consistency}

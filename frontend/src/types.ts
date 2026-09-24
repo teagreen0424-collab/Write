@@ -326,6 +326,37 @@ export interface OutlineNode {
   updated_at: string
 }
 
+export interface OutlineChapterDraft {
+  title: string
+  summary: string
+}
+
+export interface OutlineActDraft {
+  title: string
+  summary: string
+  chapters: OutlineChapterDraft[]
+}
+
+export interface OutlineVolumeDraft {
+  title: string
+  summary: string
+  acts: OutlineActDraft[]
+  chapters: OutlineChapterDraft[]
+}
+
+export interface OutlineApplyResult {
+  volume_id: string
+  node_ids: string[]
+}
+
+export interface ChatAction {
+  action_type: string
+  status: string
+  result_id: string
+  result_summary: Record<string, unknown>
+  target_deleted: boolean
+}
+
 export interface AutopilotEvent {
   type:
     | 'progress'

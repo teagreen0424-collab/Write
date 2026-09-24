@@ -1,0 +1,125 @@
+<script setup lang="ts">
+import { ref } from 'vue'
+import { NButton, NInput, NSpin, useMessage } from 'naive-ui'
+import { api } from '../api'
+import type { OutlineApplyResult, OutlineVolumeDraft } from '../types'
+
+const props = defineProps<{
+  novelId: string
+  conversationId?: string
+  messageId?: string
+}>()
+const emit = defineEmits<{
+  (e: 'applied', result: OutlineApplyResult): void
+  (e: 'cancel'): void
+}>()
+
+const toast = useMessage()
+const sourceText = ref('')
+const plan = ref<OutlineVolumeDraft | null>(null)
+const loading = ref(false)
+const applying = ref(false)
+
+async function preview() {
+  if (!props.messageId && !sourceText.value.trim()) {
+    toast.warning('请先写下这卷的构思')
+    return
+  }
+  loading.value = true
+  try {
+    plan.value = props.conversationId && props.messageId
+      ? await api.previewMessageOutline(props.conversationId, props.messageId)
+      : await api.previewOutline(props.novelId, sourceText.value.trim())
+  } catch (error) {
+    toast.error((error as Error).message)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function apply() {
+  const draft = plan.value
+  if (!draft || !draft.title.trim()) {
+    toast.warning('卷标题不能为空')
+    return
+  }
+  if (!draft.chapters.length && !draft.acts.some((act) => act.chapters.length)) {
+    toast.warning('请至少保留一个章节')
+    return
+  }
+  applying.value = true
+  try {
+    const result = props.conversationId && props.messageId
+      ? await api.applyMessageOutline(props.conversationId, props.messageId, draft)
+      : await api.applyOutline(props.novelId, draft)
+    toast.success('大纲已追加到作品')
+    emit('applied', result)
+  } catch (error) {
+    toast.error((error as Error).message)
+  } finally {
+    applying.value = false
+  }
+}
+</script>
+
+<template>
+  <div class="planner">
+    <p>先预览、可编辑，确认后仅追加一卷，不覆盖已有大纲。</p>
+    <n-input
+      v-if="!messageId"
+      v-model:value="sourceText"
+      type="textarea"
+      :autosize="{ minRows: 2, maxRows: 5 }"
+      placeholder="描述这一卷的人物、目标、冲突与预期转折"
+    />
+    <div class="actions">
+      <n-button size="small" :loading="loading" :disabled="applying" @click="preview">
+        {{ plan ? '重新生成预览' : '生成预览' }}
+      </n-button>
+      <n-button size="small" @click="emit('cancel')">关闭</n-button>
+    </div>
+    <n-spin :show="loading">
+      <div v-if="plan" class="draft">
+        <label>卷标题<n-input v-model:value="plan.title" /></label>
+        <label>卷概要<n-input v-model:value="plan.summary" type="textarea" /></label>
+        <div class="group">
+          <strong>直属章节</strong>
+          <div v-for="(chapter, index) in plan.chapters" :key="index" class="item">
+            <n-input v-model:value="chapter.title" placeholder="章节标题" />
+            <n-input v-model:value="chapter.summary" placeholder="章节概要" />
+            <n-button size="tiny" @click="plan.chapters.splice(index, 1)">移除</n-button>
+          </div>
+          <n-button size="tiny" @click="plan.chapters.push({ title: '', summary: '' })">+ 直属章节</n-button>
+        </div>
+        <div v-for="(act, actIndex) in plan.acts" :key="actIndex" class="group">
+          <div class="actions">
+            <strong>第 {{ actIndex + 1 }} 幕</strong>
+            <n-button size="tiny" @click="plan.acts.splice(actIndex, 1)">移除幕</n-button>
+          </div>
+          <n-input v-model:value="act.title" placeholder="幕标题" />
+          <n-input v-model:value="act.summary" placeholder="幕概要" />
+          <div v-for="(chapter, index) in act.chapters" :key="index" class="item">
+            <n-input v-model:value="chapter.title" placeholder="章节标题" />
+            <n-input v-model:value="chapter.summary" placeholder="章节概要" />
+            <n-button size="tiny" @click="act.chapters.splice(index, 1)">移除</n-button>
+          </div>
+          <n-button size="tiny" @click="act.chapters.push({ title: '', summary: '' })">+ 幕内章节</n-button>
+        </div>
+        <div class="actions">
+          <n-button size="tiny" @click="plan.acts.push({ title: '', summary: '', chapters: [] })">+ 幕</n-button>
+          <n-button type="primary" size="small" :loading="applying" @click="apply">确认追加到大纲</n-button>
+        </div>
+      </div>
+    </n-spin>
+  </div>
+</template>
+
+<style scoped>
+.planner { display: grid; gap: 12px; }
+.planner p { margin: 0; color: #666; }
+.draft, .group { display: grid; gap: 8px; }
+.group { border: 1px solid #e5e7eb; padding: 10px; border-radius: 6px; }
+.item, .actions { display: flex; align-items: center; gap: 8px; }
+.item :first-child { min-width: 120px; }
+.item :nth-child(2) { flex: 1; }
+</style>

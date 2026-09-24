@@ -212,3 +212,19 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text, default="")
     meta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), default=_now)
+
+
+class ChatAction(Base):
+    """聊天消息的显式落地动作；每条消息同类动作最多完成一次。"""
+
+    __tablename__ = "chat_action"
+    __table_args__ = (UniqueConstraint("message_id", "action_type", name="uq_chat_action_message_type"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    message_id: Mapped[str] = mapped_column(String(36), ForeignKey("message.id"), index=True)
+    novel_id: Mapped[str] = mapped_column(String(36), ForeignKey("novel.id"), index=True)
+    action_type: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="done")
+    result_id: Mapped[str] = mapped_column(String(36), default="")
+    result_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[str] = mapped_column(String(40), default=_now)

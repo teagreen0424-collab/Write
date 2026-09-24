@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.application.auto_pilot import check_drift
 from app.application.consistency import consistency_check
 from app.application.memory import write_chapter_memory
+from app.application import setting_index
 from app.domain.entities import ChapterStatus
 from app.infrastructure.ai.llm_provider import LLMProvider
 from app.infrastructure.ai.prompts import SETTLE_SYSTEM, SETTLE_USER
@@ -101,18 +102,18 @@ def apply_suggestions(
         try:
             if kind == "character":
                 obj = schemas.CharacterCreate(**data)
-                entity = repos.CharacterRepo(db).create(novel_id, **obj.model_dump())
+                entity = setting_index.create_setting(db, repos.CharacterRepo, novel_id, **obj.model_dump())
                 created.append({"type": kind, "id": entity.id})
             elif kind == "timeline_event":
                 obj = schemas.TimelineEventCreate(**data)
-                entity = repos.TimelineEventRepo(db).create(novel_id, **obj.model_dump())
+                entity = setting_index.create_setting(db, repos.TimelineEventRepo, novel_id, **obj.model_dump())
                 created.append({"type": kind, "id": entity.id})
             elif kind == "foreshadowing":
                 obj = schemas.ForeshadowingCreate(**data)
                 payload = obj.model_dump()
                 if chapter_id and not payload.get("planted_chapter_id"):
                     payload["planted_chapter_id"] = chapter_id
-                entity = repos.ForeshadowingRepo(db).create(novel_id, **payload)
+                entity = setting_index.create_setting(db, repos.ForeshadowingRepo, novel_id, **payload)
                 created.append({"type": kind, "id": entity.id})
         except Exception:  # noqa: BLE001  跳过校验不通过的建议
             continue

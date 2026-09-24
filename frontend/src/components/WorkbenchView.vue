@@ -21,7 +21,11 @@ import AutopilotPanel from './AutopilotPanel.vue'
 import ForeshadowingTracking from './ForeshadowingTracking.vue'
 import BookDeliveryPanel from './BookDeliveryPanel.vue'
 
-const props = defineProps<{ initialNovelId?: string | null }>()
+const props = defineProps<{
+  initialNovelId?: string | null
+  initialTab?: 'settings' | 'outline' | 'writing'
+  initialChapterId?: string | null
+}>()
 const emit = defineEmits<{ (e: 'back'): void }>()
 
 const message = useMessage()
@@ -29,7 +33,7 @@ const message = useMessage()
 const novels = ref<Novel[]>([])
 const novelId = ref<string | null>(null)
 const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'foreshadowing' | 'graph' | 'delivery'>(
-  'settings',
+  props.initialTab ?? 'settings',
 )
 const focusTarget = ref<{ type: EntityType; id: string } | null>(null)
 const refreshKey = ref(0)
@@ -134,6 +138,7 @@ onMounted(loadNovels)
       <WritingPanel
         v-if="activeTab === 'writing'"
         :novel-id="novelId ?? ''"
+        :initial-chapter-id="initialChapterId"
         @dirty-change="writingDirty = $event"
       />
       <OutlinePanel

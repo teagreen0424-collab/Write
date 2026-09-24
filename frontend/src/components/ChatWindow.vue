@@ -6,7 +6,11 @@ import type { ChatMessage, Conversation, Novel } from '../types'
 import MessageBubble from './MessageBubble.vue'
 
 const props = defineProps<{ conversation: Conversation | null; novels: Novel[] }>()
-const emit = defineEmits<{ (e: 'changed'): void; (e: 'promote'): void; (e: 'move'): void }>()
+const emit = defineEmits<{
+  (e: 'changed'): void; (e: 'promote'): void; (e: 'move'): void
+  (e: 'open-outline', novelId: string): void
+  (e: 'open-writing', novelId: string, chapterId: string): void
+}>()
 
 const toast = useMessage()
 const messages = ref<ChatMessage[]>([])
@@ -108,6 +112,8 @@ watch(
           :key="m.id"
           :message="m"
           :novel-id="conversation.novel_id"
+          @open-outline="emit('open-outline', $event)"
+          @open-writing="(novelId: string, chapterId: string) => emit('open-writing', novelId, chapterId)"
         />
         <div v-if="streaming" class="streaming-assistant">
           <div class="streaming-bubble">{{ streamingText || '正在思考…' }}</div>

@@ -15,7 +15,11 @@ import type { Conversation, Novel } from '../types'
 import ConversationSidebar from './ConversationSidebar.vue'
 import ChatWindow from './ChatWindow.vue'
 
-const emit = defineEmits<{ (e: 'enter-workbench', novelId: string): void }>()
+const emit = defineEmits<{
+  (e: 'enter-workbench', novelId: string): void
+  (e: 'open-outline', novelId: string): void
+  (e: 'open-writing', novelId: string, chapterId: string): void
+}>()
 
 const message = useMessage()
 const dialog = useDialog()
@@ -194,6 +198,8 @@ onMounted(loadAll)
       @changed="loadAll"
       @promote="selected && openPromote(selected)"
       @move="selected && openMove(selected)"
+      @open-outline="emit('open-outline', $event)"
+      @open-writing="(novelId: string, chapterId: string) => emit('open-writing', novelId, chapterId)"
     />
 
     <n-modal

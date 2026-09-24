@@ -146,12 +146,16 @@ class WritingUseCaseTest(unittest.TestCase):
         )
 
     def test_write_route_persists_outline_node_id(self):
-        outline = repos.OutlineRepo(self.db).create(
+        volume = repos.OutlineRepo(self.db).create(
             self.novel_id, title="第一卷", level="volume"
+        )
+        outline = repos.OutlineRepo(self.db).create(
+            self.novel_id, title="第一章", level="chapter",
+            parent_id=volume.id, summary="本章必须出现的剧情要点",
         )
         with (
             patch("app.interfaces.api.v1.chapters.SessionLocal", side_effect=Session),
-            patch("app.application.writing.llm.stream_complete", return_value=iter(["正文"])),
+            patch("app.application.writing.llm.stream_complete", return_value=iter(["正文"])) as stream,
         ):
             response = client.post(
                 f"/api/v1/novels/{self.novel_id}/chapters/write",
@@ -163,6 +167,23 @@ class WritingUseCaseTest(unittest.TestCase):
         chapters = repos.ChapterRepo(self.db).list(self.novel_id)
         self.assertEqual(len(chapters), 1)
         self.assertEqual(chapters[0].outline_node_id, outline.id)
+        self.assertIn("本章必须出现的剧情要点", stream.call_args.args[0][1]["content"])
+
+    def test_write_route_rejects_non_chapter_outline_node(self):
+        volume = repos.OutlineRepo(self.db).create(
+            self.novel_id, title="第一卷", level="volume"
+        )
+        with (
+            patch("app.interfaces.api.v1.chapters.SessionLocal", side_effect=Session),
+            patch("app.application.writing.llm.stream_complete") as stream,
+        ):
+            response = client.post(
+                f"/api/v1/novels/{self.novel_id}/chapters/write",
+                json={"outline_node_id": volume.id},
+            )
+        self.assertIn("只能绑定章级大纲节点", response.text)
+        stream.assert_not_called()
+        self.assertEqual(repos.ChapterRepo(self.db).list(self.novel_id), [])
 
     def test_write_route_without_outline_node_id_keeps_empty_value(self):
         with (
@@ -180,6 +201,13 @@ class WritingUseCaseTest(unittest.TestCase):
         self.assertEqual(chapters[0].outline_node_id, "")
 
     def test_write_next_chapter_includes_continuity_context(self):
+        volume = repos.OutlineRepo(self.db).create(
+            self.novel_id, title="第一卷", level="volume"
+        )
+        outline = repos.OutlineRepo(self.db).create(
+            self.novel_id, title="第二章", level="chapter", parent_id=volume.id,
+            summary="落地后有消毒水混着铁锈的气味",
+        )
         previous = repos.ChapterRepo(self.db).create(
             self.novel_id,
             seq=1,
@@ -196,7 +224,7 @@ class WritingUseCaseTest(unittest.TestCase):
         ):
             response = client.post(
                 f"/api/v1/novels/{self.novel_id}/chapters/write",
-                json={"previous_chapter_id": previous.id},
+                json={"previous_chapter_id": previous.id, "outline_node_id": outline.id},
             )
 
         self.assertEqual(response.status_code, 200, response.text)
@@ -207,11 +235,14 @@ class WritingUseCaseTest(unittest.TestCase):
         self.assertIn("上一章结尾线索", messages[1]["content"])
         self.assertIn("不得再次写成第一次", messages[1]["content"])
         self.assertIn("未沉淀，以正文为准", messages[1]["content"])
+        self.assertIn("落地后有消毒水混着铁锈的气味", messages[1]["content"])
+        self.assertIn("章级大纲的具体场面与上一章已发生事实冲突", messages[0]["content"])
         chapters = repos.ChapterRepo(self.db).list(self.novel_id)
         self.assertEqual(len(chapters), 2)
         self.assertEqual(chapters[1].seq, 2)
         self.assertEqual(chapters[1].title, "第2章")
         self.assertEqual(chapters[1].content, "承接后的第二章正文")
+        self.assertEqual(chapters[1].outline_node_id, outline.id)
 
     def test_write_next_chapter_rejects_non_latest_previous_chapter(self):
         first = repos.ChapterRepo(self.db).create(

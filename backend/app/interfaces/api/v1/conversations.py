@@ -4,11 +4,50 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.application import chat as chat_uc
+from app.application import chat_actions
 from app.infrastructure.db import SessionLocal, get_db
 from app.infrastructure.repository import ConversationRepo
 from app.interfaces import schemas
 
 router = APIRouter(prefix="/conversations", tags=["conversation"])
+
+
+@router.get("/{conversation_id}/messages/{message_id}/actions")
+def list_message_actions(conversation_id: str, message_id: str, db: Session = Depends(get_db)):
+    return chat_actions.list_actions(db, conversation_id, message_id)
+
+
+@router.post("/{conversation_id}/messages/{message_id}/settings/preview")
+def preview_message_settings(conversation_id: str, message_id: str, db: Session = Depends(get_db)):
+    return chat_actions.preview_settings(db, conversation_id, message_id)
+
+
+@router.post("/{conversation_id}/messages/{message_id}/settings/apply")
+def apply_message_settings(
+    conversation_id: str, message_id: str, payload: schemas.IdeaApplyRequest,
+    db: Session = Depends(get_db),
+):
+    return chat_actions.apply_settings(db, conversation_id, message_id, payload.suggestions)
+
+
+@router.post("/{conversation_id}/messages/{message_id}/outline/preview", response_model=schemas.OutlineVolumeDraft)
+def preview_message_outline(conversation_id: str, message_id: str, db: Session = Depends(get_db)):
+    return chat_actions.preview_outline(db, conversation_id, message_id)
+
+
+@router.post("/{conversation_id}/messages/{message_id}/outline/apply")
+def apply_message_outline(
+    conversation_id: str, message_id: str, payload: schemas.OutlineApplyRequest,
+    db: Session = Depends(get_db),
+):
+    return chat_actions.apply_outline(db, conversation_id, message_id, payload.plan)
+
+
+@router.post("/{conversation_id}/messages/{message_id}/chapter/write")
+def write_from_message(
+    conversation_id: str, message_id: str, payload: schemas.WriteChapterRequest,
+):
+    return _streaming(lambda db: chat_actions.write_chapter(db, conversation_id, message_id, payload))
 
 
 def _streaming(generator_factory):

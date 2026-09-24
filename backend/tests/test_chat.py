@@ -102,6 +102,39 @@ class ChatTest(unittest.TestCase):
         self.assertIn("第一卷", ctx)
         self.assertIn("第1章", ctx)
 
+    def test_bound_chat_uses_current_question_for_recall(self):
+        novel = repos.NovelRepo(self.db).create(title="作品")
+        conv = self.repo.create(novel_id=novel.id)
+        with patch("app.infrastructure.vector.search", return_value=[
+            {"text": "第七章钥匙藏在古井", "kind": "chapter_slice"},
+        ]) as search, patch.object(chat_uc.llm, "stream_complete", return_value=iter(["收到"])) as llm:
+            _collect(chat_uc.reply_conversation(self.db, conv.id, "古井里的钥匙在哪"))
+        search.assert_called_once_with(self.db, novel.id, "古井里的钥匙在哪", top_k=3)
+        self.assertIn("第七章钥匙藏在古井", llm.call_args.args[0][1]["content"])
+
+    def test_chat_recall_failure_degrades_and_global_does_not_search(self):
+        novel = repos.NovelRepo(self.db).create(title="作品")
+        conv = self.repo.create(novel_id=novel.id)
+        with patch("app.infrastructure.vector.search", side_effect=RuntimeError("不可用")):
+            ctx = chat_uc.build_chat_context(self.db, novel.id, query="测试")
+        self.assertNotIn("语义召回", ctx)
+
+        global_conv = self.repo.create()
+        with patch("app.infrastructure.vector.search") as search, patch.object(
+            chat_uc.llm, "stream_complete", return_value=iter(["收到"])
+        ):
+            _collect(chat_uc.reply_conversation(self.db, global_conv.id, "测试"))
+        search.assert_not_called()
+
+    def test_chat_context_keeps_partial_character_lines_under_budget(self):
+        novel = repos.NovelRepo(self.db).create(title="作品")
+        repos.CharacterRepo(self.db).create(
+            novel.id, name="吴迪", role="主角", personality="谨慎" * 300,
+        )
+        ctx = chat_uc.build_chat_context(self.db, novel.id, max_chars=80)
+        self.assertIn("吴迪", ctx)
+        self.assertLessEqual(len(ctx), 80)
+
     def test_promote(self):
         c = self.repo.create(novel_id=None, title="测试会话")
         novel = chat_uc.promote_conversation(self.db, c.id, "测试作品", "玄幻", "简介")

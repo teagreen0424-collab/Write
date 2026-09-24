@@ -21,11 +21,12 @@ import type {
   ClicheResult,
   Conflict,
   DeepCheckConflict,
+  OutlineNode,
   Segment,
   Suggestion,
 } from '../types'
 
-const props = defineProps<{ novelId: string }>()
+const props = defineProps<{ novelId: string; initialChapterId?: string | null }>()
 const emit = defineEmits<{ (e: 'dirty-change', dirty: boolean): void }>()
 
 const message = useMessage()
@@ -67,6 +68,8 @@ const showRevisions = ref(false)
 const deleting = ref(false)
 const nextTitle = ref('')
 const nextDirective = ref('')
+const nextOutlineNodes = ref<OutlineNode[]>([])
+const nextOutlineNodeId = ref<string | null>(null)
 const settleSummary = ref('')
 const suggestions = ref<Suggestion[]>([])
 const checkedSuggestion = ref<boolean[]>([])
@@ -81,6 +84,13 @@ const REWRITE_INTENT_OPTIONS = [
 const selectedChapter = computed(() => chapters.value.find((c) => c.id === selectedId.value) ?? null)
 const isLatestChapter = computed(
   () => !!selectedId.value && chapters.value[chapters.value.length - 1]?.id === selectedId.value,
+)
+const nextOutlineOptions = computed(() => nextOutlineNodes.value.map((node) => ({
+  label: node.title,
+  value: node.id,
+})))
+const selectedNextOutline = computed(
+  () => nextOutlineNodes.value.find((node) => node.id === nextOutlineNodeId.value),
 )
 const chapterWords = computed(() => countCharacters(content.value))
 const totalWords = computed(() =>
@@ -151,6 +161,10 @@ const CLICHE_CATEGORIES = ['万能副词', '套路动作', '面部套话', '心�
 async function loadChapters() {
   if (!props.novelId) return
   chapters.value = await api.listChapters(props.novelId)
+  if (props.initialChapterId && !selectedId.value) {
+    const initial = chapters.value.find((chapter) => chapter.id === props.initialChapterId)
+    if (initial) selectChapter(initial, true)
+  }
 }
 
 function clearMarks() {
@@ -212,6 +226,7 @@ async function generateChapter(
   previousChapterId = '',
   chapterTitle = title.value,
   chapterDirective = directive.value,
+  outlineNodeId = '',
 ) {
   if (streaming.value) return
   streaming.value = true
@@ -223,6 +238,7 @@ async function generateChapter(
       title: chapterTitle,
       directive: chapterDirective,
       previous_chapter_id: previousChapterId,
+      outline_node_id: outlineNodeId,
     },
     {
       onToken: (t) => (streamText.value += t),
@@ -254,13 +270,31 @@ async function doWriteNext() {
   }
   nextTitle.value = ''
   nextDirective.value = ''
+  try {
+    nextOutlineNodes.value = (await api.listOutline(props.novelId)).filter(
+      (node) => node.level === 'chapter',
+    )
+  } catch (error) {
+    message.error((error as Error).message)
+    return
+  }
+  const currentIndex = nextOutlineNodes.value.findIndex(
+    (node) => node.id === selectedChapter.value?.outline_node_id,
+  )
+  const nextIndex = currentIndex >= 0 ? currentIndex + 1 : chapters.value.length
+  nextOutlineNodeId.value = nextOutlineNodes.value[nextIndex]?.id ?? null
   showWriteNext.value = true
 }
 
 async function confirmWriteNext() {
   if (!selectedId.value || streaming.value) return
   showWriteNext.value = false
-  await generateChapter(selectedId.value, nextTitle.value, nextDirective.value)
+  await generateChapter(
+    selectedId.value,
+    nextTitle.value,
+    nextDirective.value,
+    nextOutlineNodeId.value ?? '',
+  )
 }
 
 async function doContinue() {
@@ -754,6 +788,18 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
             placeholder="例如：黑西装男人跟踪吴迪，推进上一章留下的悬念"
           />
         </label>
+        <label>
+          <span>章级大纲（可选）</span>
+          <n-select
+            v-model:value="nextOutlineNodeId"
+            :options="nextOutlineOptions"
+            placeholder="选择要承接的章级大纲"
+            clearable
+          />
+        </label>
+        <p v-if="selectedNextOutline?.summary" class="next-modal-hint">
+          大纲提要：{{ selectedNextOutline.summary }}
+        </p>
         <p class="next-modal-hint">
           系统会同时携带上一章章首、结尾、最近剧情、Story Bible 与未解决伏笔，避免重复开局或改写既有能力规则。
         </p>

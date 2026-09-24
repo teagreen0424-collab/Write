@@ -33,6 +33,7 @@ const message = useMessage()
 const selectedType = ref<EntityType>('character')
 const editingId = ref<string | null>(null)
 const loading = ref(false)
+const rebuildingIndex = ref(false)
 const emptyEntities = (): Record<EntityType, EntityRecord[]> => ({
   character: [],
   location: [],
@@ -66,6 +67,23 @@ async function saveAnchor() {
     message.success('已保存文风基准')
   } catch (e) {
     message.error((e as Error).message)
+  }
+}
+
+async function rebuildIndex() {
+  if (!props.novelId || !window.confirm('为本作品重建设定检索索引？不会修改设定或章节正文。')) return
+  rebuildingIndex.value = true
+  try {
+    const result = await api.rebuildSettingIndex(props.novelId)
+    if (result.failed) {
+      message.warning(`已索引 ${result.indexed} 条，${result.failed} 条失败；可稍后重试`)
+    } else {
+      message.success(`已重建 ${result.indexed} 条设定索引`)
+    }
+  } catch (error) {
+    message.error((error as Error).message)
+  } finally {
+    rebuildingIndex.value = false
   }
 }
 
@@ -304,6 +322,11 @@ onMounted(resetForm)
       />
     </div>
 
+    <div class="index-tools">
+      <span>旧作品设定可显式重建语义检索索引，不修改 Story Bible。</span>
+      <n-button size="small" :loading="rebuildingIndex" @click="rebuildIndex">重建设定索引</n-button>
+    </div>
+
     <div class="body">
       <div class="type-sidebar">
         <n-menu
@@ -414,6 +437,16 @@ onMounted(resetForm)
 }
 .anchor-hint.ok {
   color: #18a058;
+}
+.index-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #e5e5e5;
+  color: #666;
+  font-size: 12px;
 }
 .body {
   flex: 1;

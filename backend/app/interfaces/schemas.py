@@ -1,7 +1,7 @@
 """接口层：请求/响应模型（Pydantic）。"""
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.entities import (
     ChapterStatus,
@@ -409,6 +409,43 @@ class OutlineNodeRead(ORMBase):
 
 class OutlineReorderRequest(BaseModel):
     ordered_ids: list[str] = Field(..., min_length=1)
+
+
+class OutlineChapterDraft(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    summary: str = ""
+
+
+class OutlineActDraft(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    summary: str = ""
+    chapters: list[OutlineChapterDraft] = Field(default_factory=list, max_length=20)
+
+
+class OutlineVolumeDraft(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    summary: str = ""
+    acts: list[OutlineActDraft] = Field(default_factory=list, max_length=8)
+    chapters: list[OutlineChapterDraft] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_tree(self):
+        if not self.title.strip():
+            raise ValueError("卷标题不能为空")
+        if any(not act.title.strip() for act in self.acts):
+            raise ValueError("幕标题不能为空")
+        chapters = self.chapters + [chapter for act in self.acts for chapter in act.chapters]
+        if not chapters or any(not chapter.title.strip() for chapter in chapters):
+            raise ValueError("至少需要一章，且章节标题不能为空")
+        return self
+
+
+class OutlinePreviewRequest(BaseModel):
+    source_text: str = Field(..., min_length=1, max_length=8000)
+
+
+class OutlineApplyRequest(BaseModel):
+    plan: OutlineVolumeDraft
 
 
 class AutopilotInjectRequest(BaseModel):

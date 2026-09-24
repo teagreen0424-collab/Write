@@ -1,10 +1,16 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { NButton, NEmpty, NInput, NSpin, NTag, useMessage } from 'naive-ui'
+import { NButton, NCheckbox, NEmpty, NInput, NSpin, NTag, useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { IdeaChatResult } from '../types'
 
-const props = defineProps<{ novelId: string; text: string }>()
+const props = defineProps<{
+  novelId: string
+  text: string
+  conversationId?: string
+  messageId?: string
+  settingsOnly?: boolean
+}>()
 const emit = defineEmits<{
   (e: 'applied', summary: { type: string; action: string; id: string }[]): void
   (e: 'cancel'): void
@@ -15,6 +21,7 @@ const loading = ref(true)
 const applying = ref(false)
 const result = ref<IdeaChatResult | null>(null)
 const dataTexts = ref<string[]>([])
+const selected = ref<boolean[]>([])
 
 const TYPE_LABEL: Record<string, string> = {
   character: '人物',
@@ -28,9 +35,12 @@ const TYPE_LABEL: Record<string, string> = {
 async function load() {
   loading.value = true
   try {
-    const r = await api.ideaChat(props.novelId, props.text)
+    const r = props.settingsOnly && props.conversationId && props.messageId
+      ? await api.previewMessageSettings(props.conversationId, props.messageId)
+      : await api.ideaChat(props.novelId, props.text)
     result.value = r
     dataTexts.value = r.changes.map((c) => JSON.stringify(c.data, null, 2))
+    selected.value = r.changes.map(() => true)
   } catch (e) {
     message.error((e as Error).message)
     emit('cancel')
@@ -43,9 +53,26 @@ async function apply() {
   if (!result.value) return
   const suggestions: Record<string, unknown>[] = []
   for (let i = 0; i < result.value.changes.length; i++) {
+    if (!selected.value[i]) continue
     const c = result.value.changes[i]
     try {
-      suggestions.push({ type: c.type, action: c.action, data: JSON.parse(dataTexts.value[i]) })
+      const data = JSON.parse(dataTexts.value[i])
+      if (['character', 'world_setting', 'location'].includes(c.type)
+        && (typeof data.name !== 'string' || !data.name.trim())) {
+        message.error(`第 ${i + 1} 条缺少名称，请填写后再应用`)
+        return
+      }
+      if (c.type === 'foreshadowing'
+        && (typeof data.content !== 'string' || !data.content.trim())) {
+        message.error(`第 ${i + 1} 条缺少伏笔内容，请填写后再应用`)
+        return
+      }
+      if (c.type === 'foreshadowing' && data.status !== undefined
+        && !['planted', 'suspended', 'consumed'].includes(data.status)) {
+        message.error(`第 ${i + 1} 条伏笔状态只能是 planted、suspended 或 consumed`)
+        return
+      }
+      suggestions.push({ type: c.type, action: c.action, data })
     } catch {
       message.error('变更数据 JSON 格式错误')
       return
@@ -57,7 +84,9 @@ async function apply() {
   }
   applying.value = true
   try {
-    const r = await api.ideaApply(props.novelId, suggestions, props.text, 'chat')
+    const r = props.settingsOnly && props.conversationId && props.messageId
+      ? await api.applyMessageSettings(props.conversationId, props.messageId, suggestions)
+      : await api.ideaApply(props.novelId, suggestions, props.text, 'chat')
     message.success(`已应用 ${r.applied.length} 条变更`)
     emit('applied', r.applied)
   } catch (e) {
@@ -74,6 +103,7 @@ onMounted(load)
   <div class="apply-card">
     <n-spin :show="loading">
       <template v-if="result">
+        <p v-if="settingsOnly">仅提炼人物、世界观、伏笔；确认时可能调整未生成章节的大纲。</p>
         <div class="reason">
           <n-tag type="info" size="small">解析结果</n-tag>
           <span v-if="result.reason">原因：{{ result.reason }}</span>
@@ -89,12 +119,14 @@ onMounted(load)
 
         <div v-for="(c, i) in result.changes" :key="i" class="change-card">
           <div class="change-head">
+            <n-checkbox v-model:checked="selected[i]">应用此条</n-checkbox>
             <n-tag size="small">{{ TYPE_LABEL[c.type] ?? c.type }}</n-tag>
             <n-tag :type="c.action === 'update' ? 'info' : 'success'" size="small">
               {{ c.action === 'update' ? '修改' : '新增' }}
             </n-tag>
           </div>
           <n-input
+            v-if="selected[i]"
             v-model:value="dataTexts[i]"
             type="textarea"
             :autosize="{ minRows: 2, maxRows: 6 }"

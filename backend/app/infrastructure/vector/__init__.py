@@ -45,6 +45,8 @@ def search(db, novel_id: str, query: str, top_k: int = 3) -> list[dict]:
                 "id": c.id,
                 "text": c.text,
                 "kind": c.kind,
+                "source_chapter_id": c.source_chapter_id,
+                "embedding_id": c.embedding_id,
                 "score": _cosine(query_vec, c.vector),
             }
         )
