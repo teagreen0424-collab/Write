@@ -182,49 +182,82 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
     try:
         state = registry.start(novel_id)
     except AutoPilotBusy as exc:
-        yield _sse({"type": "error", "message": str(exc)})
+        yield _sse({
+            "type": "error", "scope": "task", "fatal": True,
+            "code": "autopilot_busy", "message": str(exc),
+        })
         return
 
-    db = session_factory()
+    db = None
+    generated = skipped = failed = total = 0
+    terminal_status = "completed"
+    terminal_reason = ""
+    task_error = None
+    cleanup_error = None
+
+    def counts():
+        return {
+            "generated": generated, "skipped": skipped, "failed": failed,
+            "done": generated + skipped, "total": total,
+        }
+
     try:
+        db = session_factory()
         nodes = _ordered_chapter_nodes(db, novel_id)
         total = len(nodes)
-        done = 0
-        failed = 0
-        yield _sse({"type": "progress", "message": f"开始自动驾驶，共 {total} 个章节点", "total": total, "done": done})
+        yield _sse({
+            "type": "progress", "phase": "starting",
+            "message": f"开始自动驾驶，共 {total} 个章节点", **counts(),
+        })
 
         for node in nodes:
             if state.paused:
                 yield _sse({"type": "paused", "message": "已暂停"})
                 while state.paused and not state.stop:
                     time.sleep(0.5)
+                    if state.paused and not state.stop:
+                        # 保留可取消的输出边界，暂停时断开客户端也能回收任务。
+                        yield ": paused\n\n"
             if state.stop:
-                yield _sse({"type": "done", "message": "已停止"})
-                return
+                terminal_status = "stopped"
+                break
 
-            if _has_chapter(db, novel_id, node.id):
-                yield _sse({"type": "progress", "message": f"跳过已生成：{node.title}", "node_id": node.id})
+            # 缓存节点标识，事务回滚后仍能明确指出失败的章节。
+            node_id, node_title = node.id, node.title
+            if _has_chapter(db, novel_id, node_id):
+                skipped += 1
+                yield _sse({
+                    "type": "progress", "phase": "skipped",
+                    "message": f"跳过已生成：{node_title}", "node_id": node_id,
+                    "title": node_title, **counts(),
+                })
                 continue
 
-            state.current_node_id = node.id
+            state.current_node_id = node_id
             directive = state.injected_directive
             state.injected_directive = ""
-            yield _sse({"type": "progress", "message": f"生成：{node.title}", "node_id": node.id})
+            yield _sse({
+                "type": "progress", "phase": "generating",
+                "message": f"生成：{node_title}", "node_id": node_id,
+                "title": node_title, **counts(),
+            })
 
             try:
-                context = build_context(db, novel_id, directive, f"大纲章节：{node.title}")
+                context = build_context(db, novel_id, directive, f"大纲章节：{node_title}")
                 messages = [
                     {"role": "system", "content": WRITE_SYSTEM},
                     {
                         "role": "user",
-                        "content": f"{context}\n\n请撰写本章正文（标题：{node.title}；概要：{node.summary or '无'}）：",
+                        "content": f"{context}\n\n请撰写本章正文（标题：{node_title}；概要：{node.summary or '无'}）：",
                     },
                 ]
 
                 full = ""
                 for chunk in llm.stream_complete(messages, max_tokens=get_settings().writing_max_tokens):
                     full += chunk
-                    yield _sse({"type": "text", "content": chunk, "node_id": node.id})
+                    yield _sse({
+                        "type": "text", "content": chunk, "node_id": node_id, "title": node_title,
+                    })
 
                 if not full.strip():
                     raise ValueError("未生成有效正文，请重试")
@@ -234,7 +267,8 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                     {
                         "type": "check",
                         "conflicts": len(conflicts),
-                        "node_id": node.id,
+                        "node_id": node_id,
+                        "title": node_title,
                         "message": f"发现 {len(conflicts)} 处冲突" if conflicts else "一致性检查通过",
                     }
                 )
@@ -242,63 +276,115 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                 seq = ChapterRepo(db).next_seq(novel_id)
                 chapter = ChapterRepo(db).create(
                     novel_id,
-                    outline_node_id=node.id,
+                    outline_node_id=node_id,
                     seq=seq,
-                    title=node.title,
+                    title=node_title,
                     content=full,
                     status="draft",
                     directive=directive,
                 )
-                state.current_seq = seq
-                yield _sse(
-                    {"type": "chapter_done", "chapter_id": chapter.id, "seq": seq, "node_id": node.id, "title": node.title}
-                )
-
-                try:
-                    score = score_tension(full)
-                    ChapterRepo(db).update(novel_id, chapter.id, tension_score=score)
-                    yield _sse({"type": "tension", "score": round(score, 1), "seq": seq, "chapter_id": chapter.id})
-                except Exception as exc:  # noqa: BLE001
-                    yield _sse({"type": "error", "message": f"张力评分失败：{exc}", "seq": seq})
-
-                try:
-                    sim = check_drift(db, novel_id, full)
-                    if sim is not None:
-                        # 漂移分落库，供质量曲线跨会话查询
-                        ChapterRepo(db).update(novel_id, chapter.id, drift_score=sim)
-                        yield _sse(
-                            {
-                                "type": "drift",
-                                "score": round(sim, 3),
-                                "warning": sim < DRIFT_THRESHOLD,
-                                "seq": seq,
-                                "chapter_id": chapter.id,
-                            }
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    yield _sse({"type": "error", "message": f"文风检测失败：{exc}", "seq": seq})
-
-                state.fail_count = 0
-                done += 1
-                yield _sse({"type": "progress", "message": f"已完成 {done}/{total}", "done": done, "total": total})
-
             except Exception as exc:  # noqa: BLE001  单章失败，计数并可能熔断
                 db.rollback()
                 failed += 1
                 state.fail_count += 1
-                yield _sse({"type": "error", "message": f"生成失败（第 {state.fail_count} 次）：{exc}", "node_id": node.id})
+                yield _sse({
+                    "type": "error", "scope": "chapter", "fatal": False,
+                    "code": getattr(exc, "code", "generation_failed"), "saved": False,
+                    "message": f"《{node_title}》生成失败（连续第 {state.fail_count} 次）：{exc} 本章未保存，已收到的内容保留为未完成稿。",
+                    "node_id": node_id, "title": node_title, **counts(),
+                })
                 if state.fail_count >= FAIL_THRESHOLD:
-                    yield _sse({"type": "paused", "message": f"连续失败超过阈值，自动暂停：{exc}"})
-                    state.paused = True
+                    terminal_reason = "failure_threshold"
                     break
+                continue
 
-        if not state.stop:
+            # 正文已经提交：质量检测失败不能误报为正文失败，也不能撤销此确认。
+            chapter_id = chapter.id
+            state.current_seq = seq
+            state.fail_count = 0
+            generated += 1
             yield _sse({
-                "type": "done",
-                "message": "自动驾驶结束，仍有未完成章节" if failed else "自动驾驶完成",
-                "total": total, "done": done,
+                "type": "chapter_done", "chapter_id": chapter_id, "seq": seq,
+                "node_id": node_id, "title": node_title, **counts(),
             })
 
+            try:
+                score = score_tension(full)
+                ChapterRepo(db).update(novel_id, chapter_id, tension_score=score)
+                yield _sse({
+                    "type": "tension", "score": round(score, 1), "seq": seq,
+                    "chapter_id": chapter_id, "node_id": node_id, "title": node_title,
+                })
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                yield _sse({
+                    "type": "error", "scope": "quality", "fatal": False,
+                    "code": "quality_check_failed", "kind": "tension", "saved": True,
+                    "message": f"《{node_title}》正文已保存，张力评分失败：{exc}",
+                    "seq": seq, "chapter_id": chapter_id, "node_id": node_id, "title": node_title,
+                })
+
+            try:
+                sim = check_drift(db, novel_id, full)
+                if sim is not None:
+                    ChapterRepo(db).update(novel_id, chapter_id, drift_score=sim)
+                    yield _sse({
+                        "type": "drift", "score": round(sim, 3), "warning": sim < DRIFT_THRESHOLD,
+                        "seq": seq, "chapter_id": chapter_id, "node_id": node_id, "title": node_title,
+                    })
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                yield _sse({
+                    "type": "error", "scope": "quality", "fatal": False,
+                    "code": "quality_check_failed", "kind": "drift", "saved": True,
+                    "message": f"《{node_title}》正文已保存，文风检测失败：{exc}",
+                    "seq": seq, "chapter_id": chapter_id, "node_id": node_id, "title": node_title,
+                })
+
+            yield _sse({
+                "type": "progress", "phase": "generated",
+                "message": f"已完成 {generated + skipped}/{total}", "node_id": node_id,
+                "title": node_title, **counts(),
+            })
+        if state.stop:
+            terminal_status = "stopped"
+        elif generated + skipped < total:
+            terminal_status = "incomplete"
+    except Exception as exc:  # noqa: BLE001  任务启动/编排异常也必须明确结束。
+        terminal_status = "incomplete"
+        if db is not None:
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001  回滚失败不能掩盖任务终态。
+                pass
+        task_error = {
+            "type": "error", "scope": "task", "fatal": True,
+            "code": "autopilot_task_failed", "message": f"自动驾驶任务异常结束：{exc}",
+        }
     finally:
         registry.finish(novel_id)
-        db.close()
+        if db is not None:
+            try:
+                db.close()
+            except Exception as exc:  # noqa: BLE001
+                cleanup_error = exc
+
+    if task_error is not None:
+        yield _sse(task_error)
+    if cleanup_error is not None:
+        terminal_status = "incomplete"
+        yield _sse({
+            "type": "error", "scope": "task", "fatal": True,
+            "code": "autopilot_cleanup_failed", "message": f"自动驾驶会话关闭失败：{cleanup_error}",
+        })
+    message = {
+        "completed": "自动驾驶完成",
+        "incomplete": "自动驾驶结束，仍有未完成章节",
+        "stopped": "已停止",
+    }[terminal_status]
+    if terminal_reason == "failure_threshold":
+        message = "连续三次生成失败，自动驾驶已结束，仍有未完成章节"
+    yield _sse({
+        "type": "done", "status": terminal_status, "message": message,
+        "reason": terminal_reason, **counts(),
+    })

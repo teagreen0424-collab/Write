@@ -368,6 +368,17 @@ export interface AutopilotEvent {
     | 'paused'
     | 'error'
     | 'done'
+  scope?: 'chapter' | 'quality' | 'task'
+  phase?: 'starting' | 'generating' | 'skipped' | 'generated'
+  status?: 'completed' | 'incomplete' | 'stopped'
+  saved?: boolean
+  fatal?: boolean
+  node_id?: string
+  title?: string
+  code?: string
+  generated?: number
+  skipped?: number
+  failed?: number
   [key: string]: any
 }
 

@@ -142,35 +142,81 @@ export async function streamSSE(
   }
 }
 
+export interface EventStreamOptions {
+  signal?: AbortSignal
+  onError?: (message: string, code?: string) => void | Promise<void>
+}
+
 export async function streamEvents(
   url: string,
-  onEvent: (event: any) => void,
+  onEvent: (event: any) => void | Promise<void>,
+  options: EventStreamOptions = {},
 ): Promise<void> {
-  const resp = await fetch(url)
-  if (!resp.ok || !resp.body) {
-    const err = await resp.json().catch(() => null)
-    onEvent({ type: 'error', message: err?.detail ?? `HTTP ${resp.status}` })
-    return
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  let terminal: 'done' | 'error' | null = null
+  let errorReported = false
+  const reportError = async (message: string, code: string) => {
+    errorReported = true
+    if (options.onError) await options.onError(message, code)
+    else await onEvent({ type: 'error', scope: 'task', fatal: true, message, code })
   }
-  const reader = resp.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const parts = buffer.split('\n\n')
-    buffer = parts.pop() ?? ''
-    for (const part of parts) {
-      const line = part.trim()
-      if (!line.startsWith('data:')) continue
-      const payload = line.slice(5).trim()
-      if (!payload) continue
-      try {
-        onEvent(JSON.parse(payload))
-      } catch {
-        /* ignore */
+  const processEvent = async (part: string) => {
+    const payload = part.split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+    if (!payload.trim()) return
+    let event: any
+    try {
+      event = JSON.parse(payload)
+    } catch {
+      throw new Error('自动驾驶数据格式无效，未收到完成确认')
+    }
+    if (!event || typeof event !== 'object' || Array.isArray(event) || typeof event.type !== 'string') {
+      throw new Error('自动驾驶事件格式无效')
+    }
+    if (event.type === 'text' && (typeof event.content !== 'string' || typeof event.node_id !== 'string')) {
+      throw new Error('自动驾驶正文格式无效')
+    }
+    if (event.type === 'done') terminal = 'done'
+    else if (event.type === 'error' && event.fatal === true) terminal = 'error'
+    await onEvent(event)
+  }
+  try {
+    const response = await fetch(url, { signal: options.signal })
+    if (!response.ok || !response.body) {
+      const error = await response.json().catch(() => null)
+      await reportError(typeof error?.detail === 'string' ? error.detail : `HTTP ${response.status}`, 'STREAM_REQUEST_FAILED')
+      return
+    }
+    reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (!terminal) {
+      const { done, value } = await reader.read()
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true })
+      buffer = buffer.replace(/\r\n/g, '\n')
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() ?? ''
+      for (const part of parts) {
+        await processEvent(part)
+        if (terminal) break
       }
+      if (done) {
+        if (!terminal && buffer.trim()) await processEvent(buffer)
+        if (!terminal) throw new Error('自动驾驶连接提前结束，未收到完成确认')
+        break
+      }
+    }
+  } catch (error) {
+    if (errorReported) throw error
+    if (options.signal?.aborted) return
+    const message = error instanceof Error ? error.message : '自动驾驶连接中断'
+    await reportError(message, terminal === 'done' ? 'CLIENT_UPDATE_FAILED' : 'STREAM_INCOMPLETE')
+  } finally {
+    if (reader) {
+      await reader.cancel().catch(() => {})
+      reader.releaseLock()
     }
   }
 }

@@ -38,8 +38,10 @@ const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'foresh
 const focusTarget = ref<{ type: EntityType; id: string } | null>(null)
 const refreshKey = ref(0)
 const writingDirty = ref(false)
+const autopilotDirty = ref(false)
 const showNavigationConfirm = ref(false)
 const navigationTarget = ref('')
+const navigationWarning = ref('')
 const pendingNavigation = ref<(() => void) | null>(null)
 
 const showCreate = ref(false)
@@ -87,8 +89,11 @@ function onGraphEdit(payload: { type: EntityType; id: string }) {
 }
 
 function navigateSafely(target: string, navigate: () => void) {
-  if (activeTab.value === 'writing' && writingDirty.value) {
+  if ((activeTab.value === 'writing' && writingDirty.value) || (activeTab.value === 'autopilot' && autopilotDirty.value)) {
     navigationTarget.value = target
+    navigationWarning.value = activeTab.value === 'autopilot'
+      ? '自动驾驶仍在运行或有未完成稿。离开会放弃本页面的片段并断开连接，不能保证后台任务停止。'
+      : '当前章节有未保存修改或未完成输出。'
     pendingNavigation.value = navigate
     showNavigationConfirm.value = true
   } else {
@@ -119,7 +124,7 @@ function returnToChat() {
 function changeTab(value: string) {
   const next = value as typeof activeTab.value
   if (next === activeTab.value) return
-  navigateSafely('离开写作页', () => { activeTab.value = next })
+  navigateSafely(activeTab.value === 'autopilot' ? '离开自动驾驶页' : '离开写作页', () => { activeTab.value = next })
 }
 
 onMounted(loadNovels)
@@ -173,7 +178,7 @@ onMounted(loadNovels)
         :novel-id="novelId ?? ''"
         :refresh-key="refreshKey"
       />
-      <AutopilotPanel v-if="activeTab === 'autopilot'" :novel-id="novelId ?? ''" />
+      <AutopilotPanel v-if="activeTab === 'autopilot'" :novel-id="novelId ?? ''" @dirty-change="autopilotDirty = $event" />
       <ForeshadowingTracking v-if="activeTab === 'foreshadowing'" :novel-id="novelId ?? ''" />
       <KnowledgeGraph
         v-if="activeTab === 'graph'"
@@ -190,7 +195,7 @@ onMounted(loadNovels)
       style="width: min(480px, calc(100vw - 32px))"
       @update:show="cancelNavigation"
     >
-      <p>当前章节有未保存修改或未完成输出，确定放弃并{{ navigationTarget }}吗？</p>
+      <p>{{ navigationWarning }}确定放弃并{{ navigationTarget }}吗？</p>
       <template #footer>
         <div class="modal-actions">
           <n-button @click="cancelNavigation">继续编辑</n-button>

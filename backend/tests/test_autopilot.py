@@ -84,7 +84,10 @@ class AutoPilotTest(unittest.TestCase):
             events = _events(auto_pilot.run_autopilot(self.nid, session_factory=Session))
 
         types = [e["type"] for e in events]
-        self.assertIn("paused", types)
+        self.assertNotIn("paused", types)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(events[-1]["status"], "incomplete")
+        self.assertEqual(events[-1]["reason"], "failure_threshold")
         # 熔断后没有生成章节
         self.assertEqual(len(repos.ChapterRepo(self.db).list(self.nid)), 0)
 
