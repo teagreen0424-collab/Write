@@ -61,7 +61,7 @@ class AutopilotTaskManager:
     def get(self, novel_id, task_id):
         return self._snapshot(self._read("get", novel_id, task_id))
 
-    def start(self, novel_id, request_id):
+    def start(self, novel_id, request_id, word_limits=None):
         request_id = task_uuid(request_id)
         with self._condition:
             if self._closing:
@@ -79,11 +79,11 @@ class AutopilotTaskManager:
                     ) from exc
                 self._fallback.pop(fallback_id, None)
             with self.session_factory() as db:
-                snapshot, created = AutopilotTaskRepo(db).create(novel_id, request_id)
+                snapshot, created = AutopilotTaskRepo(db).create(novel_id, request_id, word_limits)
             if not created:
                 return self._snapshot(snapshot)
             try:
-                state = self.registry.start(novel_id, owner_id=request_id)
+                state = self.registry.start(novel_id, owner_id=request_id, word_limits=snapshot.get("word_limits"))
                 worker = _Worker(novel_id, request_id, state)
                 worker.thread = threading.Thread(
                     target=self._execute, args=(worker,), name=f"autopilot-{request_id}", daemon=True,

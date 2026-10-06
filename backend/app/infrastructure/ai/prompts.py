@@ -8,6 +8,11 @@ SCAFFOLD_SMOKE_PROMPT = "请用一句中文简单介绍你自己，并说明你�
 
 # ================= 写作 =================
 
+WORD_COUNT_TARGET = """【作者设置的篇幅目标】
+本章正文{target}。字数按非空白 Unicode 字符计数，包含标点；空格和换行不计。
+完整保留情节要求，合理控制篇幅。"""
+WORD_LIMITS_USER = WORD_COUNT_TARGET
+
 WRITE_SYSTEM = (
     "你是资深中文网络小说作家。根据给定的设定与前情摘要写一章正文，"
     "语言流畅、有画面感，严格遵守「章前指令」。"
@@ -88,7 +93,11 @@ OUTLINE_CHECK_USER = """【本章绑定的大纲】
 
 STORY_CHECK_SYSTEM = (
     "你是中文小说剧情审校员，一次复核作者要求的实际执行、跨章承接、设定及本章大纲。"
-    "输出逐条要求的检查结论 checks，而不是把所有检查结论都当成违规问题。"
+    "程序已把作者章前指令和大纲拆成固定编号的核对计划，你必须按每个 ID 逐项返回 requirement_checks。"
+    "不能自行重新制定计划、省去条目、改变 ID、合并不同 ID，或用一项总体 satisfied 代表全部完成。"
+    "同一句中的不同动作仍是独立要求，必须分别核对；context_id 指向该句完整原文，不能丢失对象或前提。"
+    "除此之外，设定和跨章承接结论另放 checks，只能用 setting 或 continuity 分类。"
+    "只判定逐项要求，不要把所有检查结论都当成违规问题。"
     "每项 status 只能是 violation、satisfied、uncertain："
     "violation 表示有明确文本依据的违背约束或完整正文中遗漏必要场景；"
     "satisfied 表示已实际满足、符合设定或不存在明确矛盾，必须选此状态而非 violation；"
@@ -109,6 +118,12 @@ STORY_CHECK_SYSTEM = (
     "例如前章约定次日下午、当前改为次日早上且未解释，应指出具体时间证据。"
     "作者章前指令须拆成逐个行为或场景要求，逐一查看正文中是否实际发生，不能仅匹配相关词。"
     "例如要求‘有人提议偷原始档案、主角拒绝’，只有另一角色提醒‘别偷档案’不等价于这些行为发生。"
+    "计划中 evidence_required=true 的 satisfied 项必须给出正文真实原句作为肯定证据，不能为空；"
+    "引用必须体现该项动作或事实，不能拿另一个已完成动作替代。两项可共用引文仅限该原句确实同时体现两项。"
+    "禁止性要求可引用实际守规行为、人物限制或未得出结论的原句作为依据，不能编造引文。"
+    "仅程序标记 evidence_required=false 的纯篇幅/输出格式元项允许无正文引文；"
+    "小说不需要写出作者设置的字数数字或输出格式术语，不得为索取这些元项引文而判违规。"
+    "若需要肯定证据却没有找到，不能返回空引文 satisfied；明确未满足时判 violation，否则判 uncertain。"
     "本章大纲是要推进的目标，不是已发生的前情；不要求逐字重复。"
     "大纲已经要求并实现了联系、约定或获取资料时，不能擅自增加某条未写明的资料内容或操作条件再判缺失。"
     "资料标记截断时，只判断实际提供部分的明确冲突；正文中段省略时不能断言某场景在整章缺失。"
@@ -120,7 +135,7 @@ STORY_CHECK_SYSTEM = (
     "不得把这些正常结论写成 violation。基本符合、约定成立也不能仅为建议润色而判违规。"
     "仅问‘是否’‘若某未说明条件则可能’的假设不构成约束，不把普通润色建议包装成冲突。"
     "若已符合实际写明的要求，仅缺少作者未要求的程序细节，也判 satisfied，不可判 uncertain。"
-    "每项 reason 简洁，满足项控制在 80 字内，违规项控制在 200 字内；satisfied 的 excerpt 可留空。"
+    "每项 reason 简洁，满足项控制在 40 字内，违规项控制在 120 字内；正文引文尽量短且保持原样。"
     "severity 在 satisfied 或 uncertain 时用 low；仅确切违规才区分 high、medium、low。"
     "保留有文本依据的明确矛盾，以及完整正文中明确要求却未发生的关键行为。"
     "只返回合法 JSON，不要 Markdown、正文改写或额外解释。"
@@ -130,8 +145,9 @@ STORY_CHECK_USER = """以下 JSON 为本次审校资料：
 {materials}
 
 返回 JSON：
-{{"checks":[{{"status":"violation|satisfied|uncertain","category":"directive|continuity|setting|outline","severity":"high|medium|low","requirement":"具体的章前要求、前章事实或设定依据","excerpt":"待检查正文原文短句，明确遗漏或满足项可留空","reason":"简洁的判定依据；已满足时明确写已满足"}}]}}
-逐个判断实际要求，至少返回一项检查结果。无违规时返回 status 为 satisfied 的检查项，不要返回 issues 字段或空列表。
+{{"requirement_checks":[{{"requirement_id":"程序计划中的原始 ID","status":"violation|satisfied|uncertain","excerpt":"正文原文证据，纯元项或明确遗漏可留空","reason":"该编号的简洁判定依据"}}],"checks":[{{"status":"violation|satisfied|uncertain","category":"setting|continuity","severity":"high|medium|low","requirement":"具体的前章事实或设定依据","excerpt":"待检查正文原文短句，可留空","reason":"简洁的判定依据"}}]}}
+requirement_checks 必须恰好覆盖程序计划的全部 ID，各 ID 一次。没有作者或大纲计划时才可为空。
+checks 可为空；不把章前指令或大纲项转到 checks 绕过编号核对。不得返回 issues 字段。
 不要改动资料；不要自行输出整体通过结论。"""
 
 CONTINUE_SYSTEM = (

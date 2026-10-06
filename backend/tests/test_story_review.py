@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from fastapi import FastAPI, HTTPException
@@ -70,15 +71,18 @@ class StoryReviewTest(unittest.TestCase):
     @staticmethod
     def issue(**overrides):
         return {
-            "status": "violation", "category": "directive", "severity": "medium",
+            "status": "violation", "category": "setting", "severity": "medium",
             "requirement": "他人提议偷档案，林舟拒绝", "excerpt": "",
             "reason": "角色告诫不要偷取，未写出他人的提议及主角的拒绝",
             **overrides,
         }
 
-    @staticmethod
-    def satisfied_response():
-        return json.dumps({"checks": [StoryReviewTest.issue(
+    def satisfied_response(self, content="保存的正文", checks=None, directive=None):
+        plan = story_review.build_requirement_plan(self.chapter.directive if directive is None else directive, self.outline.summary)
+        return json.dumps({"requirement_checks": [
+            {"requirement_id": item.id, "status": "satisfied", "excerpt": content[:40], "reason": "有正文依据"}
+            for item in plan
+        ], "checks": checks if checks is not None else [self.issue(
             status="satisfied", severity="low", requirement="正文符合明确设定",
             reason="已符合明确要求，没有明确矛盾",
         )]}, ensure_ascii=False)
@@ -96,7 +100,10 @@ class StoryReviewTest(unittest.TestCase):
             sql.append(statement.lstrip().split(" ", 1)[0].upper())
         event.listen(self.engine, "before_cursor_execute", track)
         try:
-            reply = json.dumps({"checks": [self.issue()]}, ensure_ascii=False)
+            reply = json.dumps({"requirement_checks": [
+                {"requirement_id": item.id, "status": "violation", "excerpt": "", "reason": "必要场景未出现"}
+                for item in story_review.build_requirement_plan(self.chapter.directive, self.outline.summary)
+            ], "checks": []}, ensure_ascii=False)
             with patch.object(story_review.llm, "complete", return_value=reply) as complete:
                 response = self.client.post(self.path, json={
                     "content": "周敏提醒：不要偷档案。", "directive": "新的构思：他人提议偷档案，林舟拒绝。",
@@ -195,9 +202,9 @@ class StoryReviewTest(unittest.TestCase):
 
     def test_truncated_current_body_cannot_claim_missing_scene_or_complete_review(self):
         content = "首段" + "中段" * 6000 + "末段"
-        with patch.object(story_review.llm, "complete", return_value=json.dumps({"checks": [
-            self.issue(), self.issue(category="continuity", excerpt="末段", reason="有明确矛盾待核对"),
-        ]})) as complete:
+        with patch.object(story_review.llm, "complete", return_value=json.dumps({"requirement_checks": [
+            {"requirement_id": "d001", "status": "violation", "excerpt": "", "reason": "场景缺失"},
+        ], "checks": [self.issue(category="continuity", excerpt="末段", reason="有明确矛盾待核对")]})) as complete:
             response = self.client.post(self.path, json={"content": content})
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()
@@ -247,7 +254,7 @@ class StoryReviewTest(unittest.TestCase):
         del missing_status["status"]
         missing_status = json.dumps({"checks": [missing_status]})
         for value in ('没有问题', '{}', '{"checks":{}}', '{"checks":[{}]}', '[]', blank_issue,
-                      '{"checks":[]}', '{"issues":[]}', invalid_status, missing_status):
+                      '{"issues":[]}', invalid_status, missing_status):
             with self.subTest(value=value), patch.object(story_review.llm, "complete", return_value=value):
                 response = self.client.post(self.path, json={})
             self.assertEqual(response.status_code, 502)
@@ -282,6 +289,7 @@ class StoryReviewTest(unittest.TestCase):
         self.assertNotIn("正文中段已省略", content)
 
     def test_pending_session_changes_are_not_flushed_by_readonly_review(self):
+        reply = self.satisfied_response()
         self.character.goal = "尚未保存的目标"
         self.assertTrue(self.db.dirty)
         sql = []
@@ -289,7 +297,7 @@ class StoryReviewTest(unittest.TestCase):
             sql.append(statement.lstrip().split(" ", 1)[0].upper())
         event.listen(self.engine, "before_cursor_execute", track)
         try:
-            with patch.object(story_review.llm, "complete", return_value=self.satisfied_response()):
+            with patch.object(story_review.llm, "complete", return_value=reply):
                 response = self.client.post(self.path, json={})
             self.assertEqual(response.status_code, 200, response.text)
             self.assertTrue(self.db.dirty)
@@ -308,7 +316,7 @@ class StoryReviewTest(unittest.TestCase):
 
     def test_explicit_provider_receives_exactly_one_call_and_no_default_call(self):
         provider = Mock()
-        provider.complete.return_value = self.satisfied_response()
+        provider.complete.return_value = self.satisfied_response("编辑稿", directive="")
         with patch.object(story_review.llm, "complete") as default:
             result = story_review.review_story(
                 self.db, self.novel.id, "编辑稿", chapter_seq=2,
@@ -326,9 +334,7 @@ class StoryReviewTest(unittest.TestCase):
             "大纲目标均已覆盖，不构成遗漏",
             "基本符合设定，约定成立，无需另加未要求的程序细节",
         )
-        reply = {"checks": [self.issue(
-            status="satisfied", severity="low", reason=reason,
-        ) for reason in reasons]}
+        reply = json.loads(self.satisfied_response(checks=[self.issue(status="satisfied", severity="low", reason=reason) for reason in reasons]))
         with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)) as complete:
             response = self.client.post(self.path, json={})
         self.assertEqual(response.status_code, 200, response.text)
@@ -338,13 +344,13 @@ class StoryReviewTest(unittest.TestCase):
         self.assertNotIn("checks", response.json())
 
     def test_only_violation_status_maps_to_public_issues_and_real_problems_remain(self):
-        reply = {"checks": [
+        reply = json.loads(self.satisfied_response("次日上午", checks=[
             self.issue(status="satisfied", reason="没有遗漏，没有冲突，完全满足"),
-            self.issue(status="violation", severity="high", reason="未写出提议及拒绝场景"),
             self.issue(status="violation", category="continuity", severity="high",
                        requirement="前章约定明天下午", excerpt="次日上午",
                        reason="前章约好次日下午，当前改为次日上午，没有合理解释"),
-        ]}
+        ]))
+        reply["requirement_checks"][0].update(status="violation", excerpt="", reason="提议场景缺失")
         with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)):
             response = self.client.post(self.path, json={"content": "次日上午，他到了档案室。"})
         self.assertEqual(response.status_code, 200, response.text)
@@ -375,7 +381,7 @@ class StoryReviewTest(unittest.TestCase):
         self.assertFalse(response.json()["review_complete"])
 
     def test_more_than_six_satisfied_checks_does_not_truncate_violations(self):
-        reply = {"checks": [self.issue(status="satisfied", severity="low", reason="符合明确要求")] * 8}
+        reply = json.loads(self.satisfied_response(checks=[self.issue(status="satisfied", severity="low", reason="符合明确要求")] * 8))
         with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)):
             response = self.client.post(self.path, json={})
         self.assertEqual(response.status_code, 200, response.text)
@@ -391,7 +397,160 @@ class StoryReviewTest(unittest.TestCase):
         self.assertIn("必须选此状态而非 violation", system)
         self.assertIn('"checks"', user)
         self.assertIn('"status":"violation|satisfied|uncertain"', user)
-        self.assertIn("至少返回一项检查结果", user)
+        self.assertIn("恰好覆盖程序计划的全部 ID", user)
+
+    def test_one_satisfied_setting_check_cannot_stand_for_all_author_requirements(self):
+        reply = {"checks": [self.issue(status="satisfied", severity="low", reason="符合设定")]}
+        with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)):
+            response = self.client.post(self.path, json={})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["review_complete"])
+        self.assertEqual(data["unreviewed_requirement_ids"], [item["id"] for item in data["requirements"]])
+        self.assertEqual(data["requirement_checks"], [])
+
+    def test_missing_duplicate_unknown_and_wrong_category_never_claim_complete(self):
+        mutations = ("missing", "duplicate", "unknown", "wrong_category")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                reply = json.loads(self.satisfied_response())
+                first = reply["requirement_checks"][0]
+                expected_id = first["requirement_id"]
+                if mutation == "missing":
+                    reply["requirement_checks"].pop(0)
+                elif mutation == "duplicate":
+                    reply["requirement_checks"].append(dict(first))
+                elif mutation == "unknown":
+                    reply["requirement_checks"].append({**first, "requirement_id": "invented-id"})
+                else:
+                    first["category"] = "outline"
+                with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)):
+                    response = self.client.post(self.path, json={})
+                self.assertEqual(response.status_code, 200, response.text)
+                data = response.json()
+                self.assertFalse(data["review_complete"])
+                if mutation != "unknown":
+                    self.assertIn(expected_id, data["unreviewed_requirement_ids"])
+                    self.assertNotIn(expected_id, [item["requirement_id"] for item in data["requirement_checks"]])
+                self.assertNotIn("invented-id", [item["requirement_id"] for item in data["requirement_checks"]])
+
+    def test_satisfied_scene_missing_or_fake_quote_is_unreviewed(self):
+        for excerpt in ("", "并不存在的正文引文", "正文中段已省略"):
+            with self.subTest(excerpt=excerpt):
+                reply = json.loads(self.satisfied_response())
+                first = reply["requirement_checks"][0]
+                first["excerpt"] = excerpt
+                with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)):
+                    response = self.client.post(self.path, json={})
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(response.json()["review_complete"])
+                self.assertIn(first["requirement_id"], response.json()["unreviewed_requirement_ids"])
+
+    def test_uncertain_planned_requirement_is_visible_and_unreviewed(self):
+        reply = json.loads(self.satisfied_response())
+        reply["requirement_checks"][0].update(status="uncertain", excerpt="", reason="所需依据不足")
+        with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)):
+            response = self.client.post(self.path, json={})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["review_complete"])
+        self.assertEqual(response.json()["requirement_checks"][0]["status"], "uncertain")
+        self.assertIn("d001", response.json()["unreviewed_requirement_ids"])
+
+    def test_no_identifier_can_bypass_plan_using_independent_directive_category(self):
+        reply = json.loads(self.satisfied_response(checks=[self.issue(category="directive")]))
+        with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)):
+            response = self.client.post(self.path, json={})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["review_complete"])
+        self.assertEqual(response.json()["issues"], [])
+
+    def test_output_metadata_satisfied_does_not_require_range_text_inside_novel(self):
+        directive = "每章正文约1200至1600个中文字符（含标点，不计空白），不列小节。主角拒绝邀请。"
+        plan = story_review.build_requirement_plan(directive)
+        reply = {"requirement_checks": [
+            {"requirement_id": item.id, "status": "satisfied", "excerpt": "主角拒绝了邀请。" if item.evidence_required else "",
+             "reason": "符合该要求"}
+            for item in plan
+        ], "checks": []}
+        ChapterRepo(self.db).update(self.novel.id, self.chapter.id, outline_node_id="")
+        with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)):
+            response = self.client.post(self.path, json={"content": "主角拒绝了邀请。", "directive": directive})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["review_complete"])
+        self.assertEqual(response.json()["unreviewed_requirement_ids"], [])
+        self.assertNotIn("1200", "主角拒绝了邀请。")
+
+    def test_long_directive_plan_keeps_tail_requirement_even_when_inputs_are_bounded(self):
+        directive = "开头要求，" + "中间很长的要求" * 800 + "。尾部关键要求。"
+        with patch.object(story_review.llm, "complete", return_value='{"requirement_checks":[],"checks":[]}'):
+            response = self.client.post(self.path, json={"directive": directive})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["truncated"])
+        self.assertFalse(response.json()["review_complete"])
+        self.assertIn("尾部关键要求", [item["text"] for item in response.json()["requirements"]])
+        self.assertEqual(response.json()["unreviewed_requirement_ids"], [item["id"] for item in response.json()["requirements"]])
+
+    def test_private_requirement_check_invalid_status_is_a_safe_format_error(self):
+        reply = json.loads(self.satisfied_response())
+        reply["requirement_checks"][0]["status"] = "pass"
+        with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)):
+            response = self.client.post(self.path, json={})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("格式无效", response.json()["detail"])
+
+    def test_real_old_bad_scene_cannot_pass_when_model_omits_both_action_checks(self):
+        fixture = json.loads((Path(__file__).parent / "fixtures/story_review_real_cases.json").read_text(encoding="utf-8"))
+        ChapterRepo(self.db).update(self.novel.id, self.chapter.id, outline_node_id="")
+        plan = story_review.build_requirement_plan(fixture["directive"])
+        self.assertIn("有人建议林舟偷取原始档案", plan[0].text)
+        self.assertEqual(plan[1].text, "林舟拒绝")
+        reply = {"requirement_checks": [
+            {"requirement_id": item.id, "status": "satisfied", "excerpt": fixture["old_bad_body"][:40], "reason": "有正文依据"}
+            for item in plan[2:]
+        ], "checks": [self.issue(status="satisfied", reason="总体守规")]}
+        with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)):
+            response = self.client.post(self.path, json={"content": fixture["old_bad_body"], "directive": fixture["directive"]})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["review_complete"])
+        self.assertEqual(response.json()["unreviewed_requirement_ids"], ["d001", "d002"])
+        self.assertNotIn("把登记簿带走慢慢查", fixture["old_bad_body"])
+
+    def test_real_corrected_scene_with_all_numbered_quotes_can_complete(self):
+        fixture = json.loads((Path(__file__).parent / "fixtures/story_review_real_cases.json").read_text(encoding="utf-8"))
+        ChapterRepo(self.db).update(self.novel.id, self.chapter.id, outline_node_id="")
+        evidence = (
+            "趁她进去，把登记簿带走慢慢查。",
+            "不拿。原件有保管程序，我要查就登记申请，不能为一条线索偷档案。",
+            "表格列着查档人姓名、查档事由、查档范围。",
+            "林舟把两张影印件对折，放进牛皮纸袋。",
+            "林舟用右手填表，笔迹偏硬。",
+            "左手在口袋里慢慢攥了一下又松开，酸胀感比早晨轻了些。",
+            "登记簿第17页缺半页，缺页内容待申请公开。",
+        )
+        plan = story_review.build_requirement_plan(fixture["directive"])
+        self.assertEqual(len(plan), len(evidence))
+        self.assertTrue(all(quote in fixture["corrected_body"] for quote in evidence))
+        reply = {"requirement_checks": [
+            {"requirement_id": item.id, "status": "satisfied", "excerpt": quote, "reason": "本项有正文依据"}
+            for item, quote in zip(plan, evidence)
+        ], "checks": []}
+        with patch.object(story_review.llm, "complete", return_value=json.dumps(reply)) as complete:
+            response = self.client.post(self.path, json={"content": fixture["corrected_body"], "directive": fixture["directive"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["review_complete"])
+        self.assertEqual(response.json()["unreviewed_requirement_ids"], [])
+        self.assertEqual(len(response.json()["requirement_checks"]), 7)
+        self.assertEqual(response.json()["issues"], [])
+        self.assertEqual(complete.call_count, 1)
+
+    def test_output_budget_scales_with_plan_without_adding_model_calls(self):
+        directive = "。".join(f"动作{i}发生" for i in range(30))
+        with patch.object(story_review.llm, "complete", return_value='{"requirement_checks":[],"checks":[]}') as complete:
+            response = self.client.post(self.path, json={"directive": directive})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(complete.call_count, 1)
+        self.assertGreater(complete.call_args.kwargs["max_tokens"], 3500)
+        self.assertLessEqual(complete.call_args.kwargs["max_tokens"], 8000)
 
 
 if __name__ == "__main__":

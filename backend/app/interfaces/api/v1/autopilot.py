@@ -37,7 +37,8 @@ router = APIRouter(
 
 @router.post("/start")
 def start(novel_id: str, payload: schemas.AutopilotTaskStartRequest):
-    return autopilot_tasks.manager.start(novel_id, str(payload.request_id))
+    word_limits = payload.word_limits.model_dump() if payload.word_limits is not None else None
+    return autopilot_tasks.manager.start(novel_id, str(payload.request_id), word_limits)
 
 
 def _events(novel_id: str, task_id: str, after: int | None):

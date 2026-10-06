@@ -10,6 +10,7 @@ from app.application.consistency import consistency_check
 from app.application.autopilot_draft_journal import AutopilotDraftJournal
 from app.application.context import build_context, ordered_chapter_nodes, prior_chapter_context
 from app.application.story_review import review_story
+from app.application.word_count import check_word_limits, normalize_word_limits, word_limit_target
 from app.config import get_settings
 from app.infrastructure import models
 from app.infrastructure.ai.llm_provider import LLMProvider
@@ -19,6 +20,7 @@ from app.infrastructure.ai.prompts import (
     TENSION_SYSTEM,
     TENSION_USER,
     WRITE_SYSTEM,
+    WORD_LIMITS_USER,
 )
 from app.infrastructure.db import SessionLocal
 from app.infrastructure.repository import ChapterRepo, NovelRepo
@@ -44,7 +46,7 @@ class AutoPilotOrderError(Exception):
 
 
 class AutoPilotState:
-    def __init__(self, owner_id: str = "") -> None:
+    def __init__(self, owner_id: str = "", word_limits: dict | None = None) -> None:
         self.owner_id = owner_id
         self.paused = False
         self.stop = False
@@ -53,6 +55,7 @@ class AutoPilotState:
         self.current_seq = 0
         self.injected_directive = ""
         self.pause_message = ""
+        self.word_limits = normalize_word_limits(word_limits)
 
 
 class AutoPilotRegistry:
@@ -62,11 +65,11 @@ class AutoPilotRegistry:
         self._states: dict[str, AutoPilotState] = {}
         self._lock = threading.Lock()
 
-    def start(self, novel_id: str, owner_id: str = "") -> AutoPilotState:
+    def start(self, novel_id: str, owner_id: str = "", word_limits: dict | None = None) -> AutoPilotState:
         with self._lock:
             if novel_id in self._states:
                 raise AutoPilotBusy("该作品已有自动驾驶任务在运行")
-            state = AutoPilotState(owner_id)
+            state = AutoPilotState(owner_id, word_limits)
             self._states[novel_id] = state
             return state
 
@@ -241,14 +244,16 @@ def get_status(novel_id: str):
         "fail_count": state.fail_count,
         "current_node_id": state.current_node_id,
         "current_seq": state.current_seq,
+        "word_limits": state.word_limits,
     }
 
 
-def run_autopilot(novel_id: str, session_factory=SessionLocal, reserved_state: AutoPilotState | None = None):
+def run_autopilot(novel_id: str, session_factory=SessionLocal, reserved_state: AutoPilotState | None = None,
+                  word_limits: dict | None = None):
     """生成内核；后台管理器消费它，浏览器只订阅已提交的任务事件。"""
     try:
         if reserved_state is None:
-            state = registry.start(novel_id)
+            state = registry.start(novel_id, word_limits=word_limits)
         elif registry.get(novel_id) is reserved_state:
             state = reserved_state
         else:
@@ -330,11 +335,12 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal, reserved_state: A
                 context = build_context(db, novel_id, directive, f"大纲章节：{node_title}",
                                         outline_node_id=node_id)
                 previous_context = prior_chapter_context(db, novel_id, outline_node_id=node_id).text
+                length_context = "\n\n" + WORD_LIMITS_USER.format(target=word_limit_target(state.word_limits)) if state.word_limits else ""
                 messages = [
                     {"role": "system", "content": WRITE_SYSTEM},
                     {
                         "role": "user",
-                        "content": f"{context}\n\n{previous_context}\n\n请撰写本章正文（标题：{node_title}；概要：{node.summary or '无'}）：",
+                        "content": f"{context}\n\n{previous_context}{length_context}\n\n请撰写本章正文（标题：{node_title}；概要：{node.summary or '无'}）：",
                     },
                 ]
 
@@ -418,6 +424,16 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal, reserved_state: A
                 "type": "chapter_done", "chapter_id": chapter_id, "seq": seq,
                 "node_id": node_id, "title": node_title, **counts(), **draft_meta,
             })
+            # 先做完整正文的确定性检查；模型复核失败不能遮住越界结果。
+            word_needs_review = False
+            if state.word_limits is not None:
+                word_review = check_word_limits(full, state.word_limits, node_title, saved=True)
+                word_needs_review = not word_review["within_limits"]
+                yield _sse({
+                    "type": "word_check", "chapter_id": chapter_id, "seq": seq,
+                    "node_id": node_id, "title": node_title, "saved": True, **word_review,
+                    "message": "正文已保存，篇幅超出作者设置的范围" if word_needs_review else "正文已保存，篇幅检查通过",
+                })
             rule_warnings = _rule_warnings(conflicts, node_title, full)
             yield _sse({
                 "type": "check", "conflicts": len(conflicts), "warnings": rule_warnings,
@@ -434,7 +450,7 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal, reserved_state: A
                     "node_id": node_id, "title": node_title,
                 })
 
-            quality_needs_review = bool(conflicts)
+            quality_needs_review = bool(conflicts) or word_needs_review
             try:
                 result = review_story(
                     db, novel_id, full, directive=directive, chapter_seq=seq,
@@ -453,16 +469,20 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal, reserved_state: A
                     reason = "正文、指令或设定超过复核上限，检查输入已截断" if review.get("truncated") else "剧情复核结果未完整核验"
                     warnings.append(f"《{node_title}》正文已保存，{reason}，请核对本章后再继续。")
                 warnings = list(dict.fromkeys(warnings))
-                quality_needs_review = quality_needs_review or bool(issues) or incomplete
+                story_needs_review = bool(issues) or incomplete
+                quality_needs_review = quality_needs_review or story_needs_review
                 yield _sse({
                     "type": "story_check", "chapter_id": chapter_id, "seq": seq,
                     "node_id": node_id, "title": node_title, "issues": issues,
+                    "requirements": review.get("requirements", []),
+                    "requirement_checks": review.get("requirement_checks", []),
+                    "unreviewed_requirement_ids": review.get("unreviewed_requirement_ids", []),
                     "warnings": warnings, "truncated": bool(review.get("truncated", False)),
                     "history_truncated": bool(review.get("history_truncated", False)),
                     "previous_chapter_title": review.get("previous_chapter_title", ""),
                     "chapter_title": review.get("chapter_title", node_title),
                     "review_complete": bool(review.get("review_complete", False)),
-                    "message": "正文已保存，剧情复核需要人工核对" if quality_needs_review else "剧情复核完成，未发现明显偏差",
+                    "message": "正文已保存，剧情复核需要人工核对" if story_needs_review else "剧情复核完成，未发现明显偏差",
                 })
             except Exception:  # noqa: BLE001  质量服务失败不得撤销正文，也不输出私有网关。
                 db.rollback()
@@ -477,13 +497,14 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal, reserved_state: A
                 yield _sse({
                     "type": "story_check", "chapter_id": chapter_id, "seq": seq,
                     "node_id": node_id, "title": node_title, "issues": [], "warnings": [message],
+                    "requirements": [], "requirement_checks": [], "unreviewed_requirement_ids": [],
                     "truncated": False, "review_complete": False, "message": message,
                 })
             has_quality_warning = has_quality_warning or quality_needs_review
             if quality_needs_review and any(
                 not _has_chapter(db, novel_id, upcoming.id) for upcoming in nodes[node_index + 1:]
             ):
-                state.pause_message = f"《{node_title}》正文已保存，检测到规则或剧情问题、或复核未完成，已暂停；请核对后再恢复。"
+                state.pause_message = f"《{node_title}》正文已保存，检测到篇幅、规则或剧情问题、或复核未完成，已暂停；请核对后再恢复。"
                 state.paused = True
 
             try:
@@ -575,7 +596,7 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal, reserved_state: A
     if terminal_reason == "failure_threshold":
         message = "连续三次生成失败，自动驾驶已结束，仍有未完成章节"
     elif terminal_status == "completed" and has_quality_warning:
-        message = "自动驾驶完成，正文已保存；规则或剧情复核存在警告，请核对。"
+        message = "自动驾驶完成，正文已保存；质量检查存在警告，请核对。"
     elif cleanup_error is not None and task_error is None and generated + skipped == total:
         message = "正文均已保存，恢复缓存或会话清理未完成，请核对章节。"
     yield _sse({

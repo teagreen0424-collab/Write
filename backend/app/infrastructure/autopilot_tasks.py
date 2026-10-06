@@ -5,13 +5,14 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.application.word_count import normalize_word_limits
 from app.infrastructure import models
 from app.infrastructure.autopilot_drafts import draft_write_lock
 
 
 ACTIVE_STATUSES = frozenset({"starting", "running", "paused"})
 TERMINAL_STATUSES = frozenset({"completed", "incomplete", "stopped", "interrupted"})
-EVENT_TYPES = frozenset({"progress", "text", "check", "story_check", "chapter_done", "tension", "drift",
+EVENT_TYPES = frozenset({"progress", "text", "check", "story_check", "word_check", "chapter_done", "tension", "drift",
                          "paused", "error", "done", "control"})
 
 
@@ -31,7 +32,7 @@ def task_uuid(value) -> str:
         raise TaskStorageError(422, "任务 ID 必须是 UUID", "task_invalid") from None
 
 
-def initial_snapshot(novel_id: str, task_id: str):
+def initial_snapshot(novel_id: str, task_id: str, word_limits=None):
     return {
         "type": "snapshot", "task_id": task_id, "novel_id": novel_id, "event_id": 0,
         "status": "starting", "running": True, "paused": False, "pause_requested": False,
@@ -39,6 +40,7 @@ def initial_snapshot(novel_id: str, task_id: str):
         "current_node_id": "", "current_seq": 0, "message": "自动驾驶已启动，等待后台执行",
         "task_notice": "", "terminal_reason": "", "active_drafts": [],
         "quality_warnings": [], "drift_warnings": [],
+        "word_limits": deepcopy(word_limits),
     }
 
 
@@ -89,7 +91,7 @@ def project_event(snapshot, event):
                 result["quality_warnings"].append(message)
         elif event.get("scope") == "task" or event.get("fatal"):
             result["task_notice"] = message
-    elif kind in ("check", "story_check"):
+    elif kind in ("check", "story_check", "word_check"):
         warnings = event.get("warnings", [])
         if not isinstance(warnings, list) or any(not isinstance(w, str) for w in warnings):
             raise TaskStorageError(422, "质量警告必须是字符串列表", "task_event_invalid")
@@ -150,8 +152,12 @@ class AutopilotTaskRepo:
         ).order_by(models.AutopilotTask.created_at.desc(), models.AutopilotTask.id.desc()).first()
         return deepcopy(task.snapshot_json) if task is not None else None
 
-    def create(self, novel_id, request_id):
+    def create(self, novel_id, request_id, word_limits=None):
         request_id = task_uuid(request_id)
+        try:
+            word_limits = normalize_word_limits(word_limits)
+        except ValueError as error:
+            raise TaskStorageError(422, str(error), "autopilot_invalid") from None
         with draft_write_lock:
             try:
                 self._ensure_novel(novel_id)
@@ -159,6 +165,8 @@ class AutopilotTaskRepo:
                 if existing is not None:
                     if existing.novel_id != novel_id:
                         raise TaskStorageError(404, "任务不存在", "task_not_found")
+                    if existing.snapshot_json.get("word_limits") != word_limits:
+                        raise TaskStorageError(409, "该请求 ID 已用于不同的篇幅范围，请使用新的请求 ID", "autopilot_request_conflict", existing.id)
                     return deepcopy(existing.snapshot_json), False
                 active = self.db.query(models.AutopilotTask).filter(
                     models.AutopilotTask.novel_id == novel_id,
@@ -166,7 +174,7 @@ class AutopilotTaskRepo:
                 ).first()
                 if active is not None:
                     raise TaskStorageError(409, "该作品已有自动驾驶任务在运行", "autopilot_busy", active.id)
-                snapshot = initial_snapshot(novel_id, request_id)
+                snapshot = initial_snapshot(novel_id, request_id, word_limits)
                 self.db.add(models.AutopilotTask(
                     id=request_id, novel_id=novel_id, status="starting", snapshot_json=snapshot,
                 ))

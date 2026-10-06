@@ -140,6 +140,46 @@ class AutopilotTaskRouteTest(unittest.IsolatedAsyncioTestCase):
             self._terminal(task_id)
             provider.assert_called_once()
 
+    def test_explicit_word_limits_are_persisted_and_same_request_cannot_change_them(self):
+        task_id = str(uuid.uuid4())
+        payload = {"request_id": task_id, "word_limits": {"max_words": 5}}
+        with patch.object(auto_pilot.llm, "stream_complete", side_effect=self._gated_body) as provider:
+            response = self.client.post(self.url + "/start", json=payload)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["word_limits"], {"min_words": None, "max_words": 5})
+            self.assertTrue(self.blocked.wait(3))
+            repeat = self.client.post(self.url + "/start", json=payload)
+            self.assertEqual(repeat.status_code, 200)
+            conflict = self.client.post(self.url + "/start", json={"request_id": task_id, "word_limits": {"max_words": 6}})
+            self.assertEqual(conflict.status_code, 409)
+            self.assertEqual(conflict.json()["code"], "autopilot_request_conflict")
+            self.release.set()
+            terminal = self._terminal(task_id)
+            self.assertEqual((terminal["status"], terminal["generated"], terminal["failed"]), ("completed", 1, 0))
+            self.assertEqual(len(terminal["quality_warnings"]), 1)
+            self.assertIn("超过", terminal["quality_warnings"][0])
+            replay = _events(self.client.get(self.url + f"/tasks/{task_id}/events?after=0").text)
+            word = next(item for item in replay if item["type"] == "word_check")
+            self.assertFalse(word["within_limits"])
+            self.assertEqual(word["max_words"], 5)
+            self.assertEqual(_events(self.client.get(self.url + f"/tasks/{task_id}/events").text)[0]["word_limits"], terminal["word_limits"])
+            provider.assert_called_once()
+
+    def test_bad_word_limits_reject_before_creation_or_model_call(self):
+        before = self._rows()
+        values = ({}, {"min_words": None, "max_words": None}, {"min_words": True},
+                  {"min_words": "2"}, {"max_words": 3.5}, {"min_words": 0},
+                  {"max_words": 1_000_001}, {"min_words": 5, "max_words": 4},
+                  {"max_words": 4, "unexpected": 1})
+        with patch.object(auto_pilot.llm, "stream_complete") as provider:
+            for value in values:
+                with self.subTest(value=value):
+                    response = self.client.post(self.url + "/start", json={"request_id": str(uuid.uuid4()), "word_limits": value})
+                    self.assertEqual(response.status_code, 422)
+                    self.assertEqual(response.json()["code"], "autopilot_invalid")
+            provider.assert_not_called()
+        self.assertEqual(self._rows(), before)
+
     def test_bad_start_payload_missing_novel_and_invalid_task_path_never_generate(self):
         before = self._rows()
         with patch.object(auto_pilot.llm, "stream_complete") as provider:

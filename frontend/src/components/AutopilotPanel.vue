@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
-import { NButton, NInput, NModal, NProgress, NTag, useMessage } from 'naive-ui'
+import { NButton, NInput, NInputNumber, NModal, NProgress, NTag, useMessage } from 'naive-ui'
 import { api, streamEvents } from '../api'
 import { getAutopilotDraftWriter } from '../autopilotDrafts'
+import { wordLimitError, wordLimitLabel, wordLimits } from '../utils/wordLimits'
 import type { AutopilotDraftWriter, DraftSaveState } from '../autopilotDrafts'
-import type { AutopilotDraftInput, AutopilotEvent, AutopilotTaskSnapshot, AutopilotTaskStatus } from '../types'
+import type { AutopilotDraftInput, AutopilotEvent, AutopilotTaskSnapshot, AutopilotTaskStatus, WordLimits } from '../types'
 
 const props = defineProps<{ novelId: string }>()
 const emit = defineEmits<{ (e: 'dirty-change', dirty: boolean): void }>()
@@ -29,6 +30,10 @@ const progressText = ref('')
 const done = ref(0)
 const total = ref(0)
 const directive = ref('')
+const minWords = ref<number | null>(null)
+const maxWords = ref<number | null>(null)
+const taskWordLimits = ref<WordLimits | null>(null)
+const wordTargetError = computed(() => wordLimitError(minWords.value, maxWords.value))
 interface NodeDraft {
   nodeId: string; title: string; text: string
   draftKey: string; revision: number; draftAttempt: number
@@ -76,8 +81,10 @@ let connectionEpoch = 0
 let eventCursor = 0
 let reconnectAttempt = 0
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-let pendingStartRequestId: string | null = null
+const pendingStartRequestId = ref<string | null>(null)
 let pendingStartPreviousTaskId: string | null = null
+let pendingStartWordLimits: WordLimits | null = null
+const wordTargetLocked = computed(() => hasActiveTask.value || !!pendingStartRequestId.value || checkingStatus.value)
 const seenDraftRevisions = new Map<string, number>()
 const finishedDraftIds = new Set<string>()
 const dismissedDraftIds = new Set<string>()
@@ -211,8 +218,12 @@ function disconnect() {
   startingTask.value = false
   currentTaskId.value = ''
   taskStatus.value = 'idle'
-  pendingStartRequestId = null
+  pendingStartRequestId.value = null
   pendingStartPreviousTaskId = null
+  pendingStartWordLimits = null
+  taskWordLimits.value = null
+  minWords.value = null
+  maxWords.value = null
   eventCursor = 0
   seenDraftRevisions.clear()
   finishedDraftIds.clear()
@@ -391,6 +402,11 @@ function applySnapshot(snapshot: AutopilotTaskSnapshot) {
   total.value = snapshot.total
   progressText.value = snapshot.message || (snapshot.running ? '后台运行中' : '任务已结束')
   taskNotice.value = snapshot.task_notice || ''
+  taskWordLimits.value = snapshot.word_limits ? { ...snapshot.word_limits } : null
+  if (snapshot.running) {
+    minWords.value = taskWordLimits.value?.min_words ?? null
+    maxWords.value = taskWordLimits.value?.max_words ?? null
+  }
   qualityWarnings.value = [...new Set(snapshot.quality_warnings)]
   driftWarnings.value = snapshot.drift_warnings.map((warning) => ({ ...warning }))
   statusNotice.value = ''
@@ -492,9 +508,10 @@ async function loadTaskStatus(expectedRunId = runId, novelId = props.novelId) {
     const status = await api.autopilotStatus(novelId)
     if (!isLatestStatusRequest()) return
     if (status.task_id) {
-      if (pendingStartRequestId && (status.running || status.task_id !== pendingStartPreviousTaskId)) {
-        pendingStartRequestId = null
+      if (pendingStartRequestId.value && (status.running || status.task_id !== pendingStartPreviousTaskId)) {
+        pendingStartRequestId.value = null
         pendingStartPreviousTaskId = null
+        pendingStartWordLimits = null
       }
       if (!applySnapshot(status)) return
       if (status.running && !connectionController && !reconnectTimer) void observeTask(status.task_id, expectedRunId, novelId)
@@ -660,8 +677,9 @@ function handleEvent(ev: AutopilotEvent) {
       break
     case 'check':
     case 'story_check':
+    case 'word_check':
       addQualityWarnings(ev.warnings || [])
-      if (ev.type === 'story_check' && ev.message) progressText.value = ev.message
+      if ((ev.type === 'story_check' || ev.type === 'word_check') && ev.message) progressText.value = ev.message
       break
     case 'tension':
       upsertPoint(ev.seq, { tension: ev.score })
@@ -739,14 +757,18 @@ function addQualityWarnings(warnings: string[]) {
 
 async function start() {
   if (hasActiveTask.value || checkingStatus.value || checkingDrafts.value || discardPending.value || !draftsLoaded.value || !props.novelId) return
+  if (!pendingStartRequestId.value && wordTargetError.value) { message.error(wordTargetError.value); return }
   invalidateStatusRequests()
   preserveActiveDrafts('上次连接未收到章节保存确认')
   const novelId = props.novelId
   const currentRunId = ++runId
   const previousTaskId = currentTaskId.value
-  const requestId = pendingStartRequestId || crypto.randomUUID()
-  if (!pendingStartRequestId) pendingStartPreviousTaskId = previousTaskId
-  pendingStartRequestId = requestId
+  const requestId = pendingStartRequestId.value || crypto.randomUUID()
+  if (!pendingStartRequestId.value) {
+    pendingStartPreviousTaskId = previousTaskId
+    pendingStartWordLimits = wordLimits(minWords.value, maxWords.value)
+  }
+  pendingStartRequestId.value = requestId
   latestTaskTerminal = false
   draftsRequestId += 1
   attempt += 1
@@ -763,11 +785,14 @@ async function start() {
   curvePoints.value = []
   progressText.value = '启动中…'
   try {
-    const snapshot = await api.startAutopilot(novelId, requestId)
+    const snapshot = pendingStartWordLimits
+      ? await api.startAutopilot(novelId, requestId, { ...pendingStartWordLimits })
+      : await api.startAutopilot(novelId, requestId)
     if (!isCurrentRun(currentRunId, novelId)) return
     applySnapshot(snapshot)
-    pendingStartRequestId = null
+    pendingStartRequestId.value = null
     pendingStartPreviousTaskId = null
+    pendingStartWordLimits = null
     if (snapshot.running) void observeTask(snapshot.task_id, currentRunId, novelId)
     else await loadStoredDrafts(currentRunId, novelId)
     void loadCurve(currentRunId, novelId)
@@ -779,8 +804,9 @@ async function start() {
       if (!isCurrentRun(currentRunId, novelId)) return
       if (status.task_id && (status.running || status.task_id !== previousTaskId || status.task_id === error.task_id)) {
         applySnapshot(status)
-        pendingStartRequestId = null
+        pendingStartRequestId.value = null
         pendingStartPreviousTaskId = null
+        pendingStartWordLimits = null
         if (status.running) void observeTask(status.task_id, currentRunId, novelId)
         else await loadStoredDrafts(currentRunId, novelId)
         return
@@ -918,7 +944,7 @@ watch(hasPendingOutput, (dirty) => emit('dirty-change', dirty), { immediate: tru
 <template>
   <div class="autopilot-panel">
     <div class="controls">
-      <n-button type="primary" :disabled="hasActiveTask || checkingStatus || checkingDrafts || discardPending || !draftsLoaded || !novelId" @click="start">{{ failedDrafts.length ? '重试未完成章节' : '启动自动驾驶' }}</n-button>
+      <n-button type="primary" :disabled="hasActiveTask || checkingStatus || checkingDrafts || discardPending || !draftsLoaded || !novelId || (!pendingStartRequestId && !!wordTargetError)" @click="start">{{ failedDrafts.length ? '重试未完成章节' : '启动自动驾驶' }}</n-button>
       <n-button :disabled="!hasActiveTask || paused || pauseRequested || controlPending" @click="pause">暂停</n-button>
       <n-button :disabled="!hasActiveTask || (!paused && !pauseRequested) || controlPending" @click="resume">{{ pauseRequested && !paused ? '取消暂停' : '恢复' }}</n-button>
       <n-button :disabled="checkingStatus || checkingDrafts || discardPending || !novelId" size="small" @click="refreshTaskStatus">核对后台状态</n-button>
@@ -934,6 +960,16 @@ watch(hasPendingOutput, (dirty) => emit('dirty-change', dirty), { immediate: tru
       <n-tag v-if="serverRunning" size="small" :type="connectionState === 'connected' ? 'success' : 'warning'">{{ connectionState === 'connected' ? '监控已连接' : connectionState === 'reconnecting' || connectionState === 'connecting' ? '正在重连' : '监控连接断开' }}</n-tag>
     </div>
 
+    <div class="word-limit-row" aria-label="自动驾驶每章字数目标">
+      <span>每章字数目标（可选）</span>
+      <n-input-number v-model:value="minWords" :min="1" :max="1000000" :precision="0" :disabled="wordTargetLocked" :input-props="{ 'aria-label': '每章最低字数' }" placeholder="最低字数" />
+      <span>至</span>
+      <n-input-number v-model:value="maxWords" :min="1" :max="1000000" :precision="0" :disabled="wordTargetLocked" :input-props="{ 'aria-label': '每章最高字数' }" placeholder="最高字数" />
+      <span class="output-hint">按非空白字符计数，含标点</span>
+      <p v-if="wordTargetError && !pendingStartRequestId" class="task-notice" role="alert">{{ wordTargetError }}</p>
+    </div>
+    <p v-if="currentTaskId" class="output-hint">{{ serverRunning ? '当前任务' : '上次任务' }}每章目标：{{ wordLimitLabel(taskWordLimits) }}。<template v-if="serverRunning">目标在本次任务期间保持不变。</template></p>
+
     <div class="inject-row">
       <n-input
         v-model:value="directive"
@@ -943,7 +979,7 @@ watch(hasPendingOutput, (dirty) => emit('dirty-change', dirty), { immediate: tru
       <n-button type="info" :disabled="!serverRunning || !currentTaskId" @click="inject">注入</n-button>
     </div>
 
-    <p class="output-hint">每章保存后会复核章前指令、前章承接和设定；发现问题或检查未完成时自动暂停，正文保留。</p>
+    <p class="output-hint">每章保存后会逐项核对构思、前章承接和设定，并核对已设置的字数目标；发现问题、字数越界或检查未完成时暂停后续生成，正文保留。</p>
 
     <div class="progress-row">
       <n-progress type="line" :percentage="total ? Math.round((done / total) * 100) : 0" />
@@ -1021,6 +1057,16 @@ watch(hasPendingOutput, (dirty) => emit('dirty-change', dirty), { immediate: tru
 </template>
 
 <style scoped>
+.word-limit-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+.word-limit-row :deep(.n-input-number) {
+  width: 140px;
+}
 .autopilot-panel {
   padding: 16px;
   height: 100%;

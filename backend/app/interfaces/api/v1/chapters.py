@@ -8,6 +8,7 @@ from app.application import settle as settle_uc
 from app.application import writing as writing_uc
 from app.application import outline_check as outline_check_uc
 from app.application import story_review as story_review_uc
+from app.application.word_count import check_word_limits
 from app.infrastructure.db import SessionLocal, get_db
 from app.infrastructure.repository import ChapterRepo, ChapterRevisionRepo
 from app.interfaces import schemas
@@ -124,6 +125,16 @@ def check_chapter_story(
             chapter.content if payload.content is None else payload.content,
             directive=chapter.directive if payload.directive is None else payload.directive,
             chapter_seq=chapter.seq, outline_node_id=chapter.outline_node_id,
+        )
+        counted = check_word_limits(
+            chapter.content if payload.content is None else payload.content,
+            payload.word_limits.model_dump() if payload.word_limits is not None else None,
+            title=chapter.title,
+        )
+        result.word_count = schemas.WordCountResult(
+            count=counted["word_count"], min_words=counted["min_words"],
+            max_words=counted["max_words"], within_limits=counted["within_limits"],
+            warnings=counted["warnings"],
         )
     result.chapter_title = chapter.title
     return result

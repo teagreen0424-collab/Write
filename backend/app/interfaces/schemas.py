@@ -318,9 +318,47 @@ class OutlineCheckResult(BaseModel):
     outline_title: str = ""
 
 
+class WordCountLimits(BaseModel):
+    """作者显式选择的每章字数范围；不从自然语言设定推测硬限制。"""
+
+    model_config = ConfigDict(extra="forbid")
+    min_words: Optional[int] = Field(default=None, ge=1, le=1_000_000, strict=True)
+    max_words: Optional[int] = Field(default=None, ge=1, le=1_000_000, strict=True)
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.min_words is None and self.max_words is None:
+            raise ValueError("字数范围至少填写一个边界")
+        if self.min_words is not None and self.max_words is not None and self.min_words > self.max_words:
+            raise ValueError("最少字数不能大于最多字数")
+        return self
+
+
+class WordCountResult(BaseModel):
+    count: int = Field(..., ge=0)
+    min_words: Optional[int] = None
+    max_words: Optional[int] = None
+    within_limits: Optional[bool] = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class StoryRequirement(BaseModel):
+    id: str
+    source: Literal["directive", "outline"]
+    text: str
+
+
+class StoryRequirementCheck(BaseModel):
+    requirement_id: str
+    status: Literal["violation", "satisfied", "uncertain"]
+    excerpt: str = ""
+    reason: str
+
+
 class StoryCheckRequest(BaseModel):
     content: Optional[str] = None
     directive: Optional[str] = None
+    word_limits: Optional[WordCountLimits] = None
 
 
 class StoryCheckIssue(BaseModel):
@@ -338,6 +376,10 @@ class StoryCheckResult(BaseModel):
     review_complete: bool = True
     previous_chapter_title: str = ""
     chapter_title: str = ""
+    requirements: list[StoryRequirement] = Field(default_factory=list)
+    requirement_checks: list[StoryRequirementCheck] = Field(default_factory=list)
+    unreviewed_requirement_ids: list[str] = Field(default_factory=list)
+    word_count: Optional[WordCountResult] = None
 
 
 class ContinueChapterRequest(BaseModel):
@@ -496,6 +538,7 @@ class AutopilotInjectRequest(BaseModel):
 class AutopilotTaskStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request_id: UUID
+    word_limits: Optional[WordCountLimits] = None
 
 
 class AutopilotTaskActiveDraft(BaseModel):
@@ -536,6 +579,7 @@ class AutopilotTaskSnapshot(BaseModel):
     active_drafts: list[AutopilotTaskActiveDraft] = Field(default_factory=list)
     quality_warnings: list[str] = Field(default_factory=list)
     drift_warnings: list[AutopilotTaskDriftWarning] = Field(default_factory=list)
+    word_limits: Optional[WordCountLimits] = None
 
 
 class AutopilotDraftUpsert(BaseModel):

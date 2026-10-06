@@ -10,6 +10,7 @@ const compile = (source) => ts.transpileModule(source, { compilerOptions: {
 } }).outputText
 const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 const writerUrl = moduleUrl(compile(await readFile(new URL('../src/autopilotDrafts.ts', import.meta.url), 'utf8')))
+const wordLimitsUrl = moduleUrl(compile(await readFile(new URL('../src/utils/wordLimits.ts', import.meta.url), 'utf8')))
 const script = compileScript(parse(await readFile(new URL('../src/components/AutopilotPanel.vue', import.meta.url), 'utf8')).descriptor, { id: 'reconnect-test' }).content
 let sequence = 0
 const wait = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
@@ -19,7 +20,7 @@ const snapshot = (novelId, patch = {}) => ({
   type: 'snapshot', task_id: 'task-a', novel_id: novelId, event_id: 3, status: 'running',
   running: true, paused: false, pause_requested: false, generated: 0, skipped: 0, failed: 0,
   done: 0, total: 4, current_node_id: 'node-a', current_seq: 1, message: '正在生成第一章',
-  task_notice: '', terminal_reason: '', active_drafts: [active()], quality_warnings: [], drift_warnings: [], ...patch,
+  task_notice: '', terminal_reason: '', active_drafts: [active()], quality_warnings: [], drift_warnings: [], word_limits: null, ...patch,
 })
 const record = (patch = {}) => ({ id: 'old-draft', novel_id: 'novel', node_id: 'node-a', title: '第一章',
   attempt: 1, content: '此前半稿', reason: '上次未完成', state: 'failed', revision: 2, created_at: '', updated_at: '', ...patch })
@@ -64,7 +65,7 @@ async function panel(options = {}) {
       if (options.onStream) await options.onStream(connection, streams.length)
       else await closed.promise
     }),
-    echarts: {}, NButton: {}, NInput: {}, NModal: {}, NProgress: {}, NTag: {},
+    echarts: {}, NButton: {}, NInput: {}, NInputNumber: {}, NModal: {}, NProgress: {}, NTag: {},
     useMessage: () => ({ success: (value) => messages.push(value), warning: (value) => messages.push(value), error: (value) => messages.push(value) }),
     onMounted: (fn) => { hooks.mount = fn }, onBeforeUnmount: (fn) => { hooks.unmount = fn }, timer,
   }
@@ -74,6 +75,7 @@ async function panel(options = {}) {
     .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1} = __harness')
     .replace(/import \{ api, streamEvents \} from ['"]\.\.\/api['"]/g, 'const { api, streamEvents } = __harness')
     .replace(/from ['"]\.\.\/autopilotDrafts['"]/g, `from '${writerUrl}'`)
+    .replace(/from ['"]\.\.\/utils\/wordLimits['"]/g, `from '${wordLimitsUrl}'`)
     .replace(/\bonMounted\(/g, '__harness.onMounted(')
     .replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')
     .replace(/\bsetTimeout\(/g, '__harness.timer.setTimeout(')
@@ -179,10 +181,10 @@ test('真实 SFC 手动核对找回创建结果后，下一轮启动不会复用
     },
   } })
   await context.vm.start()
-  assert.equal(context.vm.pendingStartRequestId, requests[0])
+  assert.equal(context.vm.pendingStartRequestId.value, requests[0])
   unavailable = false
   await context.vm.refreshTaskStatus()
-  assert.equal(context.vm.pendingStartRequestId, null)
+  assert.equal(context.vm.pendingStartRequestId.value, null)
   await context.vm.start()
   assert.equal(requests.length, 2)
   assert.notEqual(requests[0], requests[1])
@@ -418,5 +420,92 @@ test('真实 SFC 切换后台任务后旧剧情告警不能污染新快照', asy
   context.vm.handleObservedEvent(event(100, { type: 'story_check', warnings: ['旧订阅迟到告警'] }), 'task-a')
   assert.equal(context.vm.currentTaskId.value, 'task-b')
   assert.deepEqual(context.vm.qualityWarnings.value, [])
+  context.hooks.unmount()
+})
+
+test('真实 SFC 活跃任务与刷新快照保留每章字数范围并锁定输入', async () => {
+  const limits = { min_words: 1200, max_words: 1600 }
+  const novelId = `word-refresh-${++sequence}`
+  for (let index = 0; index < 2; index += 1) {
+    const context = await panel({ novelId, status: async (id) => snapshot(id, { paused: true, status: 'paused', word_limits: limits }) })
+    assert.deepEqual(context.vm.taskWordLimits.value, limits)
+    assert.equal(context.vm.minWords.value, 1200)
+    assert.equal(context.vm.maxWords.value, 1600)
+    assert.equal(context.vm.wordTargetLocked.value, true)
+    await context.vm.start()
+    assert.equal(context.starts.length, 0)
+    context.hooks.unmount()
+  }
+})
+
+test('真实 SFC 启动回应丢失时重试冻结原范围和请求 ID，核对后解锁', async () => {
+  const requests = []
+  let latest = null
+  const context = await panel({ status: async () => latest || { running: false }, api: {
+    startAutopilot: async (novelId, requestId, limits) => { requests.push({ novelId, requestId, limits }); throw new Error('回应丢失') },
+  } })
+  context.vm.minWords.value = 1200
+  context.vm.maxWords.value = 1600
+  await context.vm.start()
+  assert.equal(context.vm.wordTargetLocked.value, true)
+  context.vm.minWords.value = 2400
+  context.vm.maxWords.value = 1800
+  await context.vm.start()
+  assert.deepEqual(requests[0], requests[1])
+  assert.deepEqual(requests[1].limits, { min_words: 1200, max_words: 1600 })
+  latest = snapshot(context.props.novelId, { running: false, status: 'completed', active_drafts: [], word_limits: requests[0].limits })
+  await context.vm.refreshTaskStatus()
+  assert.equal(context.vm.pendingStartRequestId.value, null)
+  assert.equal(context.vm.pendingStartWordLimits, null)
+  assert.equal(context.vm.wordTargetLocked.value, false)
+  assert.deepEqual(context.vm.taskWordLimits.value, requests[0].limits)
+  context.hooks.unmount()
+})
+
+test('真实 SFC 非法目标阻止启动，单侧目标合法，切作品不携带旧范围', async () => {
+  const requests = []
+  const context = await panel({ status: async () => ({ running: false }), api: {
+    startAutopilot: async (novelId, requestId, limits) => { requests.push({ novelId, requestId, limits }); return snapshot(novelId, { word_limits: limits }) },
+  } })
+  for (const pair of [[1800, 1200], [0, null], [1.5, null], [null, 1000001]]) {
+    context.vm.minWords.value = pair[0]
+    context.vm.maxWords.value = pair[1]
+    await context.vm.start()
+    assert.equal(requests.length, 0)
+    assert.ok(context.vm.wordTargetError.value)
+  }
+  context.vm.minWords.value = null
+  context.vm.maxWords.value = 1600
+  await context.vm.start()
+  assert.deepEqual(requests[0].limits, { min_words: null, max_words: 1600 })
+  context.props.novelId += '-new'
+  await settle()
+  assert.equal(context.vm.minWords.value, null)
+  assert.equal(context.vm.maxWords.value, null)
+  assert.equal(context.vm.taskWordLimits.value, null)
+  assert.equal(context.vm.pendingStartWordLimits, null)
+  context.hooks.unmount()
+})
+
+test('真实 SFC 字数超限事件和恢复快照显示保留正文提示，旧任务不串提示', async () => {
+  const warning = '第1章正文1700字，超过最高1600字；正文已保存，请核对。'
+  const limits = { min_words: 1200, max_words: 1600 }
+  let latest
+  const context = await panel({ status: async (novelId) => latest || snapshot(novelId, { word_limits: limits }) })
+  const stream = context.streams[0]
+  await stream.onEvent(event(4, { type: 'chapter_done', seq: 1 }))
+  await stream.onEvent(event(5, { type: 'word_check', seq: 1, word_count: 1700, min_words: 1200, max_words: 1600, within_limits: false, warnings: [warning], message: warning }))
+  await stream.onEvent(event(6, { type: 'paused', message: '字数超限，已暂停后续章节' }))
+  assert.deepEqual(context.vm.qualityWarnings.value, [warning])
+  assert.equal(context.vm.failedDrafts.value.length, 0)
+  assert.equal(context.vm.paused.value, true)
+  latest = snapshot(context.props.novelId, { event_id: 6, paused: true, status: 'paused', active_drafts: [], done: 1, word_limits: limits, quality_warnings: [warning] })
+  await context.vm.refreshTaskStatus()
+  assert.deepEqual(context.vm.qualityWarnings.value, [warning])
+  context.vm.applySnapshot(snapshot(context.props.novelId, { task_id: 'task-b', event_id: 0, word_limits: null }))
+  await stream.onEvent(event(99, { type: 'word_check', warnings: ['旧任务字数告警'] }))
+  assert.deepEqual(context.vm.qualityWarnings.value, [])
+  assert.equal(context.vm.taskWordLimits.value, null)
+  assert.equal(context.puts.length, 0)
   context.hooks.unmount()
 })

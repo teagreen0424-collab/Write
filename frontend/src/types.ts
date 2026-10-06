@@ -365,6 +365,7 @@ export interface AutopilotEvent {
     | 'text'
     | 'check'
     | 'story_check'
+    | 'word_check'
     | 'chapter_done'
     | 'tension'
     | 'drift'
@@ -394,6 +395,13 @@ export interface AutopilotEvent {
   warnings?: string[]
   truncated?: boolean
   review_complete?: boolean
+  word_count?: number
+  min_words?: number | null
+  max_words?: number | null
+  within_limits?: boolean | null
+  requirements?: StoryRequirement[]
+  requirement_checks?: StoryRequirementCheck[]
+  unreviewed_requirement_ids?: string[]
   [key: string]: any
 }
 
@@ -431,6 +439,7 @@ export interface AutopilotTaskSnapshot extends AutopilotEvent {
   active_drafts: AutopilotActiveDraft[]
   quality_warnings: string[]
   drift_warnings: { seq: number; score: number; message: string }[]
+  word_limits: WordLimits | null
 }
 
 /** 暂存片段独立于正式章节，重开页面时 active 按未确认状态恢复。 */
@@ -581,4 +590,32 @@ export interface StoryCheckResult {
   review_complete: boolean
   previous_chapter_title: string
   chapter_title: string
+  requirements: StoryRequirement[]
+  requirement_checks: StoryRequirementCheck[]
+  unreviewed_requirement_ids: string[]
+  word_count: WordCountCheck | null
+}
+
+export interface StoryRequirement {
+  id: string
+  source: 'directive' | 'outline'
+  text: string
+}
+
+export interface StoryRequirementCheck {
+  requirement_id: string
+  status: 'violation' | 'satisfied' | 'uncertain'
+  excerpt: string
+  reason: string
+}
+
+export interface WordLimits {
+  min_words: number | null
+  max_words: number | null
+}
+
+export interface WordCountCheck extends WordLimits {
+  count: number
+  within_limits: boolean | null
+  warnings: string[]
 }

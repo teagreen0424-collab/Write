@@ -5,6 +5,7 @@ import {
   NCheckbox,
   NEmpty,
   NInput,
+  NInputNumber,
   NList,
   NListItem,
   NModal,
@@ -14,6 +15,7 @@ import {
 } from 'naive-ui'
 import { api, streamSSE } from '../api'
 import { chapterLabel, countCharacters } from '../utils/chapter'
+import { wordLimitError, wordLimitLabel, wordLimits } from '../utils/wordLimits'
 import ChapterRevisionPanel from './ChapterRevisionPanel.vue'
 import type {
   Chapter,
@@ -68,6 +70,9 @@ const outlineCheckResult = ref<OutlineCheckResult | null>(null)
 const outlineCheckLoading = ref(false)
 const storyCheckResult = ref<StoryCheckResult | null>(null)
 const storyCheckLoading = ref(false)
+const storyMinWords = ref<number | null>(null)
+const storyMaxWords = ref<number | null>(null)
+const storyWordLimitError = computed(() => wordLimitError(storyMinWords.value, storyMaxWords.value))
 let storyCheckRequestId = 0
 
 // 改写预览（不落库，确认后才应用）
@@ -117,9 +122,24 @@ const STORY_ISSUE_LABEL = {
   outline: '大纲',
 }
 const STORY_SEVERITY_LABEL = { high: '严重', medium: '中等', low: '轻微' }
+const STORY_REQUIREMENT_STATUS = { violation: '偏差', satisfied: '满足', uncertain: '待核对' }
+const storyRequirementRows = computed(() => (storyCheckResult.value?.requirements || []).map((requirement) => {
+  const matches = (storyCheckResult.value?.requirement_checks || []).filter((check) => check.requirement_id === requirement.id)
+  const uniqueRequirement = storyCheckResult.value?.requirements.filter((item) => item.id === requirement.id).length === 1
+  const check = uniqueRequirement && matches.length === 1 && !storyCheckResult.value?.unreviewed_requirement_ids?.includes(requirement.id) ? matches[0] : undefined
+  return { ...requirement, status: check?.status || 'uncertain', excerpt: check?.excerpt || '', reason: check?.reason || '本项未得到完整核对，请重试或人工核对。' }
+}))
+const storyReviewIncomplete = computed(() => !storyCheckResult.value?.review_complete
+  || !Array.isArray(storyCheckResult.value?.requirements)
+  || !Array.isArray(storyCheckResult.value?.requirement_checks)
+  || !Array.isArray(storyCheckResult.value?.unreviewed_requirement_ids)
+  || !!storyCheckResult.value?.unreviewed_requirement_ids?.length
+  || (storyCheckResult.value?.requirement_checks || []).some((check) => !storyCheckResult.value?.requirements?.some((requirement) => requirement.id === check.requirement_id))
+  || storyRequirementRows.value.some((row) => row.status === 'uncertain'))
 const storyCheckEmptyText = computed(() => {
-  if (!storyCheckResult.value?.review_complete) return '剧情检查未完成，不能判断是否存在偏差；请重试并人工核对'
-  if (storyCheckResult.value.truncated) return '已检查范围内未发现明显问题，正文或依据有截断；仍需人工校对'
+  if (storyReviewIncomplete.value) return '剧情检查未完成，不能判断是否存在偏差；请重试并人工核对'
+  if (storyCheckResult.value?.truncated) return '已检查范围内未发现明显问题，正文或依据有截断；仍需人工校对'
+  if (storyRequirementRows.value.some((row) => row.status === 'violation')) return '构思逐项核对发现偏差，请核对正文'
   return '未发现明显剧情问题，仍需人工校对'
 })
 
@@ -592,22 +612,27 @@ async function doOutlineCheck() {
 // 检查当前编辑稿，显式传空章前指令也能覆盖已保存指令；检查不会修改正文。
 async function doStoryCheck() {
   if (storyCheckLoading.value || !selectedId.value || !content.value.trim() || streaming.value) return
+  if (storyWordLimitError.value) { message.error(storyWordLimitError.value); return }
   const requestId = ++storyCheckRequestId
   const novelId = props.novelId
   const chapterId = selectedId.value
   const checkedContent = content.value
   const checkedDirective = directive.value
+  const checkedWordLimits = wordLimits(storyMinWords.value, storyMaxWords.value)
   const isCurrent = () => !unmounted && requestId === storyCheckRequestId
     && props.novelId === novelId && selectedId.value === chapterId
     && content.value === checkedContent && directive.value === checkedDirective
   storyCheckLoading.value = true
   storyCheckResult.value = null
   try {
-    const result = await api.checkChapterStory(novelId, chapterId, checkedContent, checkedDirective)
+    const result = checkedWordLimits
+      ? await api.checkChapterStory(novelId, chapterId, checkedContent, checkedDirective, checkedWordLimits)
+      : await api.checkChapterStory(novelId, chapterId, checkedContent, checkedDirective)
     if (!isCurrent()) return
     storyCheckResult.value = result
-    if (!result.review_complete || result.truncated) message.warning('剧情检查范围或结果不完整，请核对提示后人工校对')
-    else if (result.issues.length) message.warning(`剧情检查发现 ${result.issues.length} 处待核对项`)
+    if (storyReviewIncomplete.value || result.truncated) message.warning('剧情检查范围或结果不完整，请核对提示后人工校对')
+    else if (result.word_count?.within_limits === false) message.warning('正文未达到字数目标，请核对字数提示')
+    else if (result.issues.length || storyRequirementRows.value.some((row) => row.status === 'violation')) message.warning('剧情检查发现待核对的偏差，请核对逐项结果')
     else message.success('未发现明显剧情问题，仍请人工校对')
   } catch (e) {
     if (isCurrent()) message.error(`剧情检查未完成：${(e as Error).message}`)
@@ -793,7 +818,7 @@ watch(
 watch(hasUnsavedChanges, (dirty) => emit('dirty-change', dirty), { immediate: true })
 watch(content, () => { outlineCheckResult.value = null })
 watch(
-  () => [props.novelId, selectedId.value, content.value, directive.value],
+  () => [props.novelId, selectedId.value, content.value, directive.value, storyMinWords.value, storyMaxWords.value],
   invalidateStoryCheck,
   { flush: 'sync' },
 )
@@ -883,7 +908,7 @@ onBeforeUnmount(() => {
           >大纲契合检查</n-button>
           <span class="cost-hint">本项调用模型 1 次</span>
           <n-button
-            :disabled="!selectedId || !content.trim() || streaming"
+            :disabled="!selectedId || !content.trim() || streaming || !!storyWordLimitError"
             :loading="storyCheckLoading"
             title="检查当前正文的章前指令、前章承接、设定和大纲；调用模型 1 次，不修改正文"
             @click="doStoryCheck"
@@ -894,6 +919,14 @@ onBeforeUnmount(() => {
           <n-button :disabled="!selectedId || summarySaving || streaming" @click="openSummary">章节摘要</n-button>
           <n-button :disabled="!selectedId" @click="openRevisionHistory">版本历史</n-button>
           <span class="cost-hint">覆盖正文前会自动保存旧版本</span>
+        </div>
+        <div v-if="selectedId" class="word-limit-row" aria-label="剧情检查字数目标">
+          <span>本次检查字数目标（可选）</span>
+          <n-input-number v-model:value="storyMinWords" :min="1" :max="1000000" :precision="0" :disabled="streaming" :input-props="{ 'aria-label': '检查最低字数' }" placeholder="最低字数" />
+          <span>至</span>
+          <n-input-number v-model:value="storyMaxWords" :min="1" :max="1000000" :precision="0" :disabled="streaming" :input-props="{ 'aria-label': '检查最高字数' }" placeholder="最高字数" />
+          <span class="cost-hint">按非空白字符计数，含标点</span>
+          <p v-if="storyWordLimitError" class="story-review-hint" role="alert">{{ storyWordLimitError }}</p>
         </div>
         <div class="btn-row file-actions">
           <n-button @click="doExport('markdown')">导出 MD</n-button>
@@ -1048,11 +1081,29 @@ onBeforeUnmount(() => {
           <div class="result-title">
             剧情检查 · {{ storyCheckResult.chapter_title }}
             <n-tag v-if="storyCheckResult.truncated" type="warning" size="tiny">正文或依据有截断</n-tag>
-            <n-tag v-if="!storyCheckResult.review_complete" type="warning" size="tiny">检查不完整</n-tag>
+            <n-tag v-if="storyReviewIncomplete" type="warning" size="tiny">检查不完整</n-tag>
           </div>
           <p class="story-context">{{ storyCheckResult.previous_chapter_title ? `承接前章：${storyCheckResult.previous_chapter_title}` : '本章没有前章' }}</p>
           <p class="story-context">核对当前正文、设定和最近前章；不等于全书检查。<template v-if="storyCheckResult.history_truncated">前章资料仅包含章首、章尾或简略脉络。</template></p>
-          <p v-if="!storyCheckResult.review_complete || storyCheckResult.truncated" class="story-review-hint">本次检查不能代表全文与全部依据均已核对，请继续人工校对。</p>
+          <p v-if="storyReviewIncomplete || storyCheckResult.truncated" class="story-review-hint">本次检查不能代表全文与全部依据均已核对，请继续人工校对。</p>
+          <div v-if="storyCheckResult.word_count" class="story-word-count" aria-label="正文字数检查">
+            <p class="story-context">正文 {{ storyCheckResult.word_count.count }} 字 · {{ wordLimitLabel(storyCheckResult.word_count.within_limits === null ? null : storyCheckResult.word_count) }}</p>
+            <n-tag v-if="storyCheckResult.word_count.within_limits !== null" :type="storyCheckResult.word_count.within_limits ? 'success' : 'warning'" size="small">{{ storyCheckResult.word_count.within_limits ? '字数在目标范围内' : '字数未达到目标范围' }}</n-tag>
+            <p v-for="warning in storyCheckResult.word_count.warnings" :key="warning" class="story-review-hint">{{ warning }}</p>
+          </div>
+          <section v-if="storyRequirementRows.length" class="story-requirements" aria-label="构思逐项核对">
+            <div class="result-title">构思逐项核对 · {{ storyRequirementRows.length }} 项</div>
+            <article v-for="requirement in storyRequirementRows" :key="requirement.id" class="story-item">
+              <div class="deep-head">
+                <n-tag size="small" :type="requirement.status === 'satisfied' ? 'success' : requirement.status === 'violation' ? 'error' : 'warning'">{{ STORY_REQUIREMENT_STATUS[requirement.status] }}</n-tag>
+                <span>{{ STORY_ISSUE_LABEL[requirement.source] }}</span>
+              </div>
+              <div class="story-requirement">{{ requirement.text }}</div>
+              <button v-if="requirement.excerpt" type="button" class="story-excerpt" @click="locateExcerpt(requirement.excerpt)">正文证据：{{ requirement.excerpt }}</button>
+              <div v-else class="deep-reason">本项未提供可定位的正文引文。</div>
+              <div class="deep-reason">{{ requirement.reason }}</div>
+            </article>
+          </section>
           <n-empty v-if="!storyCheckResult.issues.length" :description="storyCheckEmptyText" />
           <n-list v-else>
             <n-list-item v-for="(issue, i) in storyCheckResult.issues" :key="i">
@@ -1218,6 +1269,20 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.word-limit-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+.word-limit-row :deep(.n-input-number) {
+  width: 140px;
+}
+.story-requirements .story-item {
+  padding: 10px 0;
+  border-bottom: 1px solid #eee;
+}
 .writing-panel {
   display: flex;
   height: 100%;
@@ -1255,11 +1320,14 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   padding: 12px 16px;
+  overflow-y: auto;
 }
 .editor-toolbar {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   gap: 8px;
   margin-bottom: 12px;
 }
@@ -1298,14 +1366,15 @@ onBeforeUnmount(() => {
 }
 .editor-body {
   flex: 1;
-  min-height: 0;
+  min-height: 320px;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 .content-editor {
+  flex: 1;
   width: 100%;
-  height: 100%;
-  min-height: 320px;
+  min-height: 0;
   padding: 12px;
   border: 1px solid #e5e5e5;
   border-radius: 4px;
@@ -1315,6 +1384,7 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
 }
 .editor-status {
+  flex-shrink: 0;
   padding-top: 6px;
   color: #777;
   font-size: 12px;
@@ -1462,6 +1532,7 @@ onBeforeUnmount(() => {
 .result-cols {
   display: flex;
   flex-wrap: wrap;
+  flex-shrink: 0;
   gap: 12px;
   margin-top: 12px;
   align-items: flex-start;

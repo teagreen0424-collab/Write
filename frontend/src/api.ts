@@ -28,6 +28,7 @@ import type {
   RevisionSourceInput,
   SettleResult,
   StoryCheckResult,
+  WordLimits,
   Suggestion,
 } from './types'
 
@@ -310,10 +311,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ content }),
     }),
-  checkChapterStory: (novelId: string, chapterId: string, content: string, directive: string) =>
+  checkChapterStory: (novelId: string, chapterId: string, content: string, directive: string, wordLimits?: WordLimits | null) =>
     request<StoryCheckResult>(`${BASE}/novels/${novelId}/chapters/${chapterId}/story-check`, {
       method: 'POST',
-      body: JSON.stringify({ content, directive }),
+      body: JSON.stringify({ content, directive, ...(wordLimits === undefined ? {} : { word_limits: wordLimits }) }),
     }),
 
   // 质量治理（阶段七）
@@ -395,9 +396,9 @@ export const api = {
     request<AutopilotTaskSnapshot | { running: false; task_id?: never }>(
       `${BASE}/novels/${novelId}/autopilot/status`,
     ),
-  startAutopilot: (novelId: string, requestId: string) =>
+  startAutopilot: (novelId: string, requestId: string, wordLimits?: WordLimits | null) =>
     request<AutopilotTaskSnapshot>(`${BASE}/novels/${novelId}/autopilot/start`, {
-      method: 'POST', body: JSON.stringify({ request_id: requestId }),
+      method: 'POST', body: JSON.stringify({ request_id: requestId, ...(wordLimits === undefined ? {} : { word_limits: wordLimits }) }),
     }),
   pauseAutopilot: (novelId: string, taskId: string) =>
     request<AutopilotEvent>(`${BASE}/novels/${novelId}/autopilot/tasks/${taskId}/pause`, { method: 'POST' }),
