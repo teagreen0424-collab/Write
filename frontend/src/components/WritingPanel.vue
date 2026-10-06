@@ -65,6 +65,7 @@ const previewNew = ref('')
 const previewFullContent = ref('')
 
 const showSettle = ref(false)
+const showSummary = ref(false)
 const showDelete = ref(false)
 const showWriteNext = ref(false)
 const showRevisions = ref(false)
@@ -187,7 +188,10 @@ function clearMarks() {
 
 function selectChapter(c: Chapter, force = false) {
   if (!force && c.id !== selectedId.value && !confirmDiscard()) return
-  if (c.id !== selectedId.value) showRevisions.value = false
+  if (c.id !== selectedId.value) {
+    showRevisions.value = false
+    showSummary.value = false
+  }
   selectedId.value = c.id
   title.value = c.title
   content.value = c.content
@@ -199,6 +203,7 @@ function selectChapter(c: Chapter, force = false) {
 function startNew(force = false) {
   if (!force && !confirmDiscard()) return
   showRevisions.value = false
+  showSummary.value = false
   selectedId.value = null
   title.value = ''
   directive.value = ''
@@ -669,6 +674,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
           <n-button type="success" :disabled="!selectedId" @click="doSettle">定稿沉淀</n-button>
         </div>
         <div class="btn-row version-actions">
+          <n-button :disabled="!selectedId" @click="showSummary = true">章节摘要</n-button>
           <n-button :disabled="!selectedId" @click="openRevisionHistory">版本历史</n-button>
           <span class="cost-hint">覆盖正文前会自动保存旧版本</span>
         </div>
@@ -870,6 +876,25 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
         <div class="modal-actions">
           <n-button @click="showWriteNext = false">取消</n-button>
           <n-button type="primary" @click="confirmWriteNext">开始生成</n-button>
+        </div>
+      </template>
+    </n-modal>
+
+    <n-modal
+      v-model:show="showSummary"
+      preset="card"
+      :title="selectedChapter ? `章节摘要 · ${chapterLabel(selectedChapter)}` : '章节摘要'"
+      style="width: min(560px, calc(100vw - 32px))"
+    >
+      <template v-if="selectedChapter?.summary?.trim()">
+        <p class="chapter-summary">{{ selectedChapter.summary }}</p>
+        <p class="summary-hint">这是已保存的摘要；正文修改后请重新核对。</p>
+        <p v-if="isDirty" class="summary-hint">当前章节有未保存修改，摘要尚未反映这些修改。</p>
+      </template>
+      <n-empty v-else description="暂无章节摘要。完成“定稿沉淀”后会生成摘要。" />
+      <template #footer>
+        <div class="modal-actions">
+          <n-button @click="showSummary = false">关闭</n-button>
         </div>
       </template>
     </n-modal>
@@ -1199,6 +1224,17 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 }
 .settle-summary {
   color: #666;
+}
+.chapter-summary {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+  max-height: 360px;
+  overflow: auto;
+}
+.summary-hint {
+  color: #888;
+  font-size: 12px;
 }
 .suggestion-row {
   margin: 6px 0;
