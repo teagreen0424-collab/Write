@@ -24,6 +24,7 @@ import type {
   OutlineCheckResult,
   OutlineNode,
   Segment,
+  StoryCheckResult,
   Suggestion,
 } from '../types'
 
@@ -65,6 +66,9 @@ const deepMeta = ref<{
 const deepLoading = ref(false)
 const outlineCheckResult = ref<OutlineCheckResult | null>(null)
 const outlineCheckLoading = ref(false)
+const storyCheckResult = ref<StoryCheckResult | null>(null)
+const storyCheckLoading = ref(false)
+let storyCheckRequestId = 0
 
 // 改写预览（不落库，确认后才应用）
 const showPreview = ref(false)
@@ -105,6 +109,19 @@ const OUTLINE_ISSUE_LABEL = {
   changed: '替换',
   contradiction: '矛盾',
 }
+
+const STORY_ISSUE_LABEL = {
+  directive: '章前指令',
+  continuity: '前章承接',
+  setting: '设定',
+  outline: '大纲',
+}
+const STORY_SEVERITY_LABEL = { high: '严重', medium: '中等', low: '轻微' }
+const storyCheckEmptyText = computed(() => {
+  if (!storyCheckResult.value?.review_complete) return '剧情检查未完成，不能判断是否存在偏差；请重试并人工核对'
+  if (storyCheckResult.value.truncated) return '已检查范围内未发现明显问题，正文或依据有截断；仍需人工校对'
+  return '未发现明显剧情问题，仍需人工校对'
+})
 
 const selectedChapter = computed(() => chapters.value.find((c) => c.id === selectedId.value) ?? null)
 const isLatestChapter = computed(
@@ -292,6 +309,13 @@ function clearMarks() {
   deepConflicts.value = []
   deepMeta.value = null
   outlineCheckResult.value = null
+  invalidateStoryCheck()
+}
+
+function invalidateStoryCheck() {
+  storyCheckRequestId += 1
+  storyCheckResult.value = null
+  storyCheckLoading.value = false
 }
 
 async function selectChapter(c: Chapter, force = false) {
@@ -565,6 +589,33 @@ async function doOutlineCheck() {
   }
 }
 
+// 检查当前编辑稿，显式传空章前指令也能覆盖已保存指令；检查不会修改正文。
+async function doStoryCheck() {
+  if (storyCheckLoading.value || !selectedId.value || !content.value.trim() || streaming.value) return
+  const requestId = ++storyCheckRequestId
+  const novelId = props.novelId
+  const chapterId = selectedId.value
+  const checkedContent = content.value
+  const checkedDirective = directive.value
+  const isCurrent = () => !unmounted && requestId === storyCheckRequestId
+    && props.novelId === novelId && selectedId.value === chapterId
+    && content.value === checkedContent && directive.value === checkedDirective
+  storyCheckLoading.value = true
+  storyCheckResult.value = null
+  try {
+    const result = await api.checkChapterStory(novelId, chapterId, checkedContent, checkedDirective)
+    if (!isCurrent()) return
+    storyCheckResult.value = result
+    if (!result.review_complete || result.truncated) message.warning('剧情检查范围或结果不完整，请核对提示后人工校对')
+    else if (result.issues.length) message.warning(`剧情检查发现 ${result.issues.length} 处待核对项`)
+    else message.success('未发现明显剧情问题，仍请人工校对')
+  } catch (e) {
+    if (isCurrent()) message.error(`剧情检查未完成：${(e as Error).message}`)
+  } finally {
+    if (isCurrent()) storyCheckLoading.value = false
+  }
+}
+
 // 点击深度检查结果，滚动定位到正文片段
 function locateExcerpt(excerpt: string) {
   if (!excerpt) return
@@ -741,6 +792,11 @@ watch(
 
 watch(hasUnsavedChanges, (dirty) => emit('dirty-change', dirty), { immediate: true })
 watch(content, () => { outlineCheckResult.value = null })
+watch(
+  () => [props.novelId, selectedId.value, content.value, directive.value],
+  invalidateStoryCheck,
+  { flush: 'sync' },
+)
 
 onMounted(() => window.addEventListener('beforeunload', handleBeforeUnload))
 onBeforeUnmount(() => {
@@ -826,6 +882,12 @@ onBeforeUnmount(() => {
             @click="doOutlineCheck"
           >大纲契合检查</n-button>
           <span class="cost-hint">本项调用模型 1 次</span>
+          <n-button
+            :disabled="!selectedId || !content.trim() || streaming"
+            :loading="storyCheckLoading"
+            title="检查当前正文的章前指令、前章承接、设定和大纲；调用模型 1 次，不修改正文"
+            @click="doStoryCheck"
+          >剧情检查</n-button>
           <n-button type="success" :disabled="!selectedId || streaming || hasIncompleteOutput" @click="doSettle">定稿沉淀</n-button>
         </div>
         <div class="btn-row version-actions">
@@ -924,7 +986,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div v-if="conflicts.length || deepMeta || outlineCheckResult" class="result-cols">
+      <div v-if="conflicts.length || deepMeta || outlineCheckResult || storyCheckResult" class="result-cols">
         <div v-if="conflicts.length" class="result-col result-conflicts">
           <div class="result-title">规则层一致性冲突</div>
           <n-list>
@@ -981,6 +1043,32 @@ onBeforeUnmount(() => {
             </n-list-item>
           </n-list>
         </div>
+
+        <section v-if="storyCheckResult" class="result-col result-story" aria-label="剧情检查结果">
+          <div class="result-title">
+            剧情检查 · {{ storyCheckResult.chapter_title }}
+            <n-tag v-if="storyCheckResult.truncated" type="warning" size="tiny">正文或依据有截断</n-tag>
+            <n-tag v-if="!storyCheckResult.review_complete" type="warning" size="tiny">检查不完整</n-tag>
+          </div>
+          <p class="story-context">{{ storyCheckResult.previous_chapter_title ? `承接前章：${storyCheckResult.previous_chapter_title}` : '本章没有前章' }}</p>
+          <p class="story-context">核对当前正文、设定和最近前章；不等于全书检查。<template v-if="storyCheckResult.history_truncated">前章资料仅包含章首、章尾或简略脉络。</template></p>
+          <p v-if="!storyCheckResult.review_complete || storyCheckResult.truncated" class="story-review-hint">本次检查不能代表全文与全部依据均已核对，请继续人工校对。</p>
+          <n-empty v-if="!storyCheckResult.issues.length" :description="storyCheckEmptyText" />
+          <n-list v-else>
+            <n-list-item v-for="(issue, i) in storyCheckResult.issues" :key="i">
+              <div class="story-item">
+                <div class="deep-head">
+                  <n-tag size="small" :type="issue.severity === 'high' ? 'error' : 'warning'">{{ STORY_ISSUE_LABEL[issue.category] }}</n-tag>
+                  <span>{{ STORY_SEVERITY_LABEL[issue.severity] }}</span>
+                </div>
+                <div class="story-requirement">原要求：{{ issue.requirement }}</div>
+                <button v-if="issue.excerpt" type="button" class="story-excerpt" @click="locateExcerpt(issue.excerpt)">正文：{{ issue.excerpt }}</button>
+                <div v-else class="deep-reason">本项未提供可定位的正文引文。</div>
+                <div class="deep-reason">{{ issue.reason }}</div>
+              </div>
+            </n-list-item>
+          </n-list>
+        </section>
       </div>
     </div>
 
@@ -1394,6 +1482,38 @@ onBeforeUnmount(() => {
 }
 .result-outline {
   border: 1px solid #a9d9ba;
+}
+.result-story {
+  border: 1px solid #e4b15a;
+}
+.story-context,
+.story-review-hint {
+  margin: 4px 0 8px;
+  color: #777;
+  font-size: 12px;
+}
+.story-review-hint {
+  color: #9c5c00;
+}
+.story-requirement,
+.story-excerpt {
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.story-excerpt {
+  display: block;
+  width: 100%;
+  padding: 0;
+  margin-top: 4px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.story-excerpt:hover {
+  background: #e8f4ff;
 }
 .result-title {
   font-weight: 600;

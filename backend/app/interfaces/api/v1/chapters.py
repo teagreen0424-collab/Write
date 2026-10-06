@@ -7,6 +7,7 @@ from app.application import revisions as revisions_uc
 from app.application import settle as settle_uc
 from app.application import writing as writing_uc
 from app.application import outline_check as outline_check_uc
+from app.application import story_review as story_review_uc
 from app.infrastructure.db import SessionLocal, get_db
 from app.infrastructure.repository import ChapterRepo, ChapterRevisionRepo
 from app.interfaces import schemas
@@ -108,6 +109,24 @@ def check_chapter_outline(
 ):
     """作者按需检查本章与绑定大纲；单次模型调用，不落库。"""
     return outline_check_uc.check_chapter_outline(db, novel_id, chapter_id, payload.content)
+
+
+@router.post("/{chapter_id}/story-check", response_model=schemas.StoryCheckResult)
+def check_chapter_story(
+    novel_id: str, chapter_id: str, payload: schemas.StoryCheckRequest,
+    db: Session = Depends(get_db),
+):
+    """复核当前编辑稿的构思执行与前章承接；一次调用，不保存编辑稿或设定。"""
+    with db.no_autoflush:
+        chapter = ChapterRepo(db).get(novel_id, chapter_id)
+        result = story_review_uc.review_story(
+            db, novel_id,
+            chapter.content if payload.content is None else payload.content,
+            directive=chapter.directive if payload.directive is None else payload.directive,
+            chapter_seq=chapter.seq, outline_node_id=chapter.outline_node_id,
+        )
+    result.chapter_title = chapter.title
+    return result
 
 
 @router.post("/{chapter_id}/continue")

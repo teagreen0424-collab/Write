@@ -27,6 +27,7 @@ import type {
   Relationship,
   RevisionSourceInput,
   SettleResult,
+  StoryCheckResult,
   Suggestion,
 } from './types'
 
@@ -308,6 +309,11 @@ export const api = {
     request<OutlineCheckResult>(`${BASE}/novels/${novelId}/chapters/${chapterId}/outline-check`, {
       method: 'POST',
       body: JSON.stringify({ content }),
+    }),
+  checkChapterStory: (novelId: string, chapterId: string, content: string, directive: string) =>
+    request<StoryCheckResult>(`${BASE}/novels/${novelId}/chapters/${chapterId}/story-check`, {
+      method: 'POST',
+      body: JSON.stringify({ content, directive }),
     }),
 
   // 质量治理（阶段七）

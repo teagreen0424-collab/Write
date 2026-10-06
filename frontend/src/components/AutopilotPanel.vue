@@ -391,7 +391,7 @@ function applySnapshot(snapshot: AutopilotTaskSnapshot) {
   total.value = snapshot.total
   progressText.value = snapshot.message || (snapshot.running ? '后台运行中' : '任务已结束')
   taskNotice.value = snapshot.task_notice || ''
-  qualityWarnings.value = [...snapshot.quality_warnings]
+  qualityWarnings.value = [...new Set(snapshot.quality_warnings)]
   driftWarnings.value = snapshot.drift_warnings.map((warning) => ({ ...warning }))
   statusNotice.value = ''
   attempt = Math.max(attempt, ...snapshot.active_drafts.map((draft) => draft.draft_attempt))
@@ -399,6 +399,7 @@ function applySnapshot(snapshot: AutopilotTaskSnapshot) {
 }
 
 function handleObservedEvent(event: AutopilotEvent, taskId: string) {
+  if (currentTaskId.value !== taskId) return
   if (event.task_id && event.task_id !== taskId) return
   if (event.novel_id && event.novel_id !== props.novelId) return
   if (event.type === 'snapshot') {
@@ -657,6 +658,11 @@ function handleEvent(ev: AutopilotEvent) {
       }
       progressText.value = `第${ev.seq}章生成完成`
       break
+    case 'check':
+    case 'story_check':
+      addQualityWarnings(ev.warnings || [])
+      if (ev.type === 'story_check' && ev.message) progressText.value = ev.message
+      break
     case 'tension':
       upsertPoint(ev.seq, { tension: ev.score })
       renderChart()
@@ -680,7 +686,9 @@ function handleEvent(ev: AutopilotEvent) {
       break
     case 'error':
       if (ev.scope === 'quality' || (ev.saved === true && !ev.fatal && ev.scope !== 'task')) {
-        qualityWarnings.value.push(ev.message || '章节已保存，但质量检查失败')
+        addQualityWarnings([ev.message || '章节已保存，但质量检查失败'])
+        message.warning(ev.message || '章节已保存，质量检查待核对')
+        break
       } else if (ev.scope === 'chapter' && ev.node_id) {
         if (ev.draft_id && (dismissedDraftIds.has(ev.draft_id) || finishedDraftIds.has(ev.draft_id))) break
         if (activeDrafts.value[ev.node_id] && ev.draft_id && activeDrafts.value[ev.node_id]!.draftKey !== ev.draft_id) break
@@ -720,6 +728,13 @@ function handleEvent(ev: AutopilotEvent) {
       void draftWriter?.flush()
       break
   }
+}
+
+function addQualityWarnings(warnings: string[]) {
+  qualityWarnings.value = [...new Set([
+    ...qualityWarnings.value,
+    ...warnings.filter((warning) => typeof warning === 'string' && !!warning.trim()),
+  ])]
 }
 
 async function start() {
@@ -928,6 +943,8 @@ watch(hasPendingOutput, (dirty) => emit('dirty-change', dirty), { immediate: tru
       <n-button type="info" :disabled="!serverRunning || !currentTaskId" @click="inject">注入</n-button>
     </div>
 
+    <p class="output-hint">每章保存后会复核章前指令、前章承接和设定；发现问题或检查未完成时自动暂停，正文保留。</p>
+
     <div class="progress-row">
       <n-progress type="line" :percentage="total ? Math.round((done / total) * 100) : 0" />
       <div class="progress-text">{{ progressText }}</div>
@@ -976,6 +993,7 @@ watch(hasPendingOutput, (dirty) => emit('dirty-change', dirty), { immediate: tru
     <section v-if="qualityWarnings.length" class="quality-warnings" aria-label="已保存章节的质量检查提示">
       <div class="draft-heading">章节已保存，质量检查待处理</div>
       <p v-for="(warning, index) in qualityWarnings" :key="index" class="output-hint">{{ warning }}</p>
+      <p v-if="paused" class="output-hint">请到“写作”页核对提示，按需修正并保存正文，再点击“恢复”继续后续章节。已保存章节会保留。</p>
     </section>
 
     <div ref="chartRef" class="chart"></div>

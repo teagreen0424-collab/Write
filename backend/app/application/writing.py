@@ -5,7 +5,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
-from app.application.context import build_context
+from app.application.context import (
+    build_context, chapter_excerpt, prior_chapters, prior_chapter_context, recent_history,
+)
 from app.application.revisions import (
     SOURCE_CONTINUE,
     SOURCE_REWRITE,
@@ -44,28 +46,12 @@ def _chapter_dict(chapter) -> dict:
 
 def _chapter_context(content: str, max_chars: int = 7000) -> str:
     """保留上一章章首与结尾，兼顾身份建立和结尾钩子。"""
-    if len(content) <= max_chars:
-        return content
-    head_chars = 3000
-    tail_chars = max_chars - head_chars
-    return content[:head_chars] + "\n\n…（上一章中段已省略）…\n\n" + content[-tail_chars:]
+    return chapter_excerpt(content, max_chars)
 
 
 def _recent_history(chapters: list, previous) -> str:
     """给出上一章之前最多两章的短脉络，未定稿章节用首尾片段降级。"""
-    earlier = [chapter for chapter in chapters if chapter.seq < previous.seq][-2:]
-    if not earlier:
-        return "无（当前从第一章继续）"
-    lines: list[str] = []
-    for chapter in earlier:
-        brief = (chapter.summary or "").strip()
-        if not brief:
-            compact = (chapter.content or "").strip()
-            if len(compact) > 600:
-                compact = compact[:300] + "…" + compact[-300:]
-            brief = compact or "无摘要"
-        lines.append(f"第{chapter.seq}章《{chapter.title}》：{brief}")
-    return "\n".join(lines)
+    return recent_history(chapters, previous)
 
 
 def _outline_contract(outline) -> str:
@@ -78,7 +64,8 @@ def _outline_contract(outline) -> str:
         f"标题：{outline.title}\n"
         f"概要：{summary or '未填写'}\n"
         "概要中的具体人物、物件、气味、数字、地点及因果线索不可随意替换。"
-        "若与上一章已发生事实冲突，先保留已发生事实，再用合理过渡推进大纲目标。"
+        "Story Bible明确事实优先，未定稿前情不得覆盖设定；"
+        "没有设定冲突时，用合理过渡承接前章并推进大纲目标。"
     )
 
 
@@ -114,15 +101,21 @@ def write_chapter(
             if outline.summary:
                 position += f"\n本章剧情要点：{outline.summary}"
         outline_contract = _outline_contract(outline)
-        context = build_context(db, novel_id, directive, position)
+        context = build_context(db, novel_id, directive, position,
+                                chapter_seq=seq, outline_node_id=outline_node_id)
         system_prompt = WRITE_SYSTEM
         user_prompt = f"{context}\n\n{outline_contract}\n\n请开始撰写本章正文："
+        chapters = prior_chapters(db, novel_id, seq, outline_node_id)
+        previous = chapters[-1] if chapters else None
         if previous_chapter_id:
             previous = repo.get(novel_id, previous_chapter_id)
-            chapters = repo.list(novel_id)
-            latest = chapters[-1] if chapters else None
+            all_chapters = repo.list(novel_id)
+            latest = all_chapters[-1] if all_chapters else None
             if latest is None or previous.id != latest.id:
                 raise ValueError("只能从最新章节生成下一章，请先选择章节列表中的最后一章")
+            if previous.id not in {chapter.id for chapter in chapters}:
+                raise ValueError("所选上一章不在本章大纲之前，请先核对章节与大纲顺序")
+        if previous is not None:
             system_prompt = NEXT_CHAPTER_SYSTEM
             user_prompt = NEXT_CHAPTER_USER.format(
                 context=context,
@@ -196,13 +189,15 @@ def continue_chapter(
         repo = ChapterRepo(db)
         chapter = repo.get(novel_id, chapter_id)
         position = f"第 {chapter.seq} 章《{chapter.title}》续写"
-        context = build_context(db, novel_id, directive, position)
+        context = build_context(db, novel_id, directive, position,
+                                chapter_seq=chapter.seq, outline_node_id=chapter.outline_node_id)
+        previous_context = prior_chapter_context(db, novel_id, chapter.seq, chapter.outline_node_id).text
         tail = chapter.content[-1500:]
         messages = [
             {"role": "system", "content": CONTINUE_SYSTEM},
             {
                 "role": "user",
-                "content": f"{context}\n\n【本章已写内容结尾】\n{tail}\n\n请自然续写：",
+                "content": f"{context}\n\n{previous_context}\n\n【本章已写内容结尾】\n{tail}\n\n请自然续写：",
             },
         ]
 
@@ -248,13 +243,15 @@ def rewrite_passage(
             raise ValueError("未在正文中找到待改写段落，请确认已选中原文")
 
         position = f"第 {chapter.seq} 章《{chapter.title}》改写"
-        context = build_context(db, novel_id, "", position)
+        context = build_context(db, novel_id, "", position,
+                                chapter_seq=chapter.seq, outline_node_id=chapter.outline_node_id)
+        previous_context = prior_chapter_context(db, novel_id, chapter.seq, chapter.outline_node_id).text
         intent_text = REWRITE_INTENTS.get(intent, REWRITE_INTENTS[""])
         messages = [
             {"role": "system", "content": REWRITE_SYSTEM},
             {
                 "role": "user",
-                "content": f"{context}\n\n【改写意图】{intent_text}\n【待改写段落】\n{passage}\n\n请输出改写后的段落：",
+                "content": f"{context}\n\n{previous_context}\n\n【改写意图】{intent_text}\n【待改写段落】\n{passage}\n\n请输出改写后的段落：",
             },
         ]
 

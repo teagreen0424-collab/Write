@@ -318,6 +318,28 @@ class OutlineCheckResult(BaseModel):
     outline_title: str = ""
 
 
+class StoryCheckRequest(BaseModel):
+    content: Optional[str] = None
+    directive: Optional[str] = None
+
+
+class StoryCheckIssue(BaseModel):
+    category: Literal["directive", "continuity", "setting", "outline"]
+    severity: Literal["high", "medium", "low"]
+    requirement: str = Field(..., min_length=1, max_length=800)
+    excerpt: str = Field(default="", max_length=400)
+    reason: str = Field(..., min_length=1, max_length=1200)
+
+
+class StoryCheckResult(BaseModel):
+    issues: list[StoryCheckIssue] = Field(default_factory=list, max_length=6)
+    truncated: bool = False
+    history_truncated: bool = False
+    review_complete: bool = True
+    previous_chapter_title: str = ""
+    chapter_title: str = ""
+
+
 class ContinueChapterRequest(BaseModel):
     directive: str = ""
 

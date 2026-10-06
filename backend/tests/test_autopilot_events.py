@@ -11,6 +11,7 @@ from app.application import auto_pilot
 from app.infrastructure import models
 from app.infrastructure.ai.llm_provider import LLMStreamIncompleteError
 from app.infrastructure import repository as repos
+from app.interfaces.schemas import StoryCheckResult
 
 
 def _event(frame):
@@ -35,6 +36,7 @@ class AutoPilotEventTest(unittest.TestCase):
         self.patches = [
             patch.object(auto_pilot, "registry", auto_pilot.AutoPilotRegistry()),
             patch.object(auto_pilot, "build_context", return_value="测试设定"),
+            patch.object(auto_pilot, "review_story", return_value=StoryCheckResult()),
             patch.object(auto_pilot, "score_tension", return_value=6.0),
             patch.object(auto_pilot, "check_drift", return_value=None),
         ]

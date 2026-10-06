@@ -19,6 +19,7 @@ from app.infrastructure.db import get_db
 from app.infrastructure import repository as repos
 from app.interfaces.api.v1.autopilot import router
 from app.interfaces.api.v1.novels import router as novels_router
+from app.interfaces.schemas import StoryCheckResult
 
 
 def _events(body):
@@ -55,6 +56,7 @@ class AutopilotTaskRouteTest(unittest.IsolatedAsyncioTestCase):
             patch.object(autopilot_tasks, "manager", self.manager),
             patch.object(auto_pilot, "registry", self.registry),
             patch.object(auto_pilot, "build_context", return_value="隔离API上下文"),
+            patch.object(auto_pilot, "review_story", return_value=StoryCheckResult()),
             patch.object(auto_pilot, "consistency_check", return_value={"conflicts": []}),
             patch.object(auto_pilot, "score_tension", return_value=5.0),
             patch.object(auto_pilot, "check_drift", return_value=None),

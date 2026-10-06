@@ -13,6 +13,7 @@ from app.application import auto_pilot, writing
 from app.infrastructure import models
 from app.infrastructure.ai.llm_provider import LLMStreamIncompleteError
 from app.infrastructure import repository as repos
+from app.interfaces.schemas import StoryCheckResult
 from app.main import app
 
 
@@ -145,6 +146,7 @@ class StreamPersistenceTest(unittest.TestCase):
         with (
             patch.object(auto_pilot.llm, "stream_complete", side_effect=truncated_stream),
             patch("app.application.auto_pilot.build_context", return_value="设定"),
+            patch.object(auto_pilot, "review_story", return_value=StoryCheckResult()),
         ):
             emitted = [json.loads(frame[5:].strip()) for frame in auto_pilot.run_autopilot(
                 self.novel_id, session_factory=self.session_factory

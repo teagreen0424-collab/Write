@@ -255,7 +255,9 @@ class WritingUseCaseTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         messages = stream.call_args.args[0]
-        self.assertIn("必须把给出的上一章视为已经发生", messages[0]["content"])
+        self.assertIn("根据给出的上一章保持剧情连续", messages[0]["content"])
+        self.assertIn("Story Bible 的明确事实是最高依据", messages[0]["content"])
+        self.assertIn("上一章草稿可能有错，不能反过来覆盖设定", messages[0]["content"])
         self.assertIn("【必须直接承接的上一章】", messages[1]["content"])
         self.assertIn("章首身份：林越是外卖员", messages[1]["content"])
         self.assertIn("上一章中段已省略", messages[1]["content"])
@@ -268,7 +270,7 @@ class WritingUseCaseTest(unittest.TestCase):
             messages[1]["content"].index("【本章大纲目标"),
         )
         self.assertIn("具体人物、物件、气味、数字、地点及因果线索不可随意替换", messages[1]["content"])
-        self.assertIn("章级大纲的具体场面与上一章已发生事实冲突", messages[0]["content"])
+        self.assertIn("大纲场面与前章存在差别时保持明确设定，写出合理衔接原因", messages[0]["content"])
         chapters = repos.ChapterRepo(self.db).list(self.novel_id)
         self.assertEqual(len(chapters), 2)
         self.assertEqual(chapters[1].seq, 2)

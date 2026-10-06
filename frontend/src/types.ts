@@ -364,6 +364,7 @@ export interface AutopilotEvent {
     | 'progress'
     | 'text'
     | 'check'
+    | 'story_check'
     | 'chapter_done'
     | 'tension'
     | 'drift'
@@ -389,6 +390,10 @@ export interface AutopilotEvent {
   draft_revision?: number
   draft_attempt?: number
   draft_persisted?: boolean
+  issues?: StoryCheckIssue[]
+  warnings?: string[]
+  truncated?: boolean
+  review_complete?: boolean
   [key: string]: any
 }
 
@@ -559,4 +564,21 @@ export interface OutlineCheckResult {
   issues: OutlineCheckIssue[]
   truncated: boolean
   outline_title: string
+}
+
+export interface StoryCheckIssue {
+  category: 'directive' | 'continuity' | 'setting' | 'outline'
+  severity: 'high' | 'medium' | 'low'
+  requirement: string
+  excerpt: string
+  reason: string
+}
+
+export interface StoryCheckResult {
+  issues: StoryCheckIssue[]
+  truncated: boolean
+  history_truncated: boolean
+  review_complete: boolean
+  previous_chapter_title: string
+  chapter_title: string
 }

@@ -17,6 +17,7 @@ from app.application import writing as writing_uc
 from app.infrastructure import models
 from app.infrastructure import repository as repos
 from app.infrastructure.db import get_db
+from app.interfaces.schemas import StoryCheckResult
 from app.main import app
 
 engine = create_engine(
@@ -393,6 +394,7 @@ class WritePathRevisionTest(RevisionTestBase):
 
         with (
             patch.object(auto_pilot.llm, "stream_complete", return_value=iter(["自动驾驶正文"])),
+            patch.object(auto_pilot, "review_story", return_value=StoryCheckResult()),
             patch.object(auto_pilot, "score_tension", return_value=5.0),
             patch.object(auto_pilot, "check_drift", return_value=None),
         ):

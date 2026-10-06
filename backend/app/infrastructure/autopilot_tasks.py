@@ -11,7 +11,7 @@ from app.infrastructure.autopilot_drafts import draft_write_lock
 
 ACTIVE_STATUSES = frozenset({"starting", "running", "paused"})
 TERMINAL_STATUSES = frozenset({"completed", "incomplete", "stopped", "interrupted"})
-EVENT_TYPES = frozenset({"progress", "text", "check", "chapter_done", "tension", "drift",
+EVENT_TYPES = frozenset({"progress", "text", "check", "story_check", "chapter_done", "tension", "drift",
                          "paused", "error", "done", "control"})
 
 
@@ -85,9 +85,17 @@ def project_event(snapshot, event):
     if kind == "error":
         message = event.get("message", "任务发生错误")
         if event.get("scope") == "quality" or (event.get("saved") and not event.get("fatal")):
-            result["quality_warnings"].append(message)
+            if message not in result["quality_warnings"]:
+                result["quality_warnings"].append(message)
         elif event.get("scope") == "task" or event.get("fatal"):
             result["task_notice"] = message
+    elif kind in ("check", "story_check"):
+        warnings = event.get("warnings", [])
+        if not isinstance(warnings, list) or any(not isinstance(w, str) for w in warnings):
+            raise TaskStorageError(422, "质量警告必须是字符串列表", "task_event_invalid")
+        for warning in warnings:
+            if warning and warning not in result["quality_warnings"]:
+                result["quality_warnings"].append(warning)
     elif kind == "drift" and event.get("warning"):
         result["drift_warnings"].append({
             "seq": event["seq"], "score": event["score"],

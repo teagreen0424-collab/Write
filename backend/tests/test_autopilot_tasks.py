@@ -16,6 +16,7 @@ from app.infrastructure import models
 from app.infrastructure.autopilot_drafts import AutopilotDraftRepo
 from app.infrastructure.autopilot_tasks import AutopilotTaskRepo
 from app.infrastructure import repository as repos
+from app.interfaces.schemas import StoryCheckResult
 
 
 def _event(frame):
@@ -44,6 +45,7 @@ class AutopilotTaskTest(unittest.TestCase):
         for mocked in (
             patch.object(auto_pilot, "registry", self.registry),
             patch.object(auto_pilot, "build_context", return_value="本机测试上下文"),
+            patch.object(auto_pilot, "review_story", return_value=StoryCheckResult()),
             patch.object(auto_pilot, "consistency_check", return_value={"conflicts": []}),
             patch.object(auto_pilot, "score_tension", return_value=5.0),
             patch.object(auto_pilot, "check_drift", return_value=None),

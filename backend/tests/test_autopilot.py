@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.application import auto_pilot
 from app.infrastructure import models
 from app.infrastructure import repository as repos
+from app.interfaces.schemas import StoryCheckResult
 
 engine = create_engine(
     "sqlite://",
@@ -38,6 +39,9 @@ class AutoPilotTest(unittest.TestCase):
             title="测试作品", genre="玄幻", summary="", style_anchor="古风"
         )
         self.nid = novel.id
+        review_patch = patch.object(auto_pilot, "review_story", return_value=StoryCheckResult())
+        review_patch.start()
+        self.addCleanup(review_patch.stop)
 
     def tearDown(self):
         self.db.close()

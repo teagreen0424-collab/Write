@@ -65,7 +65,7 @@ async function panel(options = {}) {
       else await closed.promise
     }),
     echarts: {}, NButton: {}, NInput: {}, NModal: {}, NProgress: {}, NTag: {},
-    useMessage: () => ({ success: (value) => messages.push(value), error: (value) => messages.push(value) }),
+    useMessage: () => ({ success: (value) => messages.push(value), warning: (value) => messages.push(value), error: (value) => messages.push(value) }),
     onMounted: (fn) => { hooks.mount = fn }, onBeforeUnmount: (fn) => { hooks.unmount = fn }, timer,
   }
   const source = 'const __harness = globalThis.__reconnectHarness\n' + script
@@ -374,4 +374,49 @@ test('真实 SFC 卸载清重连计时器和本页订阅，后台任务与权威
   assert.equal(context.puts.length, 0)
   assert.equal(context.starts.length, 0)
   assert.equal(context.vm.failedDrafts.value.length, 0)
+})
+
+test('真实 SFC 剧情复核告警从快照恢复，事件重放去重且已保存正文不会归为失败半稿', async () => {
+  const warning = '第1章章前指令未执行：林舟没有明确拒绝偷档案。正文已保存，请核对后恢复。'
+  const context = await panel({ status: async (novelId) => snapshot(novelId, {
+    event_id: 5, status: 'paused', paused: true, done: 1, active_drafts: [],
+    quality_warnings: [warning, warning], message: '剧情检查发现问题，已暂停后续章节',
+  }) })
+  assert.deepEqual(context.vm.qualityWarnings.value, [warning])
+  await context.streams[0].onEvent(event(5, { type: 'story_check', issues: [], warnings: [warning] }))
+  await context.streams[0].onEvent(event(6, { type: 'story_check', issues: [], warnings: [warning] }))
+  assert.deepEqual(context.vm.qualityWarnings.value, [warning])
+  assert.equal(context.vm.paused.value, true)
+  assert.equal(context.vm.done.value, 1)
+  assert.equal(context.vm.failedDrafts.value.length, 0)
+  assert.equal(context.puts.length, 0)
+  await context.vm.refreshTaskStatus()
+  assert.deepEqual(context.vm.qualityWarnings.value, [warning])
+  context.hooks.unmount()
+})
+
+test('真实 SFC 规则冲突与剧情检查失败作为质量提示保留，正文确认后不要求重写', async () => {
+  const context = await panel()
+  await context.streams[0].onEvent(event(4, { type: 'chapter_done', seq: 1 }))
+  await context.streams[0].onEvent(event(5, { type: 'check', conflicts: 1, warnings: ['规则冲突：人物年龄不符'] }))
+  await context.streams[0].onEvent(event(6, { type: 'story_check', issues: [], warnings: ['剧情检查未完成'], review_complete: false, truncated: false }))
+  await context.streams[0].onEvent(event(7, { type: 'error', scope: 'quality', saved: true, fatal: false, message: '剧情检查未完成' }))
+  await context.streams[0].onEvent(event(8, { type: 'paused', message: '正文已保存，请核对检查结果后恢复' }))
+  assert.deepEqual(context.vm.qualityWarnings.value, ['规则冲突：人物年龄不符', '剧情检查未完成'])
+  assert.equal(context.vm.failedDrafts.value.length, 0)
+  assert.equal(context.vm.activeDraftList.value.length, 0)
+  assert.equal(context.vm.paused.value, true)
+  assert.match(context.vm.progressText.value, /正文已保存/)
+  context.hooks.unmount()
+})
+
+test('真实 SFC 切换后台任务后旧剧情告警不能污染新快照', async () => {
+  const context = await panel()
+  const oldStream = context.streams[0]
+  context.vm.applySnapshot(snapshot(context.props.novelId, { task_id: 'task-b', event_id: 0, quality_warnings: [] }))
+  await oldStream.onEvent(event(99, { type: 'story_check', warnings: ['旧任务迟到告警'] }))
+  context.vm.handleObservedEvent(event(100, { type: 'story_check', warnings: ['旧订阅迟到告警'] }), 'task-a')
+  assert.equal(context.vm.currentTaskId.value, 'task-b')
+  assert.deepEqual(context.vm.qualityWarnings.value, [])
+  context.hooks.unmount()
 })
