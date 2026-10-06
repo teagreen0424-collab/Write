@@ -92,7 +92,7 @@ function navigateSafely(target: string, navigate: () => void) {
   if ((activeTab.value === 'writing' && writingDirty.value) || (activeTab.value === 'autopilot' && autopilotDirty.value)) {
     navigationTarget.value = target
     navigationWarning.value = activeTab.value === 'autopilot'
-      ? '离开会断开自动驾驶的本机监控连接，不能保证后台任务停止。已自动暂存的片段可以重新找回；未得到暂存确认的内容离开后可能丢失，请先复制保留。'
+      ? '自动驾驶继续在后台运行，离开只断开本页监控。未得到暂存确认的本页片段离开后可能丢失，请先复制保留；已暂存片段可以重新找回。'
       : '当前章节有未保存修改或未完成输出。'
     pendingNavigation.value = navigate
     showNavigationConfirm.value = true

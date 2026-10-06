@@ -72,6 +72,8 @@ class NovelRepo:
         ).delete(synchronize_session=False)
         # 显式级联删除作品作用域下的子表数据，避免孤儿残留
         for model in (
+            models.AutopilotTaskEvent,
+            models.AutopilotTask,
             models.Character,
             models.Location,
             models.WorldSetting,

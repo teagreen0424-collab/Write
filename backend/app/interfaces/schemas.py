@@ -1,5 +1,6 @@
 """接口层：请求/响应模型（Pydantic）。"""
 from typing import Literal, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -468,6 +469,51 @@ class OutlineApplyRequest(BaseModel):
 
 class AutopilotInjectRequest(BaseModel):
     directive: str = Field(..., min_length=1)
+
+
+class AutopilotTaskStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID
+
+
+class AutopilotTaskActiveDraft(BaseModel):
+    node_id: str
+    title: str
+    content: str
+    draft_id: str
+    draft_revision: int
+    draft_attempt: int
+    draft_persisted: bool
+
+
+class AutopilotTaskDriftWarning(BaseModel):
+    seq: int
+    score: float
+    message: str
+
+
+class AutopilotTaskSnapshot(BaseModel):
+    type: Literal["snapshot"] = "snapshot"
+    task_id: str
+    novel_id: str
+    event_id: int
+    status: Literal["starting", "running", "paused", "completed", "incomplete", "stopped", "interrupted"]
+    running: bool
+    paused: bool
+    pause_requested: bool
+    generated: int
+    skipped: int
+    failed: int
+    done: int
+    total: int
+    current_node_id: str
+    current_seq: int
+    message: str
+    task_notice: str
+    terminal_reason: str
+    active_drafts: list[AutopilotTaskActiveDraft] = Field(default_factory=list)
+    quality_warnings: list[str] = Field(default_factory=list)
+    drift_warnings: list[AutopilotTaskDriftWarning] = Field(default_factory=list)
 
 
 class AutopilotDraftUpsert(BaseModel):

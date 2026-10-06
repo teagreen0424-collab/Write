@@ -359,6 +359,8 @@ export interface ChatAction {
 
 export interface AutopilotEvent {
   type:
+    | 'snapshot'
+    | 'control'
     | 'progress'
     | 'text'
     | 'check'
@@ -370,7 +372,11 @@ export interface AutopilotEvent {
     | 'done'
   scope?: 'chapter' | 'quality' | 'task'
   phase?: 'starting' | 'generating' | 'skipped' | 'generated'
-  status?: 'completed' | 'incomplete' | 'stopped'
+  status?: AutopilotTaskStatus
+  task_id?: string
+  novel_id?: string
+  event_id?: number
+  action?: 'pause' | 'resume' | 'inject'
   saved?: boolean
   fatal?: boolean
   node_id?: string
@@ -384,6 +390,42 @@ export interface AutopilotEvent {
   draft_attempt?: number
   draft_persisted?: boolean
   [key: string]: any
+}
+
+export type AutopilotTaskStatus = 'starting' | 'running' | 'paused' | 'completed' | 'incomplete' | 'stopped' | 'interrupted'
+
+export interface AutopilotActiveDraft {
+  node_id: string
+  title: string
+  content: string
+  draft_id: string
+  draft_revision: number
+  draft_attempt: number
+  draft_persisted: boolean
+}
+
+export interface AutopilotTaskSnapshot extends AutopilotEvent {
+  type: 'snapshot'
+  task_id: string
+  novel_id: string
+  event_id: number
+  status: AutopilotTaskStatus
+  running: boolean
+  paused: boolean
+  pause_requested: boolean
+  generated: number
+  skipped: number
+  failed: number
+  done: number
+  total: number
+  current_node_id: string
+  current_seq: number
+  message: string
+  task_notice: string
+  terminal_reason: string
+  active_drafts: AutopilotActiveDraft[]
+  quality_warnings: string[]
+  drift_warnings: { seq: number; score: number; message: string }[]
 }
 
 /** 暂存片段独立于正式章节，重开页面时 active 按未确认状态恢复。 */

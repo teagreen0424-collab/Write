@@ -267,6 +267,78 @@ class AutoPilotEventTest(unittest.TestCase):
         stream.close()
         self.assertFalse(auto_pilot.registry.is_running(self.novel_id))
 
+    def test_old_owner_cannot_finish_pause_or_inject_new_owner(self):
+        first = auto_pilot.registry.start(self.novel_id, "first")
+        auto_pilot.registry.finish(self.novel_id, "first")
+        second = auto_pilot.registry.start(self.novel_id, "second")
+        auto_pilot.registry.finish(self.novel_id, first.owner_id)
+        self.assertIsNone(auto_pilot.registry.pause(self.novel_id, "first"))
+        self.assertIsNone(auto_pilot.registry.resume(self.novel_id, "first"))
+        self.assertIsNone(auto_pilot.registry.inject(self.novel_id, "旧构思", "first"))
+        self.assertIs(auto_pilot.registry.get(self.novel_id), second)
+        self.assertFalse(second.paused)
+        self.assertEqual(second.injected_directive, "")
+        auto_pilot.registry.finish(self.novel_id, "second")
+
+    def test_reserved_state_runs_once_and_wrong_reservation_keeps_real_owner(self):
+        state = auto_pilot.registry.start(self.novel_id, "task")
+        wrong = auto_pilot.AutoPilotState("other")
+        with patch.object(auto_pilot.llm, "stream_complete") as model:
+            rejected = [_event(frame) for frame in auto_pilot.run_autopilot(
+                self.novel_id, self.session_factory, reserved_state=wrong,
+            )]
+            self.assertEqual(rejected[0]["code"], "autopilot_task_ownership_lost")
+            self.assertIs(auto_pilot.registry.get(self.novel_id), state)
+            accepted = [_event(frame) for frame in auto_pilot.run_autopilot(
+                self.novel_id, self.session_factory, reserved_state=state,
+            )]
+        model.assert_not_called()
+        self.assertEqual(self._terminal(accepted)["status"], "completed")
+
+    def test_shutdown_after_first_text_closes_model_without_saving_partial_chapter(self):
+        self._nodes(1)
+        closed = []
+        advanced = []
+
+        def output(*args, **kwargs):
+            try:
+                yield "停服前已发送。"
+                advanced.append("不应请求下一段")
+                yield "尚未发送的尾段"
+            finally:
+                closed.append(True)
+
+        with patch.object(auto_pilot.llm, "stream_complete", side_effect=output):
+            stream = auto_pilot.run_autopilot(self.novel_id, self.session_factory)
+            emitted = []
+            while not emitted or emitted[-1]["type"] != "text":
+                emitted.append(_event(next(stream)))
+            auto_pilot.registry.get(self.novel_id).stop = True
+            emitted.extend(_event(frame) for frame in stream)
+        self.assertEqual(self._terminal(emitted)["status"], "stopped")
+        self.assertEqual(advanced, [])
+        self.assertEqual(closed, [True])
+        self.assertEqual(repos.ChapterRepo(self.db).list(self.novel_id), [])
+        cached = self.db.query(models.AutopilotDraft).one()
+        self.assertEqual((cached.content, cached.state, cached.deleted), ("停服前已发送。", "unconfirmed", False))
+
+    def test_shutdown_during_consistency_check_does_not_commit_chapter(self):
+        self._nodes(1)
+
+        def stop_during_check(*args):
+            auto_pilot.registry.get(self.novel_id).stop = True
+            return {"conflicts": []}
+
+        with (
+            patch.object(auto_pilot.llm, "stream_complete", return_value=iter(["已暂存的完整片段。"])),
+            patch.object(auto_pilot, "consistency_check", side_effect=stop_during_check),
+        ):
+            emitted = self._run()
+        self.assertEqual(self._terminal(emitted)["status"], "stopped")
+        self.assertEqual(repos.ChapterRepo(self.db).list(self.novel_id), [])
+        cached = self.db.query(models.AutopilotDraft).one()
+        self.assertEqual((cached.content, cached.state, cached.deleted), ("已暂存的完整片段。", "unconfirmed", False))
+
 
 if __name__ == "__main__":
     unittest.main()

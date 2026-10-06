@@ -20,7 +20,14 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
 }
-const settle = async () => { for (let index = 0; index < 8; index += 1) { await Promise.resolve(); await nextTick() } }
+const settle = async () => { for (let index = 0; index < 16; index += 1) { await Promise.resolve(); await nextTick() } }
+const snapshot = (novelId, patch = {}) => ({
+  type: 'snapshot', task_id: `task-${novelId}`, novel_id: novelId, event_id: 0,
+  status: 'running', running: true, paused: false, pause_requested: false,
+  generated: 0, skipped: 0, failed: 0, done: 0, total: 4,
+  current_node_id: '', current_seq: 0, message: '后台运行中', task_notice: '', terminal_reason: '',
+  active_drafts: [], quality_warnings: [], drift_warnings: [], ...patch,
+})
 const draft = (content = '已收到的片段。', patch = {}) => ({
   node_id: 'node-a', title: '第一章', attempt: 1, content, reason: '', state: 'active', revision: 0, ...patch,
 })
@@ -37,6 +44,7 @@ async function panel(overrides = {}) {
   const api = {
     getQualityCurve: async () => ({ chapters: [], drift_threshold: 0.6, anchor_set: false }),
     autopilotStatus: async () => ({ running: false }),
+    startAutopilot: async (novelId) => snapshot(novelId),
     listAutopilotDrafts: async () => records,
     saveAutopilotDraft: async (novelId, id, data) => { puts.push({ novelId, id, ...data }); return savedRecord({ id, novel_id: novelId, ...data }) },
     deleteAutopilotDraft: async (novelId, id, revision) => { deletes.push({ novelId, id, revision }); return { id, deleted: true, revision } },
@@ -45,7 +53,11 @@ async function panel(overrides = {}) {
   globalThis.window = { addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: (name) => listeners.delete(name) }
   globalThis.HTMLTextAreaElement = class {}
   globalThis.__autoHarness = {
-    api, streamEvents: async (...args) => { streamCalls += 1; await overrides.stream?.(...args) },
+    api, streamEvents: async (...args) => {
+      streamCalls += 1
+      if (overrides.stream) await overrides.stream(...args)
+      else await args[1]({ type: 'done', status: 'completed' })
+    },
     echarts: { init: () => ({ setOption() {}, dispose() {} }) },
     NButton: {}, NInput: {}, NModal: {}, NProgress: {}, NTag: {},
     useMessage: () => ({ success: (text) => messages.push(text), error: (text) => messages.push(text) }),
@@ -208,6 +220,7 @@ test('真实 SFC 恢复读取失败阻止起跑，重读成功才放行', async 
   await context.vm.retryDraftStorage()
   assert.equal(context.vm.draftsLoaded.value, true)
   await context.vm.start()
+  await settle()
   assert.equal(context.streamCalls, 1)
   context.hooks.unmount()
 })
@@ -275,18 +288,18 @@ test('真实 SFC 跨作品迟到恢复不会污染新作品，旧写队列仍使
   context.hooks.unmount()
 })
 
-test('真实 SFC 后台状态刷新只更新暂存正文而不自动监听', async () => {
+test('真实 SFC 后台状态刷新更新暂存并监控已有任务，不创建第二个任务', async () => {
   let record = savedRecord({ state: 'failed', reason: '长度截断' })
   const context = await panel({ api: {
     listAutopilotDrafts: async () => [record],
-    autopilotStatus: async () => ({ running: true }),
-  } })
+    autopilotStatus: async (novelId) => snapshot(novelId),
+  }, stream: async () => new Promise(() => {}) })
   await context.vm.start()
-  assert.equal(context.streamCalls, 0, '后台仍运行时不能创建第二个自动驾驶请求')
+  assert.equal(context.streamCalls, 1, '首次恢复只订阅已有后台任务')
   record = { ...record, content: '后台继续后的最新片段。', revision: 3 }
   await context.vm.refreshTaskStatus()
   assert.equal(context.vm.failedDrafts.value[0].text, record.content)
-  assert.equal(context.streamCalls, 0)
+  assert.equal(context.streamCalls, 1, '状态刷新不能重复订阅')
   context.hooks.unmount()
 })
 
@@ -300,6 +313,7 @@ test('真实 SFC 重试成功仍保留同节点此前失败稿和原 UUID', asyn
     await onEvent({ type: 'done', status: 'completed', done: 1, total: 1 })
   } })
   await context.vm.start()
+  await settle()
   assert.equal(context.streamCalls, 1)
   assert.equal(context.vm.failedDrafts.value.length, 1)
   assert.equal(context.vm.failedDrafts.value[0].draftKey, old.id)
@@ -316,6 +330,7 @@ test('真实 SFC 最新任务已完成时历史未知稿恢复不能把头部改
   } })
   assert.equal(context.vm.connectionUnconfirmed.value, true)
   await context.vm.start()
+  await settle()
   await context.vm.loadStoredDrafts()
   assert.equal(context.vm.failedDrafts.value.length, 1)
   assert.equal(context.vm.failedDrafts.value[0].unconfirmed, true)
@@ -376,13 +391,16 @@ test('真实 SFC 迟到读取不能盖掉新一轮页面状态，最新恢复请
   context.hooks.unmount()
 })
 
-test('真实 SFC 暂存已确认可安全离开，后台运行仍保留 beforeunload 提示', async () => {
+test('真实 SFC 后台独立运行可安全离开，未确认本地片段仍有 beforeunload 提示', async () => {
   const context = await panel({ records: [savedRecord()] })
   let prevented = 0
   const event = { preventDefault: () => { prevented += 1 }, returnValue: undefined }
   context.listeners.get('beforeunload')(event)
   assert.equal(prevented, 0)
   context.vm.serverRunning.value = true
+  context.listeners.get('beforeunload')(event)
+  assert.equal(prevented, 0)
+  context.vm.handleEvent({ type: 'text', node_id: 'node-a', content: '本页尚未暂存的片段。' })
   context.listeners.get('beforeunload')(event)
   assert.equal(prevented, 1)
   assert.equal(event.returnValue, '')

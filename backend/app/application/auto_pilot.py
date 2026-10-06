@@ -44,7 +44,8 @@ class AutoPilotOrderError(Exception):
 
 
 class AutoPilotState:
-    def __init__(self) -> None:
+    def __init__(self, owner_id: str = "") -> None:
+        self.owner_id = owner_id
         self.paused = False
         self.stop = False
         self.fail_count = 0
@@ -60,11 +61,11 @@ class AutoPilotRegistry:
         self._states: dict[str, AutoPilotState] = {}
         self._lock = threading.Lock()
 
-    def start(self, novel_id: str) -> AutoPilotState:
+    def start(self, novel_id: str, owner_id: str = "") -> AutoPilotState:
         with self._lock:
             if novel_id in self._states:
                 raise AutoPilotBusy("该作品已有自动驾驶任务在运行")
-            state = AutoPilotState()
+            state = AutoPilotState(owner_id)
             self._states[novel_id] = state
             return state
 
@@ -73,29 +74,38 @@ class AutoPilotRegistry:
             return novel_id in self._states
 
     def get(self, novel_id: str):
-        return self._states.get(novel_id)
-
-    def pause(self, novel_id: str):
-        state = self._states.get(novel_id)
-        if state:
-            state.paused = True
-        return state
-
-    def resume(self, novel_id: str):
-        state = self._states.get(novel_id)
-        if state:
-            state.paused = False
-        return state
-
-    def inject(self, novel_id: str, directive: str):
-        state = self._states.get(novel_id)
-        if state:
-            state.injected_directive = directive
-        return state
-
-    def finish(self, novel_id: str) -> None:
         with self._lock:
-            self._states.pop(novel_id, None)
+            return self._states.get(novel_id)
+
+    def pause(self, novel_id: str, owner_id: str | None = None):
+        with self._lock:
+            state = self._states.get(novel_id)
+            if state is not None and (owner_id is None or state.owner_id == owner_id):
+                state.paused = True
+                return state
+            return None
+
+    def resume(self, novel_id: str, owner_id: str | None = None):
+        with self._lock:
+            state = self._states.get(novel_id)
+            if state is not None and (owner_id is None or state.owner_id == owner_id):
+                state.paused = False
+                return state
+            return None
+
+    def inject(self, novel_id: str, directive: str, owner_id: str | None = None):
+        with self._lock:
+            state = self._states.get(novel_id)
+            if state is not None and (owner_id is None or state.owner_id == owner_id):
+                state.injected_directive = directive
+                return state
+            return None
+
+    def finish(self, novel_id: str, owner_id: str | None = None) -> None:
+        with self._lock:
+            state = self._states.get(novel_id)
+            if state is not None and (owner_id is None or state.owner_id == owner_id):
+                self._states.pop(novel_id, None)
 
 
 registry = AutoPilotRegistry()
@@ -227,10 +237,19 @@ def get_status(novel_id: str):
     }
 
 
-def run_autopilot(novel_id: str, session_factory=SessionLocal):
-    """自动驾驶主循环（SSE 生成器，运行在独立线程）。"""
+def run_autopilot(novel_id: str, session_factory=SessionLocal, reserved_state: AutoPilotState | None = None):
+    """生成内核；后台管理器消费它，浏览器只订阅已提交的任务事件。"""
     try:
-        state = registry.start(novel_id)
+        if reserved_state is None:
+            state = registry.start(novel_id)
+        elif registry.get(novel_id) is reserved_state:
+            state = reserved_state
+        else:
+            yield _sse({
+                "type": "error", "scope": "task", "fatal": True,
+                "code": "autopilot_task_ownership_lost", "message": "该任务已不再持有本作品的生成权限。",
+            })
+            return
     except AutoPilotBusy as exc:
         yield _sse({
             "type": "error", "scope": "task", "fatal": True,
@@ -269,7 +288,7 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                 while state.paused and not state.stop:
                     time.sleep(0.5)
                     if state.paused and not state.stop:
-                        # 保留可取消的输出边界，暂停时断开客户端也能回收任务。
+                        # 后台管理器可在暂停期间检查停服请求，订阅断开不影响此循环。
                         yield ": paused\n\n"
             if state.stop:
                 terminal_status = "stopped"
@@ -307,13 +326,29 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                 ]
 
                 full = ""
-                for chunk in llm.stream_complete(messages, max_tokens=get_settings().writing_max_tokens):
-                    full += chunk
-                    draft_meta = journal.append(chunk)
-                    yield _sse({
-                        "type": "text", "content": chunk, "node_id": node_id, "title": node_title,
-                        **draft_meta,
-                    })
+                chunks = iter(llm.stream_complete(messages, max_tokens=get_settings().writing_max_tokens))
+                try:
+                    while not state.stop:
+                        try:
+                            chunk = next(chunks)
+                        except StopIteration:
+                            break
+                        if state.stop:
+                            break
+                        full += chunk
+                        draft_meta = journal.append(chunk)
+                        yield _sse({
+                            "type": "text", "content": chunk, "node_id": node_id, "title": node_title,
+                            **draft_meta,
+                        })
+                finally:
+                    close_stream = getattr(chunks, "close", None)
+                    if close_stream is not None:
+                        close_stream()
+
+                if state.stop:
+                    terminal_status = "stopped"
+                    break
 
                 if not full.strip():
                     raise ValueError("未生成有效正文，请重试")
@@ -328,6 +363,10 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                         "message": f"发现 {len(conflicts)} 处冲突" if conflicts else "一致性检查通过",
                     }
                 )
+
+                if state.stop:
+                    terminal_status = "stopped"
+                    break
 
                 seq = _chapter_insert_seq(db, novel_id, node_id, ordered_node_ids)
                 chapter = ChapterRepo(db).create(
@@ -451,7 +490,7 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                     cleanup_error = exc
         finally:
             # 缓存收尾之前仍由本次任务持有，避免恢复页提前删除其 active 记录。
-            registry.finish(novel_id)
+            registry.finish(novel_id, state.owner_id)
 
     if task_error is not None:
         yield _sse(task_error)

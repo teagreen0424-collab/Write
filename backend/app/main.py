@@ -5,13 +5,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.infrastructure.db import init_db
+from app.application import autopilot_tasks
 from app.interfaces.api.v1.router import api_router
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    yield
+    autopilot_tasks.manager.recover_interrupted()
+    try:
+        yield
+    finally:
+        autopilot_tasks.manager.shutdown()
 
 
 def create_app() -> FastAPI:

@@ -5,7 +5,7 @@ import { NButton, NInput, NModal, NProgress, NTag, useMessage } from 'naive-ui'
 import { api, streamEvents } from '../api'
 import { getAutopilotDraftWriter } from '../autopilotDrafts'
 import type { AutopilotDraftWriter, DraftSaveState } from '../autopilotDrafts'
-import type { AutopilotDraftInput, AutopilotEvent } from '../types'
+import type { AutopilotDraftInput, AutopilotEvent, AutopilotTaskSnapshot, AutopilotTaskStatus } from '../types'
 
 const props = defineProps<{ novelId: string }>()
 const emit = defineEmits<{ (e: 'dirty-change', dirty: boolean): void }>()
@@ -14,6 +14,10 @@ const message = useMessage()
 
 const running = ref(false)
 const serverRunning = ref(false)
+const startingTask = ref(false)
+const currentTaskId = ref('')
+const taskStatus = ref<AutopilotTaskStatus | 'idle'>('idle')
+const connectionState = ref<'idle' | 'connecting' | 'connected' | 'reconnecting' | 'disconnected'>('idle')
 const checkingStatus = ref(false)
 const statusNotice = ref('')
 const paused = ref(false)
@@ -37,6 +41,7 @@ interface FailedDraft extends NodeDraft {
   unconfirmed: boolean
   collapsed: boolean
   copyFallback: boolean
+  eventId?: number
 }
 const activeDrafts = ref<Record<string, NodeDraft>>({})
 const failedDrafts = ref<FailedDraft[]>([])
@@ -54,9 +59,8 @@ const storageNotice = computed(() => {
 })
 const draftTextRefs = new Map<number, HTMLTextAreaElement>()
 const activeDraftList = computed(() => Object.values(activeDrafts.value))
-const hasActiveTask = computed(() => running.value || serverRunning.value)
-const hasPendingOutput = computed(() => hasActiveTask.value
-  || activeDraftList.value.some((draft) => draft.saveState !== 'saved')
+const hasActiveTask = computed(() => startingTask.value || serverRunning.value)
+const hasPendingOutput = computed(() => activeDraftList.value.some((draft) => draft.saveState !== 'saved')
   || failedDrafts.value.some((draft) => draft.saveState !== 'saved'))
 let runId = 0
 let statusRequestId = 0
@@ -68,6 +72,15 @@ let connectionController: AbortController | null = null
 let draftsRequestId = 0
 let draftWriter: AutopilotDraftWriter | null = null
 let unsubscribeWriter: (() => void) | null = null
+let connectionEpoch = 0
+let eventCursor = 0
+let reconnectAttempt = 0
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let pendingStartRequestId: string | null = null
+let pendingStartPreviousTaskId: string | null = null
+const seenDraftRevisions = new Map<string, number>()
+const finishedDraftIds = new Set<string>()
+const dismissedDraftIds = new Set<string>()
 
 function bindDraftWriter(novelId: string) {
   unsubscribeWriter?.()
@@ -112,17 +125,19 @@ function persistDraft(draft: NodeDraft, state: AutopilotDraftInput['state'], rea
 }
 
 async function loadStoredDrafts(expectedRunId = runId, novelId = props.novelId) {
-  if (!novelId || !isCurrentRun(expectedRunId, novelId) || running.value) return
+  if (!novelId || !isCurrentRun(expectedRunId, novelId)) return
   const requestId = ++draftsRequestId
+  const requestedCursor = eventCursor
   const writer = draftWriter
-  const isLatest = () => requestId === draftsRequestId && isCurrentRun(expectedRunId, novelId) && !running.value
+  const isLatest = () => requestId === draftsRequestId && isCurrentRun(expectedRunId, novelId)
   checkingDrafts.value = true
   try {
     await writer?.flush()
     const records = await api.listAutopilotDrafts(novelId)
     if (!isLatest()) return
     const previous = new Map(failedDrafts.value.map((draft) => [draft.draftKey, draft]))
-    const recovered = records.map((record): FailedDraft => {
+    const activeIds = new Set(Object.values(activeDrafts.value).map((draft) => draft.draftKey))
+    const recovered = records.filter((record) => !activeIds.has(record.id) && !dismissedDraftIds.has(record.id)).map((record): FailedDraft => {
       const existing = previous.get(record.id)
       if (existing && existing.text !== record.content && (
         (!existing.serverManaged && existing.saveState !== 'saved') || existing.revision > record.revision
@@ -139,12 +154,14 @@ async function loadStoredDrafts(expectedRunId = runId, novelId = props.novelId) 
     const recoveredIds = new Set(records.map((record) => record.id))
     // 写库失败的本页片段不能因一次列表刷新被清空。
     for (const draft of failedDrafts.value) {
-      if (!recoveredIds.has(draft.draftKey) && ['pending', 'saving', 'error'].includes(draft.saveState)) recovered.push(draft)
+      if (!recoveredIds.has(draft.draftKey) && !dismissedDraftIds.has(draft.draftKey) && (
+        ['pending', 'saving', 'error'].includes(draft.saveState) || (draft.eventId || 0) > requestedCursor
+      )) recovered.push(draft)
     }
     failedDrafts.value = recovered
     attempt = Math.max(attempt, ...records.map((record) => record.attempt))
     // 历史半稿的未知状态不能覆盖本页最新任务已经收到的终态确认。
-    if (!latestTaskTerminal) connectionUnconfirmed.value = recovered.some((draft) => draft.unconfirmed)
+    if (!latestTaskTerminal && !serverRunning.value) connectionUnconfirmed.value = recovered.some((draft) => draft.unconfirmed)
     draftsLoaded.value = true
     recoveryNotice.value = recovered.length ? `已从本地数据库找回 ${records.length} 份暂存片段。暂存片段不会自动成为正式章节。` : ''
   } catch (error) {
@@ -156,7 +173,7 @@ async function loadStoredDrafts(expectedRunId = runId, novelId = props.novelId) 
 
 async function retryDraftStorage() {
   await draftWriter?.retry()
-  if (!running.value) await loadStoredDrafts()
+  await loadStoredDrafts()
 }
 
 async function refreshTaskStatus() {
@@ -184,14 +201,22 @@ function disconnect() {
   draftsRequestId += 1
   checkingDrafts.value = false
   invalidateStatusRequests()
-  connectionController?.abort()
-  connectionController = null
+  stopMonitoring()
   running.value = false
   serverRunning.value = false
   paused.value = false
   pauseRequested.value = false
   controlPending.value = false
   checkingStatus.value = false
+  startingTask.value = false
+  currentTaskId.value = ''
+  taskStatus.value = 'idle'
+  pendingStartRequestId = null
+  pendingStartPreviousTaskId = null
+  eventCursor = 0
+  seenDraftRevisions.clear()
+  finishedDraftIds.clear()
+  dismissedDraftIds.clear()
 }
 
 function preserveNode(nodeId: string, reason: string, unconfirmed: boolean, title?: string) {
@@ -207,8 +232,12 @@ function preserveNode(nodeId: string, reason: string, unconfirmed: boolean, titl
     unconfirmed,
     collapsed: false,
     copyFallback: false,
+    eventId: eventCursor + 1,
   }
-  failedDrafts.value.push(preserved)
+  const existingIndex = failedDrafts.value.findIndex((item) => item.draftKey === preserved.draftKey)
+  if (existingIndex < 0) failedDrafts.value.push(preserved)
+  else failedDrafts.value[existingIndex] = { ...preserved, id: failedDrafts.value[existingIndex]!.id }
+  finishedDraftIds.add(preserved.draftKey)
   persistDraft(preserved, unconfirmed ? 'unconfirmed' : 'failed', reason, true)
   delete activeDrafts.value[nodeId]
 }
@@ -218,6 +247,13 @@ function preserveActiveDrafts(reason: string) {
 }
 
 function handleConnectionError(error: string, code?: string) {
+  connectionState.value = 'disconnected'
+  running.value = false
+  if (currentTaskId.value && serverRunning.value && !latestTaskTerminal) {
+    // 监控断线不改变后台任务和服务器持有的实时半稿。
+    statusNotice.value = `监控连接断开：${error}。后台任务仍独立运行，可以重新连接、暂停或注入构思。`
+    return
+  }
   latestTaskTerminal = code === 'CLIENT_UPDATE_FAILED'
   invalidateStatusRequests()
   statusNotice.value = ''
@@ -276,6 +312,8 @@ async function confirmDiscard() {
     const removed = await writer.remove(draft.draftKey, draft.revision)
     if (unmounted || props.novelId !== novelId) return
     if (removed) {
+      dismissedDraftIds.add(draft.draftKey)
+      finishedDraftIds.add(draft.draftKey)
       failedDrafts.value = failedDrafts.value.filter((item) => item.draftKey !== draft.draftKey)
       recoveryNotice.value = ''
       showDiscard.value = false
@@ -292,6 +330,158 @@ function handleBeforeUnload(event: BeforeUnloadEvent) {
   event.returnValue = ''
 }
 
+function stopMonitoring() {
+  connectionEpoch += 1
+  connectionController?.abort()
+  connectionController = null
+  if (reconnectTimer) clearTimeout(reconnectTimer)
+  reconnectTimer = null
+  running.value = false
+  connectionState.value = 'idle'
+}
+
+function preserveLocalActiveDrafts(reason: string) {
+  for (const draft of Object.values(activeDrafts.value)) {
+    if (!draft.serverManaged) preserveNode(draft.nodeId, reason, true)
+  }
+}
+
+function applySnapshot(snapshot: AutopilotTaskSnapshot) {
+  if (snapshot.novel_id !== props.novelId || !snapshot.task_id
+    || !Number.isSafeInteger(snapshot.event_id) || snapshot.event_id < 0
+    || !Array.isArray(snapshot.active_drafts)) throw new Error('后台任务快照格式无效')
+  const changedTask = currentTaskId.value !== snapshot.task_id
+  if (!changedTask && snapshot.event_id < eventCursor) return false
+  if (changedTask) {
+    stopMonitoring()
+    preserveLocalActiveDrafts('上一次监控未收到章节保存确认')
+    currentTaskId.value = snapshot.task_id
+    eventCursor = 0
+    reconnectAttempt = 0
+    latestTaskTerminal = false
+    controlPending.value = false
+    invalidateStatusRequests()
+  }
+  const previous = activeDrafts.value
+  const active: Record<string, NodeDraft> = {}
+  for (const record of snapshot.active_drafts) {
+    if (!record.draft_id || typeof record.content !== 'string') throw new Error('后台实时稿快照格式无效')
+    if (dismissedDraftIds.has(record.draft_id)) continue
+    const existing = previous[record.node_id]
+    const draft = existing?.draftKey === record.draft_id && existing.revision > record.draft_revision
+      ? existing : { ...newNodeDraft(record.node_id, record.title, { type: 'text', ...record }), text: record.content }
+    active[record.node_id] = draft
+    seenDraftRevisions.set(record.draft_id, Math.max(seenDraftRevisions.get(record.draft_id) || 0, draft.revision))
+    finishedDraftIds.delete(record.draft_id)
+  }
+  for (const draft of Object.values(previous)) {
+    if (!draft.serverManaged && !active[draft.nodeId]) preserveNode(draft.nodeId, '重新连接时未收到该片段的正式章节确认', true)
+  }
+  activeDrafts.value = active
+  const activeIds = new Set(Object.values(active).map((draft) => draft.draftKey))
+  failedDrafts.value = failedDrafts.value.filter((draft) => !activeIds.has(draft.draftKey) && !dismissedDraftIds.has(draft.draftKey))
+  eventCursor = snapshot.event_id
+  serverRunning.value = snapshot.running
+  paused.value = snapshot.paused
+  pauseRequested.value = snapshot.pause_requested
+  taskStatus.value = snapshot.status
+  latestTaskTerminal = !snapshot.running
+  connectionUnconfirmed.value = snapshot.status === 'interrupted'
+  done.value = snapshot.done
+  total.value = snapshot.total
+  progressText.value = snapshot.message || (snapshot.running ? '后台运行中' : '任务已结束')
+  taskNotice.value = snapshot.task_notice || ''
+  qualityWarnings.value = [...snapshot.quality_warnings]
+  driftWarnings.value = snapshot.drift_warnings.map((warning) => ({ ...warning }))
+  statusNotice.value = ''
+  attempt = Math.max(attempt, ...snapshot.active_drafts.map((draft) => draft.draft_attempt))
+  return true
+}
+
+function handleObservedEvent(event: AutopilotEvent, taskId: string) {
+  if (event.task_id && event.task_id !== taskId) return
+  if (event.novel_id && event.novel_id !== props.novelId) return
+  if (event.type === 'snapshot') {
+    if (event.task_id !== taskId) throw new Error('订阅收到其它后台任务的快照')
+    if (!applySnapshot(event as AutopilotTaskSnapshot)) return
+    connectionState.value = event.running ? 'connected' : 'idle'
+    running.value = !!event.running
+    return
+  }
+  if (event.event_id != null) {
+    if (!Number.isSafeInteger(event.event_id) || event.event_id < 0) throw new Error('后台事件游标格式无效')
+    if (event.event_id <= eventCursor) return
+  }
+  handleEvent(event)
+  if (event.event_id != null) eventCursor = event.event_id
+}
+
+function scheduleReconnect(expectedRunId: number, novelId: string, taskId: string, expectedEpoch: number) {
+  if (!isCurrentRun(expectedRunId, novelId) || currentTaskId.value !== taskId
+    || connectionEpoch !== expectedEpoch || !serverRunning.value || latestTaskTerminal) return
+  if (reconnectAttempt >= 4) {
+    connectionState.value = 'disconnected'
+    statusNotice.value = '监控连接断开，自动重连未成功。后台任务仍独立运行，可手动重新连接或核对后台状态。'
+    return
+  }
+  const delay = 500 * (2 ** reconnectAttempt++)
+  connectionState.value = 'reconnecting'
+  statusNotice.value = '监控连接断开，正在重新连接；后台任务继续运行。'
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    if (isCurrentRun(expectedRunId, novelId) && currentTaskId.value === taskId && connectionEpoch === expectedEpoch) {
+      void observeTask(taskId, expectedRunId, novelId)
+    }
+  }, delay)
+}
+
+async function observeTask(taskId: string, expectedRunId = runId, novelId = props.novelId) {
+  if (!taskId || !isCurrentRun(expectedRunId, novelId) || currentTaskId.value !== taskId || latestTaskTerminal) return
+  stopMonitoring()
+  const epoch = connectionEpoch
+  const controller = new AbortController()
+  connectionController = controller
+  running.value = true
+  connectionState.value = reconnectAttempt ? 'reconnecting' : 'connecting'
+  const isCurrentConnection = () => isCurrentRun(expectedRunId, novelId)
+    && currentTaskId.value === taskId && connectionEpoch === epoch && !controller.signal.aborted
+  let errorReceived = false
+  try {
+    await streamEvents(`/api/v1/novels/${novelId}/autopilot/tasks/${taskId}/events`, (event: AutopilotEvent) => {
+      if (isCurrentConnection()) handleObservedEvent(event, taskId)
+    }, {
+      signal: controller.signal,
+      onError: (error, code) => {
+        if (!isCurrentConnection()) return
+        errorReceived = true
+        handleConnectionError(error, code)
+      },
+    })
+    if (isCurrentConnection() && !latestTaskTerminal && !errorReceived) handleConnectionError('监控连接未收到任务终态')
+  } catch (error) {
+    if (isCurrentConnection()) handleConnectionError((error as Error).message, 'STREAM_INCOMPLETE')
+  } finally {
+    if (isCurrentConnection()) {
+      running.value = false
+      connectionController = null
+      if (latestTaskTerminal) {
+        connectionState.value = 'idle'
+        reconnectAttempt = 0
+        await draftWriter?.flush()
+        await Promise.all([loadCurve(expectedRunId, novelId), loadStoredDrafts(expectedRunId, novelId)])
+      } else scheduleReconnect(expectedRunId, novelId, taskId, epoch)
+    }
+  }
+}
+
+async function reconnect() {
+  if (startingTask.value || !props.novelId) return
+  reconnectAttempt = 0
+  stopMonitoring()
+  await loadTaskStatus()
+  await loadStoredDrafts()
+}
+
 async function loadTaskStatus(expectedRunId = runId, novelId = props.novelId) {
   if (!novelId || !isCurrentRun(expectedRunId, novelId)) return
   const requestId = ++statusRequestId
@@ -300,15 +490,25 @@ async function loadTaskStatus(expectedRunId = runId, novelId = props.novelId) {
   try {
     const status = await api.autopilotStatus(novelId)
     if (!isLatestStatusRequest()) return
-    serverRunning.value = status.running
-    if (!running.value) {
-      paused.value = false
-      pauseRequested.value = status.running && !!status.paused
+    if (status.task_id) {
+      if (pendingStartRequestId && (status.running || status.task_id !== pendingStartPreviousTaskId)) {
+        pendingStartRequestId = null
+        pendingStartPreviousTaskId = null
+      }
+      if (!applySnapshot(status)) return
+      if (status.running && !connectionController && !reconnectTimer) void observeTask(status.task_id, expectedRunId, novelId)
+      else if (!status.running) stopMonitoring()
+    } else {
+      serverRunning.value = false
+      if (currentTaskId.value && !latestTaskTerminal) {
+        stopMonitoring()
+        preserveActiveDrafts('后台任务已不可用，正式章节保存状态需要核对')
+        taskStatus.value = 'interrupted'
+        latestTaskTerminal = true
+        connectionUnconfirmed.value = true
+        progressText.value = '后台任务已中断；暂存片段仍可找回，继续生成需要显式重试。'
+      }
     }
-    statusNotice.value = status.running && !running.value
-      ? '后台任务仍在运行，本页面没有实时监控连接。可以请求暂停、取消暂停或再次核对状态。'
-      : !status.running && connectionUnconfirmed.value
-        ? '后台当前没有运行中的任务；本次连接的完成状态仍需核对章节。' : ''
   } catch (e) {
     if (isLatestStatusRequest()) statusNotice.value = `无法核对后台状态：${(e as Error).message}`
   } finally {
@@ -382,9 +582,10 @@ function upsertPoint(seq: number, patch: { tension?: number | null; drift?: numb
 
 async function loadCurve(expectedRunId = runId, novelId = props.novelId) {
   if (!novelId) return
+  const taskId = currentTaskId.value
   try {
     const res = await api.getQualityCurve(novelId)
-    if (!isCurrentRun(expectedRunId, novelId)) return
+    if (!isCurrentRun(expectedRunId, novelId) || currentTaskId.value !== taskId) return
     driftThreshold.value = res.drift_threshold
     anchorSet.value = res.anchor_set
     curvePoints.value = res.chapters.map((c) => ({
@@ -394,12 +595,22 @@ async function loadCurve(expectedRunId = runId, novelId = props.novelId) {
     }))
     renderChart()
   } catch (e) {
-    if (isCurrentRun(expectedRunId, novelId)) message.error((e as Error).message)
+    if (isCurrentRun(expectedRunId, novelId) && currentTaskId.value === taskId) message.error((e as Error).message)
   }
+}
+
+function applyControlState(ev: AutopilotEvent) {
+  if (typeof ev.paused === 'boolean') paused.value = ev.paused
+  if (typeof ev.pause_requested === 'boolean') pauseRequested.value = ev.pause_requested
+  taskStatus.value = paused.value ? 'paused' : 'running'
+  if (ev.message && ev.action !== 'inject') progressText.value = ev.message
 }
 
 function handleEvent(ev: AutopilotEvent) {
   switch (ev.type) {
+    case 'control':
+      applyControlState(ev)
+      break
     case 'progress':
       serverRunning.value = true
       progressText.value = ev.message || ''
@@ -408,27 +619,41 @@ function handleEvent(ev: AutopilotEvent) {
       if (ev.phase === 'generating' && ev.node_id) {
         paused.value = false
         const existing = activeDrafts.value[ev.node_id]
-        const draft = existing || newNodeDraft(ev.node_id, ev.title || '未命名章节', ev)
+        if (ev.draft_id && (dismissedDraftIds.has(ev.draft_id) || finishedDraftIds.has(ev.draft_id))) break
+        if (existing && ev.draft_id && existing.draftKey !== ev.draft_id) preserveNode(ev.node_id, '前次生成未收到章节保存确认', true)
+        const draft = existing && (!ev.draft_id || existing.draftKey === ev.draft_id)
+          ? existing : newNodeDraft(ev.node_id, ev.title || '未命名章节', ev)
         if (ev.title) draft.title = ev.title
         updateDraftMetadata(draft, ev)
         activeDrafts.value[ev.node_id] = draft
+        if (ev.draft_id) failedDrafts.value = failedDrafts.value.filter((item) => item.draftKey !== ev.draft_id)
         persistDraft(draft, 'active')
       }
       break
     case 'text':
       if (!ev.node_id || typeof ev.content !== 'string') break
+      if (ev.draft_id && (dismissedDraftIds.has(ev.draft_id) || finishedDraftIds.has(ev.draft_id))) break
+      if (ev.draft_id && ev.draft_revision != null && ev.draft_revision <= (seenDraftRevisions.get(ev.draft_id) || 0)) break
+      if (activeDrafts.value[ev.node_id] && ev.draft_id && activeDrafts.value[ev.node_id]!.draftKey !== ev.draft_id) {
+        preserveNode(ev.node_id, '前次生成未收到章节保存确认', true)
+      }
       if (!activeDrafts.value[ev.node_id]) {
         activeDrafts.value[ev.node_id] = newNodeDraft(ev.node_id, ev.title || '未命名章节', ev)
       }
       updateDraftMetadata(activeDrafts.value[ev.node_id], ev)
+      if (ev.draft_id) failedDrafts.value = failedDrafts.value.filter((item) => item.draftKey !== ev.draft_id)
       activeDrafts.value[ev.node_id].text += ev.content
+      if (ev.draft_id && ev.draft_revision != null) seenDraftRevisions.set(ev.draft_id, ev.draft_revision)
       persistDraft(activeDrafts.value[ev.node_id], 'active')
       break
     case 'chapter_done':
       if (ev.node_id) {
         const draft = activeDrafts.value[ev.node_id]
-        if (draft && !draft.serverManaged) void draftWriter?.remove(draft.draftKey, draft.revision)
-        delete activeDrafts.value[ev.node_id]
+        if (ev.draft_id) finishedDraftIds.add(ev.draft_id)
+        if (draft && (!ev.draft_id || draft.draftKey === ev.draft_id)) {
+          if (!draft.serverManaged) void draftWriter?.remove(draft.draftKey, draft.revision)
+          delete activeDrafts.value[ev.node_id]
+        }
       }
       progressText.value = `第${ev.seq}章生成完成`
       break
@@ -449,6 +674,7 @@ function handleEvent(ev: AutopilotEvent) {
       break
     case 'paused':
       paused.value = true
+      taskStatus.value = 'paused'
       pauseRequested.value = false
       progressText.value = ev.message || '已暂停'
       break
@@ -456,6 +682,8 @@ function handleEvent(ev: AutopilotEvent) {
       if (ev.scope === 'quality' || (ev.saved === true && !ev.fatal && ev.scope !== 'task')) {
         qualityWarnings.value.push(ev.message || '章节已保存，但质量检查失败')
       } else if (ev.scope === 'chapter' && ev.node_id) {
+        if (ev.draft_id && (dismissedDraftIds.has(ev.draft_id) || finishedDraftIds.has(ev.draft_id))) break
+        if (activeDrafts.value[ev.node_id] && ev.draft_id && activeDrafts.value[ev.node_id]!.draftKey !== ev.draft_id) break
         if (!activeDrafts.value[ev.node_id]) activeDrafts.value[ev.node_id] = newNodeDraft(ev.node_id, ev.title || '未命名章节', ev)
         updateDraftMetadata(activeDrafts.value[ev.node_id], ev)
         preserveNode(ev.node_id, ev.message || '章节生成失败', ev.saved !== false, ev.title)
@@ -465,6 +693,8 @@ function handleEvent(ev: AutopilotEvent) {
         statusNotice.value = ''
         preserveActiveDrafts(ev.message || '任务异常，完成状态未确认')
         running.value = false
+        serverRunning.value = false
+        taskStatus.value = ev.status || 'incomplete'
         paused.value = false
         pauseRequested.value = false
         connectionUnconfirmed.value = ev.saved !== true && ev.code !== 'autopilot_busy' && ev.code !== 'task_start_failed'
@@ -480,6 +710,7 @@ function handleEvent(ev: AutopilotEvent) {
       preserveActiveDrafts('任务已结束，但未收到该章节的保存确认')
       running.value = false
       serverRunning.value = false
+      taskStatus.value = ev.status || 'completed'
       paused.value = false
       pauseRequested.value = false
       connectionUnconfirmed.value = false
@@ -497,12 +728,15 @@ async function start() {
   preserveActiveDrafts('上次连接未收到章节保存确认')
   const novelId = props.novelId
   const currentRunId = ++runId
+  const previousTaskId = currentTaskId.value
+  const requestId = pendingStartRequestId || crypto.randomUUID()
+  if (!pendingStartRequestId) pendingStartPreviousTaskId = previousTaskId
+  pendingStartRequestId = requestId
   latestTaskTerminal = false
   draftsRequestId += 1
   attempt += 1
-  connectionController = new AbortController()
-  const controller = connectionController
-  running.value = true
+  stopMonitoring()
+  startingTask.value = true
   paused.value = false
   pauseRequested.value = false
   connectionUnconfirmed.value = false
@@ -513,86 +747,102 @@ async function start() {
   driftWarnings.value = []
   curvePoints.value = []
   progressText.value = '启动中…'
-  loadCurve(currentRunId, novelId)
   try {
-    await streamEvents(`/api/v1/novels/${novelId}/autopilot/sse`, (event: AutopilotEvent) => {
-      if (isCurrentRun(currentRunId, novelId)) handleEvent(event)
-    }, {
-      signal: controller.signal,
-      onError: (error, code) => {
-        if (isCurrentRun(currentRunId, novelId)) handleConnectionError(error, code)
-      },
-    })
+    const snapshot = await api.startAutopilot(novelId, requestId)
+    if (!isCurrentRun(currentRunId, novelId)) return
+    applySnapshot(snapshot)
+    pendingStartRequestId = null
+    pendingStartPreviousTaskId = null
+    if (snapshot.running) void observeTask(snapshot.task_id, currentRunId, novelId)
+    else await loadStoredDrafts(currentRunId, novelId)
+    void loadCurve(currentRunId, novelId)
   } catch (e) {
-    if (isCurrentRun(currentRunId, novelId) && !controller.signal.aborted) {
-      handleConnectionError((e as Error).message, 'STREAM_INCOMPLETE')
+    if (!isCurrentRun(currentRunId, novelId)) return
+    const error = e as Error & { task_id?: string }
+    try {
+      const status = await api.autopilotStatus(novelId)
+      if (!isCurrentRun(currentRunId, novelId)) return
+      if (status.task_id && (status.running || status.task_id !== previousTaskId || status.task_id === error.task_id)) {
+        applySnapshot(status)
+        pendingStartRequestId = null
+        pendingStartPreviousTaskId = null
+        if (status.running) void observeTask(status.task_id, currentRunId, novelId)
+        else await loadStoredDrafts(currentRunId, novelId)
+        return
+      }
+    } catch { /* 创建请求的结果仍未确认，保留原 request_id 供作者显式重试。 */ }
+    if (isCurrentRun(currentRunId, novelId)) {
+      taskNotice.value = `启动结果未确认：${error.message}。可核对后台状态；再次点击启动会使用同一次请求，避免重复创建。`
+      progressText.value = taskNotice.value
+      connectionUnconfirmed.value = true
     }
   } finally {
-    if (isCurrentRun(currentRunId, novelId)) {
-      running.value = false
-      paused.value = false
-      pauseRequested.value = false
-      connectionController = null
-      await draftWriter?.flush()
-      await Promise.all([loadCurve(currentRunId, novelId), loadTaskStatus(currentRunId, novelId)])
-      await loadStoredDrafts(currentRunId, novelId)
-    }
+    if (isCurrentRun(currentRunId, novelId)) startingTask.value = false
   }
 }
 
 async function pause() {
-  if (!hasActiveTask.value || paused.value || pauseRequested.value || controlPending.value) return
+  if (!serverRunning.value || !currentTaskId.value || paused.value || pauseRequested.value || controlPending.value) return
   const currentRunId = runId
   const novelId = props.novelId
+  const taskId = currentTaskId.value
   controlPending.value = true
   try {
-    await api.pauseAutopilot(novelId)
-    if (isCurrentRun(currentRunId, novelId) && hasActiveTask.value) {
+    const control = await api.pauseAutopilot(novelId, taskId)
+    if (isCurrentRun(currentRunId, novelId) && currentTaskId.value === taskId && serverRunning.value) {
       invalidateStatusRequests()
-      pauseRequested.value = true
+      if (control.type === 'control') {
+        if ((control.event_id || 0) >= eventCursor) applyControlState(control)
+      } else pauseRequested.value = !paused.value
     }
   } catch (e) {
-    if (isCurrentRun(currentRunId, novelId)) message.error((e as Error).message)
+    if (isCurrentRun(currentRunId, novelId) && currentTaskId.value === taskId) message.error((e as Error).message)
   } finally {
-    if (isCurrentRun(currentRunId, novelId)) controlPending.value = false
+    if (isCurrentRun(currentRunId, novelId) && currentTaskId.value === taskId) controlPending.value = false
   }
 }
 
 async function resume() {
-  if (!hasActiveTask.value || (!paused.value && !pauseRequested.value) || controlPending.value) return
+  if (!serverRunning.value || !currentTaskId.value || (!paused.value && !pauseRequested.value) || controlPending.value) return
   const currentRunId = runId
   const novelId = props.novelId
+  const taskId = currentTaskId.value
   controlPending.value = true
   try {
-    await api.resumeAutopilot(novelId)
-    if (isCurrentRun(currentRunId, novelId) && hasActiveTask.value) {
+    const control = await api.resumeAutopilot(novelId, taskId)
+    if (isCurrentRun(currentRunId, novelId) && currentTaskId.value === taskId && serverRunning.value) {
       invalidateStatusRequests()
-      paused.value = false
-      pauseRequested.value = false
+      if (control.type === 'control') {
+        if ((control.event_id || 0) >= eventCursor) applyControlState(control)
+      } else {
+        paused.value = false
+        pauseRequested.value = false
+      }
     }
   } catch (e) {
-    if (isCurrentRun(currentRunId, novelId)) message.error((e as Error).message)
+    if (isCurrentRun(currentRunId, novelId) && currentTaskId.value === taskId) message.error((e as Error).message)
   } finally {
-    if (isCurrentRun(currentRunId, novelId)) controlPending.value = false
+    if (isCurrentRun(currentRunId, novelId) && currentTaskId.value === taskId) controlPending.value = false
   }
 }
 
 async function inject() {
-  if (!running.value) return
+  if (!serverRunning.value || !currentTaskId.value) return
   if (!directive.value.trim()) {
     message.error('请输入构思')
     return
   }
   const currentRunId = runId
   const novelId = props.novelId
+  const taskId = currentTaskId.value
   const submittedDirective = directive.value
   try {
-    await api.injectAutopilot(novelId, submittedDirective)
-    if (!isCurrentRun(currentRunId, novelId) || !running.value) return
+    await api.injectAutopilot(novelId, taskId, submittedDirective)
+    if (!isCurrentRun(currentRunId, novelId) || currentTaskId.value !== taskId || !serverRunning.value) return
     message.success('已注入构思')
     if (directive.value === submittedDirective) directive.value = ''
   } catch (e) {
-    if (isCurrentRun(currentRunId, novelId)) message.error((e as Error).message)
+    if (isCurrentRun(currentRunId, novelId) && currentTaskId.value === taskId) message.error((e as Error).message)
   }
 }
 
@@ -606,7 +856,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  preserveActiveDrafts('离开页面时未收到章节保存确认')
+  preserveLocalActiveDrafts('离开页面时未收到章节保存确认')
   void draftWriter?.flush()
   unmounted = true
   unsubscribeWriter?.()
@@ -619,7 +869,7 @@ onBeforeUnmount(() => {
 watch(
   () => props.novelId,
   () => {
-    preserveActiveDrafts('切换作品时未收到章节保存确认')
+    preserveLocalActiveDrafts('切换作品时未收到章节保存确认')
     void draftWriter?.flush()
     disconnect()
     activeDrafts.value = {}
@@ -657,13 +907,16 @@ watch(hasPendingOutput, (dirty) => emit('dirty-change', dirty), { immediate: tru
       <n-button :disabled="!hasActiveTask || paused || pauseRequested || controlPending" @click="pause">暂停</n-button>
       <n-button :disabled="!hasActiveTask || (!paused && !pauseRequested) || controlPending" @click="resume">{{ pauseRequested && !paused ? '取消暂停' : '恢复' }}</n-button>
       <n-button :disabled="checkingStatus || checkingDrafts || discardPending || !novelId" size="small" @click="refreshTaskStatus">核对后台状态</n-button>
+      <n-button v-if="serverRunning && connectionState !== 'connected'" :disabled="checkingStatus || startingTask || !novelId" size="small" @click="reconnect">重新连接监控</n-button>
       <n-button v-if="storageNotice || !draftsLoaded" :disabled="checkingDrafts || discardPending || !novelId" size="small" @click="retryDraftStorage">{{ draftsLoaded ? '重试暂存操作' : '重试读取暂存稿' }}</n-button>
-      <n-tag v-if="running" :type="paused || pauseRequested ? 'warning' : 'success'" size="small">
-        {{ paused ? '已暂停' : pauseRequested ? '等待章节结束后暂停' : '运行中' }}
+      <n-tag v-if="startingTask" type="warning" size="small">启动中</n-tag>
+      <n-tag v-else-if="serverRunning" :type="paused || pauseRequested ? 'warning' : 'success'" size="small">
+        {{ paused ? '后台已暂停' : pauseRequested ? '等待章节结束后暂停' : '后台运行中' }}
       </n-tag>
-      <n-tag v-else-if="serverRunning" size="small" type="warning">{{ pauseRequested ? '后台已请求暂停（未监控）' : '后台运行中（未监控）' }}</n-tag>
+      <n-tag v-else-if="taskStatus === 'interrupted'" size="small" type="warning">任务已中断</n-tag>
       <n-tag v-else-if="connectionUnconfirmed" size="small" type="warning">完成状态未确认</n-tag>
       <n-tag v-else size="small" type="default">空闲</n-tag>
+      <n-tag v-if="serverRunning" size="small" :type="connectionState === 'connected' ? 'success' : 'warning'">{{ connectionState === 'connected' ? '监控已连接' : connectionState === 'reconnecting' || connectionState === 'connecting' ? '正在重连' : '监控连接断开' }}</n-tag>
     </div>
 
     <div class="inject-row">
@@ -672,7 +925,7 @@ watch(hasPendingOutput, (dirty) => emit('dirty-change', dirty), { immediate: tru
         placeholder="注入构思（应用到下一章，如：让主角与 B 决裂）"
         style="flex: 1"
       />
-      <n-button type="info" :disabled="!running" @click="inject">注入</n-button>
+      <n-button type="info" :disabled="!serverRunning || !currentTaskId" @click="inject">注入</n-button>
     </div>
 
     <div class="progress-row">
@@ -685,7 +938,7 @@ watch(hasPendingOutput, (dirty) => emit('dirty-change', dirty), { immediate: tru
     <p v-if="checkingDrafts" class="output-hint">正在读取本地暂存片段…</p>
     <p v-if="recoveryNotice" class="task-notice" role="status">{{ recoveryNotice }}</p>
     <p v-if="storageNotice" class="task-notice" role="alert">{{ storageNotice }}</p>
-    <p v-if="hasActiveTask || failedDrafts.length" class="output-hint">重试会跳过已有章节并保留此前的未完成稿。已自动暂存的片段可在重开页面后找回；未得到暂存确认的内容请复制保留。离开会断开本机监控连接，不能保证后台任务停止。</p>
+    <p v-if="hasActiveTask || failedDrafts.length" class="output-hint">自动驾驶在后台独立运行，离开或刷新页面只断开本页监控，重新打开会自动连接已有任务。重试会跳过已有章节并保留此前的未完成稿；已自动暂存的片段可以找回，未得到暂存确认的内容请复制保留。后端重启后中断的任务需显式重试。</p>
 
     <section v-for="draft in activeDraftList" :key="draft.nodeId" class="draft-panel active-draft" aria-label="当前章节实时生成稿">
       <div class="draft-heading">生成中 · {{ draft.title }}</div>

@@ -1,6 +1,8 @@
 import type {
   AutopilotDraft,
   AutopilotDraftInput,
+  AutopilotEvent,
+  AutopilotTaskSnapshot,
   Chapter,
   ChatAction,
   ChapterRevision,
@@ -46,7 +48,7 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
       typeof body?.detail === 'string'
         ? body.detail
         : body?.detail?.[0]?.msg || `HTTP ${resp.status}`
-    throw Object.assign(new Error(detail), { code: body?.code, status: resp.status })
+    throw Object.assign(new Error(detail), { code: body?.code, status: resp.status, task_id: body?.task_id })
   }
   if (resp.status === 204) return undefined as T
   return (await resp.json()) as T
@@ -384,15 +386,19 @@ export const api = {
       `${BASE}/novels/${novelId}/autopilot/drafts/${id}?revision=${revision}`, { method: 'DELETE' },
     ),
   autopilotStatus: (novelId: string) =>
-    request<{ running: boolean; paused?: boolean; current_node_id?: string; fail_count?: number }>(
+    request<AutopilotTaskSnapshot | { running: false; task_id?: never }>(
       `${BASE}/novels/${novelId}/autopilot/status`,
     ),
-  pauseAutopilot: (novelId: string) =>
-    request<{ status: string }>(`${BASE}/novels/${novelId}/autopilot/pause`, { method: 'POST' }),
-  resumeAutopilot: (novelId: string) =>
-    request<{ status: string }>(`${BASE}/novels/${novelId}/autopilot/resume`, { method: 'POST' }),
-  injectAutopilot: (novelId: string, directive: string) =>
-    request<{ status: string }>(`${BASE}/novels/${novelId}/autopilot/inject`, {
+  startAutopilot: (novelId: string, requestId: string) =>
+    request<AutopilotTaskSnapshot>(`${BASE}/novels/${novelId}/autopilot/start`, {
+      method: 'POST', body: JSON.stringify({ request_id: requestId }),
+    }),
+  pauseAutopilot: (novelId: string, taskId: string) =>
+    request<AutopilotEvent>(`${BASE}/novels/${novelId}/autopilot/tasks/${taskId}/pause`, { method: 'POST' }),
+  resumeAutopilot: (novelId: string, taskId: string) =>
+    request<AutopilotEvent>(`${BASE}/novels/${novelId}/autopilot/tasks/${taskId}/resume`, { method: 'POST' }),
+  injectAutopilot: (novelId: string, taskId: string, directive: string) =>
+    request<AutopilotEvent>(`${BASE}/novels/${novelId}/autopilot/tasks/${taskId}/inject`, {
       method: 'POST',
       body: JSON.stringify({ directive }),
     }),

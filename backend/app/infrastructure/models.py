@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, CheckConstraint, JSON, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, JSON, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.domain.entities import ChapterStatus, ForeshadowStatus, OutlineLevel
@@ -152,6 +152,46 @@ class AutopilotDraft(Base, TimestampMixin):
     state: Mapped[str] = mapped_column(String(20), default="active")
     revision: Mapped[int] = mapped_column(Integer, default=1)
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AutopilotTask(Base, TimestampMixin):
+    """后台任务身份与已提交事件的恢复快照，不属于作品事实。"""
+
+    __tablename__ = "autopilot_task"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('starting','running','paused','completed','incomplete','stopped','interrupted')",
+            name="ck_autopilot_task_status",
+        ),
+        Index(
+            "uq_autopilot_task_active_novel", "novel_id", unique=True,
+            sqlite_where=text("status IN ('starting','running','paused')"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    novel_id: Mapped[str] = mapped_column(String(36), ForeignKey("novel.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="starting")
+    last_event_id: Mapped[int] = mapped_column(Integer, default=0)
+    snapshot_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    finished_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+
+class AutopilotTaskEvent(Base):
+    """按任务游标持久化的公开事件，订阅者互不影响。"""
+
+    __tablename__ = "autopilot_task_event"
+    __table_args__ = (
+        UniqueConstraint("task_id", "event_id", name="uq_autopilot_task_event_cursor"),
+        Index("ix_autopilot_task_event_scope", "novel_id", "task_id", "event_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("autopilot_task.id"), index=True)
+    novel_id: Mapped[str] = mapped_column(String(36), ForeignKey("novel.id"), index=True)
+    event_id: Mapped[int] = mapped_column(Integer)
+    data_json: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[str] = mapped_column(String(40), default=_now)
 
 
 class ChapterRevision(Base):
