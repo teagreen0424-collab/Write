@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.application.consistency import consistency_check
 from app.application.context import build_context
+from app.config import get_settings
 from app.domain.entities import OutlineLevel
 from app.infrastructure import models
 from app.infrastructure.ai.llm_provider import LLMProvider
@@ -189,6 +190,7 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
         nodes = _ordered_chapter_nodes(db, novel_id)
         total = len(nodes)
         done = 0
+        failed = 0
         yield _sse({"type": "progress", "message": f"开始自动驾驶，共 {total} 个章节点", "total": total, "done": done})
 
         for node in nodes:
@@ -220,9 +222,12 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                 ]
 
                 full = ""
-                for chunk in llm.stream_complete(messages):
+                for chunk in llm.stream_complete(messages, max_tokens=get_settings().writing_max_tokens):
                     full += chunk
                     yield _sse({"type": "text", "content": chunk, "node_id": node.id})
+
+                if not full.strip():
+                    raise ValueError("未生成有效正文，请重试")
 
                 conflicts = consistency_check(db, novel_id, full)["conflicts"]
                 yield _sse(
@@ -278,6 +283,8 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                 yield _sse({"type": "progress", "message": f"已完成 {done}/{total}", "done": done, "total": total})
 
             except Exception as exc:  # noqa: BLE001  单章失败，计数并可能熔断
+                db.rollback()
+                failed += 1
                 state.fail_count += 1
                 yield _sse({"type": "error", "message": f"生成失败（第 {state.fail_count} 次）：{exc}", "node_id": node.id})
                 if state.fail_count >= FAIL_THRESHOLD:
@@ -286,7 +293,11 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                     break
 
         if not state.stop:
-            yield _sse({"type": "done", "message": "自动驾驶完成", "total": total, "done": done})
+            yield _sse({
+                "type": "done",
+                "message": "自动驾驶结束，仍有未完成章节" if failed else "自动驾驶完成",
+                "total": total, "done": done,
+            })
 
     finally:
         registry.finish(novel_id)

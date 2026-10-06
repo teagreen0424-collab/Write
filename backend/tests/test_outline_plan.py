@@ -143,7 +143,7 @@ class OutlinePlanTest(unittest.TestCase):
         )
         request = WriteChapterRequest(directive="续写", previous_chapter_id=previous.id)
 
-        def chunks(_messages):
+        def chunks(_messages, **_options):
             yield "正在生成"
             ChapterRepo(self.db).create(
                 self.novel.id, seq=2, title="别处新章", content="已写", status="draft",

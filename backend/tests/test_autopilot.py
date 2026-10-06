@@ -64,7 +64,7 @@ class AutoPilotTest(unittest.TestCase):
     def test_run_autopilot_flow(self):
         self._make_outline()
         with (
-            patch.object(auto_pilot.llm, "stream_complete", return_value=iter(["这是", "正文"])),
+            patch.object(auto_pilot.llm, "stream_complete", side_effect=lambda *args, **kwargs: iter(["这是", "正文"])),
             patch.object(auto_pilot, "score_tension", return_value=6.0),
             patch.object(auto_pilot, "check_drift", return_value=0.8),
         ):
@@ -99,7 +99,7 @@ class AutoPilotTest(unittest.TestCase):
             status="draft",
         )
         with (
-            patch.object(auto_pilot.llm, "stream_complete", return_value=iter(["新", "内容"])),
+            patch.object(auto_pilot.llm, "stream_complete", side_effect=lambda *args, **kwargs: iter(["新", "内容"])),
             patch.object(auto_pilot, "score_tension", return_value=5.0),
             patch.object(auto_pilot, "check_drift", return_value=None),
         ):

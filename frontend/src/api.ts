@@ -58,8 +58,8 @@ async function fetchText(url: string): Promise<string> {
 
 export interface StreamHandlers {
   onToken: (text: string) => void
-  onDone: (data: any) => void
-  onError: (message: string) => void
+  onDone: (data: any) => void | Promise<void>
+  onError: (message: string, code?: string) => void | Promise<void>
 }
 
 export async function streamSSE(
@@ -67,39 +67,77 @@ export async function streamSSE(
   body: Record<string, unknown>,
   handlers: StreamHandlers,
 ): Promise<void> {
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!resp.ok || !resp.body) {
-    const err = await resp.json().catch(() => null)
-    handlers.onError(err?.detail ?? `HTTP ${resp.status}`)
-    return
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  let terminal: 'done' | 'error' | null = null
+  let errorReported = false
+  const reportError = async (message: string, code?: string) => {
+    errorReported = true
+    await handlers.onError(message, code)
   }
-  const reader = resp.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const parts = buffer.split('\n\n')
-    buffer = parts.pop() ?? ''
-    for (const part of parts) {
-      const line = part.trim()
-      if (!line.startsWith('data:')) continue
-      const payload = line.slice(5).trim()
-      if (!payload) continue
-      let obj: any
-      try {
-        obj = JSON.parse(payload)
-      } catch {
-        continue
+  const processEvent = async (part: string) => {
+    const payload = part.split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+    if (!payload.trim()) return
+    let obj: any
+    try {
+      obj = JSON.parse(payload)
+    } catch {
+      throw new Error('生成数据格式无效，未收到有效的完成确认')
+    }
+    if (!obj || typeof obj !== 'object') throw new Error('生成数据格式无效')
+    if (obj.type === 'token') {
+      if (typeof obj.content !== 'string') throw new Error('生成文本格式无效')
+      await handlers.onToken(obj.content)
+    } else if (obj.type === 'done') {
+      terminal = 'done'
+      await handlers.onDone(obj)
+    } else if (obj.type === 'error') {
+      terminal = 'error'
+      const message = typeof obj.detail === 'string' ? obj.detail
+        : typeof obj.message === 'string' ? obj.message : '生成失败'
+      await reportError(message || '生成失败', typeof obj.code === 'string' ? obj.code : undefined)
+    }
+  }
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!resp.ok || !resp.body) {
+      const err = await resp.json().catch(() => null)
+      await reportError(typeof err?.detail === 'string' ? err.detail : `HTTP ${resp.status}`, err?.code)
+      return
+    }
+    reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (!terminal) {
+      const { done, value } = await reader.read()
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true })
+      buffer = buffer.replace(/\r\n/g, '\n')
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() ?? ''
+      for (const part of parts) {
+        await processEvent(part)
+        if (terminal) break
       }
-      if (obj.type === 'token') handlers.onToken(obj.content)
-      else if (obj.type === 'done') handlers.onDone(obj)
-      else if (obj.type === 'error') handlers.onError(obj.detail ?? obj.message)
+      if (done) {
+        if (!terminal && buffer.trim()) await processEvent(buffer)
+        if (!terminal) throw new Error('连接提前结束，未收到完成确认')
+        break
+      }
+    }
+  } catch (error) {
+    if (errorReported) throw error
+    const message = error instanceof Error ? error.message : '生成连接中断'
+    await reportError(message, terminal === 'done' ? 'CLIENT_UPDATE_FAILED' : 'STREAM_INCOMPLETE')
+  } finally {
+    if (reader) {
+      await reader.cancel().catch(() => {})
+      reader.releaseLock()
     }
   }
 }

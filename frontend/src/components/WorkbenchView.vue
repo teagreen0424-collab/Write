@@ -190,7 +190,7 @@ onMounted(loadNovels)
       style="width: min(480px, calc(100vw - 32px))"
       @update:show="cancelNavigation"
     >
-      <p>当前章节有未保存修改，确定放弃并{{ navigationTarget }}吗？</p>
+      <p>当前章节有未保存修改或未完成输出，确定放弃并{{ navigationTarget }}吗？</p>
       <template #footer>
         <div class="modal-actions">
           <n-button @click="cancelNavigation">继续编辑</n-button>

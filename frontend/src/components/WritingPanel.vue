@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   NButton,
   NCheckbox,
@@ -42,6 +42,14 @@ const savedSnapshot = ref({ title: '', directive: '', content: '' })
 
 const streaming = ref(false)
 const streamText = ref('')
+const streamError = ref('')
+const streamCompleted = ref(false)
+const streamUnconfirmed = ref(false)
+const incompleteCollapsed = ref(false)
+const copyFallback = ref(false)
+const incompleteTextRef = ref<HTMLTextAreaElement | null>(null)
+let streamRunId = 0
+let unmounted = false
 const conflicts = ref<Conflict[]>([])
 const rewriteIntent = ref('去AI味')
 
@@ -71,6 +79,7 @@ const savedSummary = ref('')
 const summarySaving = ref(false)
 const showDiscard = ref(false)
 const discardPrompt = ref('')
+const discardConfirmText = ref('放弃修改')
 let resolveDiscard: ((confirmed: boolean) => void) | null = null
 const showDelete = ref(false)
 const showWriteNext = ref(false)
@@ -123,7 +132,10 @@ const isDirty = computed(
       content.value !== savedSnapshot.value.content),
 )
 const isSummaryDirty = computed(() => showSummary.value && summaryDraft.value !== savedSummary.value)
-const hasUnsavedChanges = computed(() => isDirty.value || isSummaryDirty.value)
+const hasIncompleteOutput = computed(() => !!streamError.value)
+const hasUnsavedChanges = computed(
+  () => isDirty.value || isSummaryDirty.value || streaming.value || hasIncompleteOutput.value,
+)
 
 function rememberSaved() {
   savedSnapshot.value = {
@@ -133,9 +145,10 @@ function rememberSaved() {
   }
 }
 
-function askDiscard(prompt: string): Promise<boolean> {
+function askDiscard(prompt: string, positiveText = '放弃修改'): Promise<boolean> {
   if (resolveDiscard) return Promise.resolve(false)
   discardPrompt.value = prompt
+  discardConfirmText.value = positiveText
   showDiscard.value = true
   return new Promise((resolve) => { resolveDiscard = resolve })
 }
@@ -148,7 +161,77 @@ function finishDiscard(confirmed: boolean) {
 }
 
 async function confirmDiscard(): Promise<boolean> {
-  return !hasUnsavedChanges.value || await askDiscard('当前章节有未保存修改，确定放弃并离开吗？')
+  return !hasUnsavedChanges.value || await askDiscard('当前章节有未保存修改或未完成输出，确定放弃并离开吗？')
+}
+
+function clearStreamOutput() {
+  streamText.value = ''
+  streamError.value = ''
+  streamCompleted.value = false
+  streamUnconfirmed.value = false
+  incompleteCollapsed.value = false
+  copyFallback.value = false
+}
+
+function abandonStreamOutput() {
+  streamRunId += 1
+  streaming.value = false
+  clearStreamOutput()
+}
+
+async function beginStream(): Promise<number | null> {
+  if (streaming.value) return null
+  if (hasIncompleteOutput.value && !await askDiscard('上次生成的输出尚未处理，新一轮生成会放弃这些输出，确定继续吗？', '放弃旧稿并生成')) return null
+  clearStreamOutput()
+  showPreview.value = false
+  previewNew.value = ''
+  previewFullContent.value = ''
+  streaming.value = true
+  return ++streamRunId
+}
+
+function isCurrentStream(runId: number) {
+  return !unmounted && runId === streamRunId
+}
+
+function failStream(runId: number, error: string, code?: string) {
+  if (!isCurrentStream(runId)) return
+  streaming.value = false
+  streamError.value = error || '生成中断，未收到完成确认'
+  streamCompleted.value = code === 'CLIENT_UPDATE_FAILED'
+  streamUnconfirmed.value = code === 'STREAM_INCOMPLETE'
+  incompleteCollapsed.value = false
+  showPreview.value = false
+  previewNew.value = ''
+  previewFullContent.value = ''
+  message.error(streamCompleted.value ? '生成已完成，但页面同步失败，请刷新后核对'
+    : streamUnconfirmed.value ? '未收到完成确认，请保留输出并核对保存结果' : '生成未完成，已收到的输出尚未保存')
+}
+
+async function copyIncompleteOutput() {
+  if (!streamText.value) return
+  try {
+    await navigator.clipboard.writeText(streamText.value)
+    message.success('已复制未完成输出')
+  } catch {
+    copyFallback.value = true
+    incompleteCollapsed.value = false
+    await nextTick()
+    incompleteTextRef.value?.focus()
+    incompleteTextRef.value?.select()
+  }
+}
+
+async function collapseIncompleteOutput() {
+  if (await askDiscard('这些输出尚未处理。收起后仍会保留，可再次展开，确定收起吗？', '确认收起')) {
+    incompleteCollapsed.value = true
+  }
+}
+
+async function discardIncompleteOutput() {
+  if (await askDiscard('确定放弃这些输出吗？放弃后无法恢复，请先复制需要保留的内容。', '放弃输出')) {
+    abandonStreamOutput()
+  }
 }
 
 function requireSaved(action: string): boolean {
@@ -192,8 +275,11 @@ const CLICHE_CATEGORIES = ['万能副词', '套路动作', '面部套话', '心�
 
 async function loadChapters() {
   if (!props.novelId) return
-  chapters.value = await api.listChapters(props.novelId)
-  if (props.initialChapterId && !selectedId.value) {
+  const novelId = props.novelId
+  const loaded = await api.listChapters(novelId)
+  if (unmounted || props.novelId !== novelId) return
+  chapters.value = loaded
+  if (props.initialChapterId && !selectedId.value && !streaming.value) {
     const initial = chapters.value.find((chapter) => chapter.id === props.initialChapterId)
     if (initial) selectChapter(initial, true)
   }
@@ -211,6 +297,7 @@ function clearMarks() {
 async function selectChapter(c: Chapter, force = false) {
   if (!force && c.id === selectedId.value) return
   if (!force && !await confirmDiscard()) return
+  abandonStreamOutput()
   if (c.id !== selectedId.value) {
     showRevisions.value = false
     showSummary.value = false
@@ -225,6 +312,7 @@ async function selectChapter(c: Chapter, force = false) {
 
 async function startNew(force = false) {
   if (!force && !await confirmDiscard()) return
+  abandonStreamOutput()
   showRevisions.value = false
   showSummary.value = false
   selectedId.value = null
@@ -233,11 +321,11 @@ async function startNew(force = false) {
   content.value = ''
   rememberSaved()
   clearMarks()
-  streamText.value = ''
 }
 
-async function reloadAndReselect(chapter?: Chapter) {
+async function reloadAndReselect(chapter?: Chapter, runId?: number) {
   await loadChapters()
+  if (runId !== undefined && !isCurrentStream(runId)) return
   const c = chapter ?? chapters.value.find((x) => x.id === selectedId.value)
   if (c) {
     selectedId.value = c.id
@@ -266,9 +354,8 @@ async function generateChapter(
   chapterDirective = directive.value,
   outlineNodeId = '',
 ) {
-  if (streaming.value) return
-  streaming.value = true
-  streamText.value = ''
+  const runId = await beginStream()
+  if (runId === null) return
   clearMarks()
   await streamSSE(
     `/api/v1/novels/${props.novelId}/chapters/write`,
@@ -279,19 +366,18 @@ async function generateChapter(
       outline_node_id: outlineNodeId,
     },
     {
-      onToken: (t) => (streamText.value += t),
+      onToken: (t) => { if (isCurrentStream(runId)) streamText.value += t },
       onDone: async () => {
+        if (!isCurrentStream(runId)) return
         await loadChapters()
+        if (!isCurrentStream(runId)) return
         const last = chapters.value[chapters.value.length - 1]
-        if (last) selectChapter(last, true)
-        streamText.value = ''
+        if (last) await selectChapter(last, true)
+        clearStreamOutput()
         streaming.value = false
         message.success('已生成新章')
       },
-      onError: (m) => {
-        streaming.value = false
-        message.error(m)
-      },
+      onError: (m, code) => failStream(runId, m, code),
     },
   )
 }
@@ -301,7 +387,7 @@ async function doWrite() {
 }
 
 async function doWriteNext() {
-  if (!selectedId.value || !requireSaved('生成下一章')) return
+  if (!selectedId.value || streaming.value || !requireSaved('生成下一章')) return
   if (!isLatestChapter.value) {
     message.warning('只能从最后一章继续生成，请先选择章节列表中的最后一章')
     return
@@ -337,23 +423,22 @@ async function confirmWriteNext() {
 
 async function doContinue() {
   if (!selectedId.value || streaming.value || !requireSaved('续写本章')) return
-  streaming.value = true
-  streamText.value = ''
+  const runId = await beginStream()
+  if (runId === null) return
   await streamSSE(
     `/api/v1/novels/${props.novelId}/chapters/${selectedId.value}/continue`,
     { directive: directive.value },
     {
-      onToken: (t) => (streamText.value += t),
+      onToken: (t) => { if (isCurrentStream(runId)) streamText.value += t },
       onDone: async () => {
-        await reloadAndReselect()
-        streamText.value = ''
+        if (!isCurrentStream(runId)) return
+        await reloadAndReselect(undefined, runId)
+        if (!isCurrentStream(runId)) return
+        clearStreamOutput()
         streaming.value = false
         message.success('已续写')
       },
-      onError: (m) => {
-        streaming.value = false
-        message.error(m)
-      },
+      onError: (m, code) => failStream(runId, m, code),
     },
   )
 }
@@ -373,8 +458,8 @@ async function doRewrite() {
     message.error('请先在正文中选中要改写的段落')
     return
   }
-  streaming.value = true
-  streamText.value = ''
+  const runId = await beginStream()
+  if (runId === null) return
   previewPassage.value = passage
   previewNew.value = ''
   previewFullContent.value = ''
@@ -382,26 +467,24 @@ async function doRewrite() {
     `/api/v1/novels/${props.novelId}/chapters/${selectedId.value}/rewrite`,
     { passage, intent: rewriteIntent.value, preview: true },
     {
-      onToken: (t) => (streamText.value += t),
+      onToken: (t) => { if (isCurrentStream(runId)) streamText.value += t },
       onDone: (obj) => {
+        if (!isCurrentStream(runId)) return
         streaming.value = false
         // 流式内容即改写后的段落；done 事件带拼好的整章内容，供「应用」落库
         previewNew.value = streamText.value
         previewFullContent.value = obj.content ?? ''
-        streamText.value = ''
+        clearStreamOutput()
         showPreview.value = true
       },
-      onError: (m) => {
-        streaming.value = false
-        message.error(m)
-      },
+      onError: (m, code) => failStream(runId, m, code),
     },
   )
 }
 
 // 应用改写：仅此时才落库，来源记为 rewrite_apply
 async function applyPreview() {
-  if (!selectedId.value) return
+  if (!selectedId.value || streaming.value || hasIncompleteOutput.value || !previewFullContent.value.trim()) return
   try {
     await api.updateChapter(props.novelId, selectedId.value, {
       content: previewFullContent.value,
@@ -590,6 +673,10 @@ async function doConsistency() {
 }
 
 async function doSettle() {
+  if (streaming.value || hasIncompleteOutput.value) {
+    message.warning('请先处理未完成输出，再定稿沉淀')
+    return
+  }
   if (!selectedId.value || !requireSaved('定稿沉淀')) return
   try {
     const res = await api.settleChapter(props.novelId, selectedId.value)
@@ -657,6 +744,8 @@ watch(content, () => { outlineCheckResult.value = null })
 
 onMounted(() => window.addEventListener('beforeunload', handleBeforeUnload))
 onBeforeUnmount(() => {
+  unmounted = true
+  streamRunId += 1
   window.removeEventListener('beforeunload', handleBeforeUnload)
   finishDiscard(false)
 })
@@ -737,7 +826,7 @@ onBeforeUnmount(() => {
             @click="doOutlineCheck"
           >大纲契合检查</n-button>
           <span class="cost-hint">本项调用模型 1 次</span>
-          <n-button type="success" :disabled="!selectedId" @click="doSettle">定稿沉淀</n-button>
+          <n-button type="success" :disabled="!selectedId || streaming || hasIncompleteOutput" @click="doSettle">定稿沉淀</n-button>
         </div>
         <div class="btn-row version-actions">
           <n-button :disabled="!selectedId || summarySaving || streaming" @click="openSummary">章节摘要</n-button>
@@ -770,7 +859,31 @@ onBeforeUnmount(() => {
         <div class="stream-text">{{ streamText }}</div>
       </div>
 
-      <div v-else-if="selectedId" class="editor-body">
+      <section v-if="!streaming && hasIncompleteOutput" class="incomplete-panel" aria-label="生成输出待处理">
+        <div class="incomplete-title">{{ streamCompleted ? '已完成，页面同步失败' : streamUnconfirmed ? '完成状态未确认' : '未完成，未保存' }}</div>
+        <p class="incomplete-reason">{{ streamError }}</p>
+        <p v-if="streamCompleted" class="incomplete-hint">已收到完成确认，请刷新后核对保存结果；以下输出仅供复制留存。</p>
+        <p v-else-if="streamUnconfirmed" class="incomplete-hint">本次输出尚未收到完成确认，暂留此处；请先复制输出，再重新加载核对保存结果。</p>
+        <p v-else class="incomplete-hint">以下是本次已收到的输出，尚未写入章节；当前章节的正文仍可编辑。</p>
+        <div class="incomplete-actions">
+          <n-button size="small" :disabled="!streamText" @click="copyIncompleteOutput">复制输出</n-button>
+          <n-button v-if="incompleteCollapsed" size="small" @click="incompleteCollapsed = false">展开未完成稿</n-button>
+          <n-button v-else size="small" @click="collapseIncompleteOutput">收起未完成稿</n-button>
+          <n-button size="small" type="warning" @click="discardIncompleteOutput">放弃未完成稿</n-button>
+        </div>
+        <p v-if="copyFallback" class="incomplete-hint">自动复制失败，请在下方选中并复制需要保留的内容。</p>
+        <textarea
+          v-show="!incompleteCollapsed"
+          ref="incompleteTextRef"
+          :value="streamText"
+          readonly
+          aria-label="未完成稿"
+          class="incomplete-text"
+          placeholder="本次未收到文本输出"
+        ></textarea>
+      </section>
+
+      <div v-if="!streaming && selectedId" class="editor-body">
         <textarea
           ref="contentRef"
           v-model="content"
@@ -779,7 +892,7 @@ onBeforeUnmount(() => {
         ></textarea>
         <div class="editor-status">本章 {{ chapterWords }} 字</div>
       </div>
-      <div v-else class="editor-empty">
+      <div v-else-if="!streaming" class="editor-empty">
         <n-empty description="选择章节或点击「新章」开始写作" />
       </div>
 
@@ -885,7 +998,7 @@ onBeforeUnmount(() => {
       <template #footer>
         <div class="modal-actions">
           <n-button @click="discardPreview">放弃</n-button>
-          <n-button type="primary" @click="applyPreview">应用</n-button>
+          <n-button type="primary" :disabled="hasIncompleteOutput || streaming || !previewFullContent.trim()" @click="applyPreview">应用</n-button>
         </div>
       </template>
     </n-modal>
@@ -898,7 +1011,7 @@ onBeforeUnmount(() => {
       <p class="delete-warning">
         该章的<b>历史版本也会一并删除</b>，本阶段没有回收站。
       </p>
-      <p v-if="isDirty" class="delete-warning">当前未保存的修改也会一并丢失。</p>
+      <p v-if="hasUnsavedChanges" class="delete-warning">当前未保存的修改和未完成输出也会一并丢失。</p>
       <template #footer>
         <div class="modal-actions">
           <n-button @click="showDelete = false">取消</n-button>
@@ -981,7 +1094,7 @@ onBeforeUnmount(() => {
       type="warning"
       title="未保存修改"
       :content="discardPrompt"
-      positive-text="放弃修改"
+      :positive-text="discardConfirmText"
       negative-text="继续编辑"
       @positive-click="finishDiscard(true)"
       @negative-click="finishDiscard(false)"
@@ -1157,6 +1270,41 @@ onBeforeUnmount(() => {
 .stream-text {
   white-space: pre-wrap;
   line-height: 1.7;
+}
+.incomplete-panel {
+  flex-shrink: 0;
+  border: 1px solid #e4b15a;
+  border-radius: 4px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: #fffaf0;
+}
+.incomplete-title {
+  color: #9c5c00;
+  font-weight: 600;
+}
+.incomplete-reason,
+.incomplete-hint {
+  margin: 6px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.incomplete-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+.incomplete-text {
+  width: 100%;
+  height: 130px;
+  min-height: 80px;
+  max-height: 260px;
+  padding: 8px;
+  font: inherit;
+  line-height: 1.7;
+  box-sizing: border-box;
+  resize: vertical;
 }
 .cost-hint {
   color: #999;

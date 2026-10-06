@@ -4,6 +4,7 @@ import json
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
+from app.config import get_settings
 from app.application.context import build_context
 from app.application.revisions import (
     SOURCE_CONTINUE,
@@ -28,6 +29,13 @@ llm = LLMProvider()
 
 def sse(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _stream_error(exc: Exception) -> str:
+    return sse({
+        "type": "error", "message": str(exc),
+        "code": getattr(exc, "code", "generation_failed"),
+    })
 
 
 def _chapter_dict(chapter) -> dict:
@@ -130,9 +138,12 @@ def write_chapter(
         ]
 
         full = ""
-        for chunk in llm.stream_complete(messages):
+        for chunk in llm.stream_complete(messages, max_tokens=get_settings().writing_max_tokens):
             full += chunk
             yield sse({"type": "token", "content": chunk})
+
+        if not full.strip():
+            raise ValueError("未生成有效正文，请重试")
 
         data = dict(
             seq=seq, title=title or f"第{seq}章", content=full,
@@ -171,7 +182,7 @@ def write_chapter(
         yield sse({"type": "done", "chapter": _chapter_dict(chapter)})
     except Exception as exc:  # noqa: BLE001
         db.rollback()
-        yield sse({"type": "error", "message": str(exc)})
+        yield _stream_error(exc)
 
 
 def continue_chapter(
@@ -200,6 +211,9 @@ def continue_chapter(
             full += chunk
             yield sse({"type": "token", "content": chunk})
 
+        if not full.strip():
+            raise ValueError("未生成有效续写内容，请重试")
+
         # 追加正文属于覆盖既有作者内容：先留旧版本，再与追加同一事务提交
         updated = update_chapter_with_revision(
             db,
@@ -210,7 +224,8 @@ def continue_chapter(
         )
         yield sse({"type": "done", "chapter": _chapter_dict(updated)})
     except Exception as exc:  # noqa: BLE001
-        yield sse({"type": "error", "message": str(exc)})
+        db.rollback()
+        yield _stream_error(exc)
 
 
 def rewrite_passage(
@@ -248,6 +263,9 @@ def rewrite_passage(
             full += chunk
             yield sse({"type": "token", "content": chunk})
 
+        if not full.strip():
+            raise ValueError("未生成有效改写内容，请重试")
+
         new_content = chapter.content.replace(passage, full, 1)
         if preview:
             yield sse(
@@ -266,4 +284,5 @@ def rewrite_passage(
         )
         yield sse({"type": "done", "chapter": _chapter_dict(updated)})
     except Exception as exc:  # noqa: BLE001
-        yield sse({"type": "error", "message": str(exc)})
+        db.rollback()
+        yield _stream_error(exc)

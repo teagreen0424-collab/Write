@@ -1,6 +1,7 @@
 """应用配置：从环境变量 / .env 读取。"""
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +14,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.deepseek.com"
     openai_model: str = "deepseek-chat"
+    writing_max_tokens: int = Field(default=8192, ge=256, le=32768)
 
     anthropic_api_key: str = ""
     ark_api_key: str = ""
