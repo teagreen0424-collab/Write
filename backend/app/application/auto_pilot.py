@@ -7,6 +7,7 @@ import time
 from sqlalchemy.orm import Session
 
 from app.application.consistency import consistency_check
+from app.application.autopilot_draft_journal import AutopilotDraftJournal
 from app.application.context import build_context
 from app.config import get_settings
 from app.domain.entities import OutlineLevel
@@ -34,6 +35,12 @@ def _sse(data: dict) -> str:
 
 class AutoPilotBusy(Exception):
     """同一作品已有自动驾驶任务在运行。"""
+
+
+class AutoPilotOrderError(Exception):
+    """已有章节的位置存在歧义，不能自动猜测或覆盖作者的排序。"""
+
+    code = "autopilot_order_ambiguous"
 
 
 class AutoPilotState:
@@ -101,7 +108,7 @@ def _ordered_chapter_nodes(db: Session, novel_id: str):
     for n in nodes:
         by_parent.setdefault(n.parent_id, []).append(n)
     for children in by_parent.values():
-        children.sort(key=lambda n: n.sort_order)
+        children.sort(key=lambda n: (n.sort_order, n.created_at, n.id))
 
     chapters: list = []
 
@@ -125,6 +132,49 @@ def _has_chapter(db: Session, novel_id: str, outline_node_id: str) -> bool:
         .first()
         is not None
     )
+
+
+def _chapter_insert_seq(db: Session, novel_id: str, node_id: str, ordered_node_ids: list[str]) -> int:
+    """为缺失的大纲章让出位置；平移与随后的正文创建由调用方一次提交。"""
+    chapters = (
+        db.query(models.Chapter)
+        .filter(models.Chapter.novel_id == novel_id)
+        .order_by(models.Chapter.seq)
+        .all()
+    )
+    if any(chapter.outline_node_id == node_id for chapter in chapters):
+        raise AutoPilotOrderError("生成期间该大纲章已保存，请重试核对，避免重复创建正文。")
+    if len({chapter.seq for chapter in chapters}) != len(chapters):
+        raise AutoPilotOrderError("现有章节序号重复，请先调整章节顺序后重试。")
+
+    order = {item_id: index for index, item_id in enumerate(ordered_node_ids)}
+    target = order[node_id]
+    following = [
+        chapter.seq for chapter in chapters
+        if chapter.outline_node_id in order and order[chapter.outline_node_id] > target
+    ]
+    if not following:
+        # 没有后续大纲锚点时沿用追加，作者自建章也保持原位。
+        return ChapterRepo(db).next_seq(novel_id)
+
+    seq = min(following)
+    preceding = [
+        chapter.seq for chapter in chapters
+        if chapter.outline_node_id in order and order[chapter.outline_node_id] < target
+    ]
+    if preceding and max(preceding) >= seq:
+        raise AutoPilotOrderError("前后大纲章的现有顺序不一致，请先调整章节顺序后重试。")
+
+    # 只给本次新章让位，保持包括无大纲章在内的所有已有章相对顺序。
+    # 显式回写原更新时间，避免排序操作改变作者稿件的编辑时间。
+    db.query(models.Chapter).filter(
+        models.Chapter.novel_id == novel_id,
+        models.Chapter.seq >= seq,
+    ).update({
+        models.Chapter.seq: models.Chapter.seq + 1,
+        models.Chapter.updated_at: models.Chapter.updated_at,
+    }, synchronize_session="fetch")
+    return seq
 
 
 def _parse_number(raw: str) -> float:
@@ -189,6 +239,7 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
         return
 
     db = None
+    journal = None
     generated = skipped = failed = total = 0
     terminal_status = "completed"
     terminal_reason = ""
@@ -203,7 +254,9 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
 
     try:
         db = session_factory()
+        journal = AutopilotDraftJournal(session_factory, novel_id)
         nodes = _ordered_chapter_nodes(db, novel_id)
+        ordered_node_ids = [node.id for node in nodes]
         total = len(nodes)
         yield _sse({
             "type": "progress", "phase": "starting",
@@ -236,13 +289,14 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
             state.current_node_id = node_id
             directive = state.injected_directive
             state.injected_directive = ""
-            yield _sse({
-                "type": "progress", "phase": "generating",
-                "message": f"生成：{node_title}", "node_id": node_id,
-                "title": node_title, **counts(),
-            })
-
+            draft_meta = {}
             try:
+                draft_meta = journal.start(node_id, node_title)
+                yield _sse({
+                    "type": "progress", "phase": "generating",
+                    "message": f"生成：{node_title}", "node_id": node_id,
+                    "title": node_title, **counts(), **draft_meta,
+                })
                 context = build_context(db, novel_id, directive, f"大纲章节：{node_title}")
                 messages = [
                     {"role": "system", "content": WRITE_SYSTEM},
@@ -255,8 +309,10 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                 full = ""
                 for chunk in llm.stream_complete(messages, max_tokens=get_settings().writing_max_tokens):
                     full += chunk
+                    draft_meta = journal.append(chunk)
                     yield _sse({
                         "type": "text", "content": chunk, "node_id": node_id, "title": node_title,
+                        **draft_meta,
                     })
 
                 if not full.strip():
@@ -273,7 +329,7 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                     }
                 )
 
-                seq = ChapterRepo(db).next_seq(novel_id)
+                seq = _chapter_insert_seq(db, novel_id, node_id, ordered_node_ids)
                 chapter = ChapterRepo(db).create(
                     novel_id,
                     outline_node_id=node_id,
@@ -287,11 +343,18 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
                 db.rollback()
                 failed += 1
                 state.fail_count += 1
+                failure_message = f"《{node_title}》生成失败（连续第 {state.fail_count} 次）：{exc} 本章未保存，已收到的内容保留为未完成稿。"
+                if journal.current is not None:
+                    try:
+                        draft_meta = journal.fail(failure_message)
+                    except Exception as storage_exc:  # 缓存失败不能伪称刷新后可恢复。
+                        draft_meta = {**journal.metadata(), "draft_persisted": False}
+                        failure_message += f" 未完成稿自动保存未确认：{storage_exc}，请先复制页面片段。"
                 yield _sse({
                     "type": "error", "scope": "chapter", "fatal": False,
                     "code": getattr(exc, "code", "generation_failed"), "saved": False,
-                    "message": f"《{node_title}》生成失败（连续第 {state.fail_count} 次）：{exc} 本章未保存，已收到的内容保留为未完成稿。",
-                    "node_id": node_id, "title": node_title, **counts(),
+                    "message": failure_message,
+                    "node_id": node_id, "title": node_title, **counts(), **draft_meta,
                 })
                 if state.fail_count >= FAIL_THRESHOLD:
                     terminal_reason = "failure_threshold"
@@ -303,10 +366,23 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
             state.current_seq = seq
             state.fail_count = 0
             generated += 1
+            draft_cleanup_error = None
+            try:
+                draft_meta = journal.saved()
+            except Exception as exc:
+                draft_cleanup_error = exc
             yield _sse({
                 "type": "chapter_done", "chapter_id": chapter_id, "seq": seq,
-                "node_id": node_id, "title": node_title, **counts(),
+                "node_id": node_id, "title": node_title, **counts(), **draft_meta,
             })
+            if draft_cleanup_error is not None:
+                # 正文已经成功，缓存清理异常不能冒充正文生成失败。
+                yield _sse({
+                    "type": "error", "scope": "quality", "fatal": False,
+                    "code": "draft_cleanup_failed", "kind": "draft_cleanup", "saved": True,
+                    "message": f"《{node_title}》正文已保存，未完成稿缓存清理失败，请核对章节：{draft_cleanup_error}",
+                    "node_id": node_id, "title": node_title,
+                })
 
             try:
                 score = score_tension(full)
@@ -362,20 +438,32 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
             "code": "autopilot_task_failed", "message": f"自动驾驶任务异常结束：{exc}",
         }
     finally:
-        registry.finish(novel_id)
-        if db is not None:
-            try:
-                db.close()
-            except Exception as exc:  # noqa: BLE001
-                cleanup_error = exc
+        try:
+            if journal is not None:
+                try:
+                    journal.close()
+                except Exception as exc:
+                    cleanup_error = exc
+            if db is not None:
+                try:
+                    db.close()
+                except Exception as exc:  # noqa: BLE001
+                    cleanup_error = exc
+        finally:
+            # 缓存收尾之前仍由本次任务持有，避免恢复页提前删除其 active 记录。
+            registry.finish(novel_id)
 
     if task_error is not None:
         yield _sse(task_error)
     if cleanup_error is not None:
         terminal_status = "incomplete"
+        bodies_saved = task_error is None and generated + skipped == total
         yield _sse({
             "type": "error", "scope": "task", "fatal": True,
-            "code": "autopilot_cleanup_failed", "message": f"自动驾驶会话关闭失败：{cleanup_error}",
+            "code": "autopilot_cleanup_failed", "saved": bodies_saved,
+            "message": f"正文均已保存，自动驾驶收尾失败（恢复缓存或会话清理）：{cleanup_error}"
+            if bodies_saved else f"自动驾驶会话关闭失败：{cleanup_error}",
+            **counts(),
         })
     message = {
         "completed": "自动驾驶完成",
@@ -384,6 +472,8 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal):
     }[terminal_status]
     if terminal_reason == "failure_threshold":
         message = "连续三次生成失败，自动驾驶已结束，仍有未完成章节"
+    elif cleanup_error is not None and task_error is None and generated + skipped == total:
+        message = "正文均已保存，恢复缓存或会话清理未完成，请核对章节。"
     yield _sse({
         "type": "done", "status": terminal_status, "message": message,
         "reason": terminal_reason, **counts(),

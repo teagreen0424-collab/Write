@@ -379,8 +379,30 @@ export interface AutopilotEvent {
   generated?: number
   skipped?: number
   failed?: number
+  draft_id?: string
+  draft_revision?: number
+  draft_attempt?: number
+  draft_persisted?: boolean
   [key: string]: any
 }
+
+/** 暂存片段独立于正式章节，重开页面时 active 按未确认状态恢复。 */
+export interface AutopilotDraft {
+  id: string
+  novel_id: string
+  node_id: string
+  title: string
+  attempt: number
+  content: string
+  reason: string
+  state: 'active' | 'failed' | 'unconfirmed'
+  revision: number
+  created_at: string
+  updated_at: string
+}
+
+export type AutopilotDraftInput = Pick<AutopilotDraft,
+  'node_id' | 'title' | 'attempt' | 'content' | 'reason' | 'state' | 'revision'>
 
 // ================= 对话式构思 =================
 export interface IdeaChange {

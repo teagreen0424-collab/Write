@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, JSON, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.domain.entities import ChapterStatus, ForeshadowStatus, OutlineLevel
@@ -126,6 +126,32 @@ class Chapter(Base, TimestampMixin):
     tension_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     drift_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     directive: Mapped[str] = mapped_column(Text, default="")
+
+
+class AutopilotDraft(Base, TimestampMixin):
+    """自动驾驶恢复缓存，独立于正文、章节版本和设定事实。
+
+    删除后保留无正文的墓碑，防止浏览器迟到的保存请求复活草稿。
+    """
+
+    __tablename__ = "autopilot_draft"
+    __table_args__ = (
+        CheckConstraint("state IN ('active', 'failed', 'unconfirmed')", name="ck_autopilot_draft_state"),
+        CheckConstraint("attempt >= 1", name="ck_autopilot_draft_attempt"),
+        CheckConstraint("revision >= 1", name="ck_autopilot_draft_revision"),
+        Index("ix_autopilot_draft_scope", "novel_id", "deleted", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    novel_id: Mapped[str] = mapped_column(String(36), ForeignKey("novel.id"), index=True)
+    node_id: Mapped[str] = mapped_column(String(100), default="")
+    title: Mapped[str] = mapped_column(String(200), default="")
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    content: Mapped[str] = mapped_column(Text, default="")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    state: Mapped[str] = mapped_column(String(20), default="active")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class ChapterRevision(Base):

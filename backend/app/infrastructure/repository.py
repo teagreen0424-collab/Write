@@ -80,6 +80,7 @@ class NovelRepo:
             models.Relationship,
             models.Chapter,
             models.ChapterRevision,
+            models.AutopilotDraft,
             models.OutlineNode,
             models.MemoryChunk,
             models.Injection,

@@ -66,6 +66,7 @@ class AutoPilotEventTest(unittest.TestCase):
                 key=lambda row: row["id"],
             )
             for table in models.Base.metadata.sorted_tables
+            if table.name != "autopilot_draft"  # 恢复缓存单独验证，不属于正式章节/作品资料。
         }
 
     def _terminal(self, emitted):
@@ -131,13 +132,18 @@ class AutoPilotEventTest(unittest.TestCase):
         self.assertEqual([event["node_id"] for event in skipped], [nodes[0].id, nodes[2].id])
         after = self._rows()
         old_ids = {row["id"] for row in before["chapter"]}
-        self.assertEqual([row for row in after["chapter"] if row["id"] in old_ids], before["chapter"])
+        expected_old = [
+            {**row, "seq": row["seq"] + (row["outline_node_id"] == nodes[2].id)}
+            for row in before["chapter"]
+        ]
+        self.assertEqual([row for row in after["chapter"] if row["id"] in old_ids], expected_old)
         for table in before:
             if table != "chapter":
                 self.assertEqual(after[table], before[table])
         chapters = repos.ChapterRepo(self.db).list(self.novel_id)
         self.assertEqual(len(chapters), 3)
         self.assertEqual(len({chapter.outline_node_id for chapter in chapters}), 3)
+        self.assertEqual([chapter.outline_node_id for chapter in chapters], [node.id for node in nodes])
         terminal = self._terminal(emitted)
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual((terminal["generated"], terminal["skipped"], terminal["failed"]), (1, 2, 0))

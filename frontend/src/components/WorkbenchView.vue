@@ -92,7 +92,7 @@ function navigateSafely(target: string, navigate: () => void) {
   if ((activeTab.value === 'writing' && writingDirty.value) || (activeTab.value === 'autopilot' && autopilotDirty.value)) {
     navigationTarget.value = target
     navigationWarning.value = activeTab.value === 'autopilot'
-      ? '自动驾驶仍在运行或有未完成稿。离开会放弃本页面的片段并断开连接，不能保证后台任务停止。'
+      ? '离开会断开自动驾驶的本机监控连接，不能保证后台任务停止。已自动暂存的片段可以重新找回；未得到暂存确认的内容离开后可能丢失，请先复制保留。'
       : '当前章节有未保存修改或未完成输出。'
     pendingNavigation.value = navigate
     showNavigationConfirm.value = true
@@ -191,15 +191,15 @@ onMounted(loadNovels)
     <n-modal
       :show="showNavigationConfirm"
       preset="card"
-      title="放弃未保存修改？"
+      :title="activeTab === 'autopilot' ? '离开自动驾驶页？' : '放弃未保存修改？'"
       style="width: min(480px, calc(100vw - 32px))"
       @update:show="cancelNavigation"
     >
-      <p>{{ navigationWarning }}确定放弃并{{ navigationTarget }}吗？</p>
+      <p>{{ navigationWarning }}{{ activeTab === 'autopilot' ? '确定' : '确定放弃并' }}{{ navigationTarget }}吗？</p>
       <template #footer>
         <div class="modal-actions">
           <n-button @click="cancelNavigation">继续编辑</n-button>
-          <n-button type="warning" @click="confirmNavigation">放弃并继续</n-button>
+          <n-button type="warning" @click="confirmNavigation">{{ activeTab === 'autopilot' ? '离开并继续' : '放弃并继续' }}</n-button>
         </div>
       </template>
     </n-modal>

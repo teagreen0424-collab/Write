@@ -5,6 +5,7 @@ from app.infrastructure import repository as repos
 from app.interfaces import schemas
 from app.interfaces.api.v1 import (
     autopilot,
+    autopilot_drafts,
     chapters,
     consistency,
     conversations,
@@ -31,6 +32,7 @@ api_router.include_router(export.router)
 api_router.include_router(delivery.router)
 api_router.include_router(outline.router)
 api_router.include_router(autopilot.router)
+api_router.include_router(autopilot_drafts.router)
 api_router.include_router(ideas.router)
 api_router.include_router(conversations.router)
 api_router.include_router(setting_index.router)

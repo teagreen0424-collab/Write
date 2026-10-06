@@ -153,7 +153,16 @@ class StreamPersistenceTest(unittest.TestCase):
         self.assertFalse(any(event["type"] == "chapter_done" for event in emitted))
         self.assertEqual(emitted[-1]["done"], 0)
         self.assertIn("未完成", emitted[-1]["message"])
-        self.assertEqual(self.rows(), self.before)
+        after = self.rows()
+        # 截断正文不进入正式资料；独立恢复缓存必须保留完整已收到片段。
+        self.assertEqual({key: value for key, value in after.items() if key != "autopilot_draft"},
+                         {key: value for key, value in self.before.items() if key != "autopilot_draft"})
+        self.assertEqual(len(after["autopilot_draft"]), 1)
+        draft = after["autopilot_draft"][0]
+        self.assertEqual(draft["novel_id"], self.novel_id)
+        self.assertEqual(draft["content"], "这是已经收到的未完成稿。最后半句话")
+        self.assertEqual(draft["state"], "failed")
+        self.assertFalse(draft["deleted"])
         self.assertFalse(auto_pilot.registry.is_running(self.novel_id))
 
 

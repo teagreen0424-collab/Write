@@ -1,4 +1,6 @@
 import type {
+  AutopilotDraft,
+  AutopilotDraftInput,
   Chapter,
   ChatAction,
   ChapterRevision,
@@ -44,7 +46,7 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
       typeof body?.detail === 'string'
         ? body.detail
         : body?.detail?.[0]?.msg || `HTTP ${resp.status}`
-    throw new Error(detail)
+    throw Object.assign(new Error(detail), { code: body?.code, status: resp.status })
   }
   if (resp.status === 204) return undefined as T
   return (await resp.json()) as T
@@ -371,6 +373,16 @@ export const api = {
     }),
 
   // 自动驾驶
+  listAutopilotDrafts: (novelId: string) =>
+    request<AutopilotDraft[]>(`${BASE}/novels/${novelId}/autopilot/drafts`),
+  saveAutopilotDraft: (novelId: string, id: string, data: AutopilotDraftInput) =>
+    request<AutopilotDraft>(`${BASE}/novels/${novelId}/autopilot/drafts/${id}`, {
+      method: 'PUT', body: JSON.stringify(data),
+    }),
+  deleteAutopilotDraft: (novelId: string, id: string, revision: number) =>
+    request<{ id: string; deleted: boolean; revision: number }>(
+      `${BASE}/novels/${novelId}/autopilot/drafts/${id}?revision=${revision}`, { method: 'DELETE' },
+    ),
   autopilotStatus: (novelId: string) =>
     request<{ running: boolean; paused?: boolean; current_node_id?: string; fail_count?: number }>(
       `${BASE}/novels/${novelId}/autopilot/status`,

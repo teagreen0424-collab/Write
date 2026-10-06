@@ -470,6 +470,44 @@ class AutopilotInjectRequest(BaseModel):
     directive: str = Field(..., min_length=1)
 
 
+class AutopilotDraftUpsert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str = Field(..., min_length=1, max_length=100, strict=True)
+    title: str = Field(default="", max_length=200, strict=True)
+    attempt: int = Field(..., ge=1, le=2_147_483_647, strict=True)
+    content: str = Field(..., max_length=1_000_000, strict=True)
+    reason: str = Field(default="", max_length=4000, strict=True)
+    state: Literal["active", "failed", "unconfirmed"]
+    revision: int = Field(..., ge=1, le=2_147_483_647, strict=True)
+
+    @model_validator(mode="after")
+    def validate_node(self):
+        if not self.node_id.strip():
+            raise ValueError("草稿所属节点不能为空")
+        return self
+
+
+class AutopilotDraftRead(ORMBase):
+    id: str
+    novel_id: str
+    node_id: str
+    title: str
+    attempt: int
+    content: str
+    reason: str
+    state: Literal["active", "failed", "unconfirmed"]
+    revision: int
+    created_at: str
+    updated_at: str
+
+
+class AutopilotDraftDeleted(BaseModel):
+    id: str
+    deleted: Literal[True] = True
+    revision: int
+
+
 class IdeaChatRequest(BaseModel):
     text: str = Field(..., min_length=1)
 
