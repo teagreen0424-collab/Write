@@ -19,6 +19,7 @@ import { wordLimitError, wordLimitLabel, wordLimits } from '../utils/wordLimits'
 import ChapterRevisionPanel from './ChapterRevisionPanel.vue'
 import type {
   Chapter,
+  ChapterRepairPreview,
   ClicheHit,
   ClicheResult,
   Conflict,
@@ -27,7 +28,9 @@ import type {
   OutlineNode,
   Segment,
   StoryCheckResult,
+  StoryCheckIssue,
   Suggestion,
+  WordLimits,
 } from '../types'
 
 const props = defineProps<{ novelId: string; initialChapterId?: string | null }>()
@@ -80,6 +83,31 @@ const showPreview = ref(false)
 const previewPassage = ref('')
 const previewNew = ref('')
 const previewFullContent = ref('')
+
+// 整章修订与选段改写各自保留预览；仅明确确认才覆盖正文。
+interface RepairContext {
+  novelId: string
+  chapterId: string
+  epoch: number
+  title: string
+  directive: string
+  content: string
+  wordLimits: WordLimits | null
+  issues: StoryCheckIssue[]
+  unreviewedIds: string[]
+}
+const showRepair = ref(false)
+const repairInstructions = ref('')
+const repairContext = ref<RepairContext | null>(null)
+const repairPreview = ref<ChapterRepairPreview | null>(null)
+const repairLoading = ref(false)
+const repairApplying = ref(false)
+const repairError = ref('')
+const repairRefreshNeeded = ref(false)
+let repairEpoch = 0
+let repairGenerationId = 0
+let repairApplyRequestId = 0
+let repairInternalUpdate = false
 
 const showSettle = ref(false)
 const showSummary = ref(false)
@@ -217,7 +245,7 @@ function abandonStreamOutput() {
 }
 
 async function beginStream(): Promise<number | null> {
-  if (streaming.value) return null
+  if (streaming.value || repairApplying.value) return null
   if (hasIncompleteOutput.value && !await askDiscard('上次生成的输出尚未处理，新一轮生成会放弃这些输出，确定继续吗？', '放弃旧稿并生成')) return null
   clearStreamOutput()
   showPreview.value = false
@@ -339,6 +367,7 @@ function invalidateStoryCheck() {
 }
 
 async function selectChapter(c: Chapter, force = false) {
+  if (!force && repairApplying.value) { message.warning('正在保存修订，请等待保存回应'); return }
   if (!force && c.id === selectedId.value) return
   if (!force && !await confirmDiscard()) return
   abandonStreamOutput()
@@ -355,6 +384,7 @@ async function selectChapter(c: Chapter, force = false) {
 }
 
 async function startNew(force = false) {
+  if (!force && repairApplying.value) { message.warning('正在保存修订，请等待保存回应'); return }
   if (!force && !await confirmDiscard()) return
   abandonStreamOutput()
   showRevisions.value = false
@@ -552,6 +582,168 @@ function discardPreview() {
   message.info('已放弃本次改写')
 }
 
+function invalidateRepair() {
+  repairEpoch += 1
+  repairGenerationId += 1
+  repairLoading.value = false
+  repairPreview.value = null
+  repairContext.value = null
+  repairError.value = ''
+  repairRefreshNeeded.value = false
+  showRepair.value = false
+}
+
+function isCurrentRepair(context: RepairContext) {
+  return !unmounted && repairEpoch === context.epoch
+    && props.novelId === context.novelId && selectedId.value === context.chapterId
+    && title.value === context.title && directive.value === context.directive
+    && content.value === context.content && !isDirty.value
+}
+
+function openRepair() {
+  if (!selectedId.value || repairApplying.value || streaming.value || hasIncompleteOutput.value || storyCheckLoading.value
+    || !content.value.trim() || !requireSaved('生成修订稿')) return
+  if (storyWordLimitError.value) { message.error(storyWordLimitError.value); return }
+  invalidateRepair()
+  repairInstructions.value = ''
+  const limits = wordLimits(storyMinWords.value, storyMaxWords.value)
+  repairContext.value = {
+    novelId: props.novelId,
+    chapterId: selectedId.value,
+    epoch: repairEpoch,
+    title: title.value,
+    directive: directive.value,
+    content: content.value,
+    wordLimits: limits ? { ...limits } : null,
+    issues: (storyCheckResult.value?.issues || []).map((issue) => ({ ...issue })),
+    unreviewedIds: [...new Set([
+      ...(storyCheckResult.value?.unreviewed_requirement_ids || []),
+      ...storyRequirementRows.value.filter((row) => row.status === 'uncertain').map((row) => row.id),
+    ])],
+  }
+  showRepair.value = true
+}
+
+function handleRepairVisibility(show: boolean) {
+  // 确认请求已经可能写入，等待回应期间保留窗口，避免误以为关闭等于取消保存。
+  if (repairApplying.value) return
+  if (!show) invalidateRepair()
+}
+
+function discardRepair() {
+  if (repairApplying.value) return
+  invalidateRepair()
+  message.info('已放弃修订预览，正文未修改')
+}
+
+async function generateRepair() {
+  const context = repairContext.value
+  if (!context || !showRepair.value || repairLoading.value || repairApplying.value || repairRefreshNeeded.value || !isCurrentRepair(context)) return
+  const requestId = ++repairGenerationId
+  const instructions = repairInstructions.value
+  const isCurrent = () => showRepair.value && isCurrentRepair(context)
+    && requestId === repairGenerationId && repairInstructions.value === instructions
+  repairLoading.value = true
+  repairPreview.value = null
+  repairError.value = ''
+  try {
+    const preview = await api.previewChapterRepair(context.novelId, context.chapterId, {
+      instructions,
+      word_limits: context.wordLimits,
+      issues: context.issues,
+      unreviewed_requirement_ids: context.unreviewedIds,
+    })
+    if (!isCurrent()) return
+    if (preview.chapter_id !== context.chapterId || preview.original_content !== context.content
+      || preview.title !== context.title || preview.directive !== context.directive || !preview.base_fingerprint
+      || !preview.content?.trim()) {
+      repairError.value = '修订依据与当前已保存章节不一致，请刷新章节后重新生成。正文未修改。'
+      repairRefreshNeeded.value = true
+      return
+    }
+    repairPreview.value = preview
+  } catch (e) {
+    if (isCurrent()) repairError.value = `修订稿生成未完成，正文未修改：${(e as Error).message}`
+  } finally {
+    if (isCurrent()) repairLoading.value = false
+  }
+}
+
+async function refreshRepairChapter() {
+  const context = repairContext.value
+  if (!context || repairApplying.value || !isCurrentRepair(context)) return
+  try {
+    await loadChapters()
+    if (!isCurrentRepair(context)) return
+    const chapter = chapters.value.find((item) => item.id === context.chapterId)
+    if (!chapter) { invalidateRepair(); message.warning('原章节已不存在，请核对章节列表'); return }
+    await selectChapter(chapter, true)
+    invalidateRepair()
+    message.info('已刷新章节，请核对正文并重新检查、生成修订稿')
+  } catch (e) {
+    if (isCurrentRepair(context)) repairError.value = `章节刷新未完成：${(e as Error).message}`
+  }
+}
+
+async function applyRepair() {
+  const context = repairContext.value
+  const preview = repairPreview.value
+  if (!context || !preview || !showRepair.value || repairApplying.value || repairLoading.value
+    || !preview.content.trim() || preview.content === preview.original_content || !isCurrentRepair(context)) return
+  const requestId = ++repairApplyRequestId
+  const generationId = repairGenerationId
+  const isCurrent = () => isCurrentRepair(context) && requestId === repairApplyRequestId && generationId === repairGenerationId
+  repairApplying.value = true
+  repairError.value = ''
+  let saved = false
+  try {
+    const updated = await api.applyChapterRepair(context.novelId, context.chapterId, preview.base_fingerprint, preview.content)
+    saved = true
+    if (!isCurrent()) return
+    if (updated.id !== context.chapterId || updated.novel_id !== context.novelId) {
+      repairError.value = '保存响应与原章节不一致，请刷新原章节核对保存结果。当前编辑稿未替换。'
+      return
+    }
+    // 使用保存回应更新同一章，不调用可能跨章覆盖编辑稿的普通保存函数。
+    repairInternalUpdate = true
+    try {
+      chapters.value = chapters.value.map((chapter) => chapter.id === context.chapterId ? updated : chapter)
+      title.value = updated.title
+      directive.value = updated.directive
+      content.value = updated.content
+      storyMinWords.value = context.wordLimits?.min_words ?? null
+      storyMaxWords.value = context.wordLimits?.max_words ?? null
+      rememberSaved()
+      clearMarks()
+    } finally { repairInternalUpdate = false }
+    invalidateRepair()
+    repairApplying.value = false
+    message.success('修订稿已保存，旧版本已保留，正在复检')
+    const checked = await doStoryCheck()
+    if (!checked && !unmounted && props.novelId === context.novelId && selectedId.value === context.chapterId
+      && content.value === updated.content && directive.value === updated.directive) {
+      message.warning('修订稿已保存，旧版本已保留；剧情复检未完成，请重试或人工核对。')
+    }
+  } catch (e) {
+    if (!isCurrent()) return
+    if (saved) {
+      repairError.value = `修订稿已保存，但页面同步或复检未完成，请刷新原章节核对：${(e as Error).message}`
+    } else {
+      const status = (e as Error & { status?: number }).status
+      repairError.value = status === 409 || status === 410
+        ? `章节或修订依据已改变，本次未保存修订稿。请刷新章节并重新检查、生成：${(e as Error).message}`
+        : `修订保存未得到成功确认，请保留候选稿并核对原章节：${(e as Error).message}`
+      if (status === 409 || status === 410) {
+        repairPreview.value = null
+        repairRefreshNeeded.value = true
+        await loadChapters().catch(() => {})
+      }
+    }
+  } finally {
+    if (requestId === repairApplyRequestId) repairApplying.value = false
+  }
+}
+
 // 扫描套路表达，命中与冲突共用高亮
 async function doScanCliche() {
   if (!content.value.trim()) return
@@ -611,8 +803,8 @@ async function doOutlineCheck() {
 
 // 检查当前编辑稿，显式传空章前指令也能覆盖已保存指令；检查不会修改正文。
 async function doStoryCheck() {
-  if (storyCheckLoading.value || !selectedId.value || !content.value.trim() || streaming.value) return
-  if (storyWordLimitError.value) { message.error(storyWordLimitError.value); return }
+  if (storyCheckLoading.value || !selectedId.value || !content.value.trim() || streaming.value) return false
+  if (storyWordLimitError.value) { message.error(storyWordLimitError.value); return false }
   const requestId = ++storyCheckRequestId
   const novelId = props.novelId
   const chapterId = selectedId.value
@@ -628,14 +820,16 @@ async function doStoryCheck() {
     const result = checkedWordLimits
       ? await api.checkChapterStory(novelId, chapterId, checkedContent, checkedDirective, checkedWordLimits)
       : await api.checkChapterStory(novelId, chapterId, checkedContent, checkedDirective)
-    if (!isCurrent()) return
+    if (!isCurrent()) return false
     storyCheckResult.value = result
     if (storyReviewIncomplete.value || result.truncated) message.warning('剧情检查范围或结果不完整，请核对提示后人工校对')
     else if (result.word_count?.within_limits === false) message.warning('正文未达到字数目标，请核对字数提示')
     else if (result.issues.length || storyRequirementRows.value.some((row) => row.status === 'violation')) message.warning('剧情检查发现待核对的偏差，请核对逐项结果')
     else message.success('未发现明显剧情问题，仍请人工校对')
+    return true
   } catch (e) {
     if (isCurrent()) message.error(`剧情检查未完成：${(e as Error).message}`)
+    return false
   } finally {
     if (isCurrent()) storyCheckLoading.value = false
   }
@@ -658,7 +852,7 @@ function locateExcerpt(excerpt: string) {
 }
 
 async function saveContent() {
-  if (!selectedId.value) return
+  if (!selectedId.value || repairApplying.value) return
   try {
     const updated = await api.updateChapter(props.novelId, selectedId.value, {
       title: title.value,
@@ -822,11 +1016,23 @@ watch(
   invalidateStoryCheck,
   { flush: 'sync' },
 )
+watch(
+  () => [props.novelId, selectedId.value, title.value, content.value, directive.value, storyMinWords.value, storyMaxWords.value, streaming.value],
+  () => { if (!repairInternalUpdate) invalidateRepair() },
+  { flush: 'sync' },
+)
+watch(repairInstructions, () => {
+  repairGenerationId += 1
+  repairLoading.value = false
+  repairPreview.value = null
+  repairError.value = ''
+}, { flush: 'sync' })
 
 onMounted(() => window.addEventListener('beforeunload', handleBeforeUnload))
 onBeforeUnmount(() => {
   unmounted = true
   streamRunId += 1
+  invalidateRepair()
   window.removeEventListener('beforeunload', handleBeforeUnload)
   finishDiscard(false)
 })
@@ -840,7 +1046,7 @@ onBeforeUnmount(() => {
           <div>章节</div>
           <div class="book-stats">{{ chapters.length }} 章 · {{ totalWords }} 字</div>
         </div>
-        <n-button size="small" type="primary" @click="startNew()">新章</n-button>
+        <n-button size="small" type="primary" :disabled="repairApplying" @click="startNew()">新章</n-button>
       </div>
       <n-empty v-if="!chapters.length" description="暂无章节" />
       <n-list v-else clickable hoverable>
@@ -862,23 +1068,23 @@ onBeforeUnmount(() => {
 
     <div class="editor">
       <div class="editor-toolbar">
-        <n-input v-model:value="title" placeholder="章节标题" class="title-input" />
-        <n-input v-model:value="directive" placeholder="章前指令（如：让 A 与 B 决裂）" class="directive-input" />
+        <n-input v-model:value="title" :disabled="repairApplying" placeholder="章节标题" class="title-input" />
+        <n-input v-model:value="directive" :disabled="repairApplying" placeholder="章前指令（如：让 A 与 B 决裂）" class="directive-input" />
         <div class="toolbar-groups">
         <div class="btn-row primary-actions">
-          <n-button type="primary" :loading="streaming" @click="doWrite">写新章</n-button>
+          <n-button type="primary" :loading="streaming" :disabled="repairApplying" @click="doWrite">写新章</n-button>
           <n-button
-            :disabled="!selectedId || !isLatestChapter"
+            :disabled="!selectedId || !isLatestChapter || repairApplying"
             :loading="streaming"
             :title="isLatestChapter ? '从当前最后一章继续生成' : '请选择章节列表中的最后一章'"
             @click="doWriteNext"
           >
             生成下一章
           </n-button>
-          <n-button :disabled="!selectedId" :loading="streaming" @click="doContinue">
+          <n-button :disabled="!selectedId || repairApplying" :loading="streaming" @click="doContinue">
             续写本章
           </n-button>
-          <n-button :disabled="!selectedId || !isDirty" @click="saveContent">保存</n-button>
+          <n-button :disabled="!selectedId || !isDirty || repairApplying" @click="saveContent">保存</n-button>
           <span v-if="selectedId" class="save-state" :class="{ dirty: isDirty }">
             {{ isDirty ? '未保存' : '已保存' }}
           </span>
@@ -891,7 +1097,7 @@ onBeforeUnmount(() => {
             style="width: 120px"
             clearable
           />
-          <n-button :disabled="!selectedId" @click="doRewrite">改写选中</n-button>
+          <n-button :disabled="!selectedId || repairApplying" @click="doRewrite">改写选中</n-button>
         </div>
         <div class="btn-row quality-actions">
           <n-button :disabled="!selectedId" @click="doScanCliche">套路扫描</n-button>
@@ -908,23 +1114,28 @@ onBeforeUnmount(() => {
           >大纲契合检查</n-button>
           <span class="cost-hint">本项调用模型 1 次</span>
           <n-button
-            :disabled="!selectedId || !content.trim() || streaming || !!storyWordLimitError"
+            :disabled="!selectedId || !content.trim() || streaming || repairApplying || !!storyWordLimitError"
             :loading="storyCheckLoading"
             title="检查当前正文的章前指令、前章承接、设定和大纲；调用模型 1 次，不修改正文"
             @click="doStoryCheck"
           >剧情检查</n-button>
-          <n-button type="success" :disabled="!selectedId || streaming || hasIncompleteOutput" @click="doSettle">定稿沉淀</n-button>
+          <n-button
+            :disabled="!selectedId || !content.trim() || isDirty || streaming || hasIncompleteOutput || repairApplying || storyCheckLoading || !!storyWordLimitError"
+            :title="isDirty ? '请先保存当前修改，再生成修订稿' : '根据已保存正文、构思和当前检查结果生成整章修订预览'"
+            @click="openRepair"
+          >生成修订稿</n-button>
+          <n-button type="success" :disabled="!selectedId || streaming || hasIncompleteOutput || repairApplying" @click="doSettle">定稿沉淀</n-button>
         </div>
         <div class="btn-row version-actions">
-          <n-button :disabled="!selectedId || summarySaving || streaming" @click="openSummary">章节摘要</n-button>
-          <n-button :disabled="!selectedId" @click="openRevisionHistory">版本历史</n-button>
+          <n-button :disabled="!selectedId || summarySaving || streaming || repairApplying" @click="openSummary">章节摘要</n-button>
+          <n-button :disabled="!selectedId || repairApplying" @click="openRevisionHistory">版本历史</n-button>
           <span class="cost-hint">覆盖正文前会自动保存旧版本</span>
         </div>
         <div v-if="selectedId" class="word-limit-row" aria-label="剧情检查字数目标">
           <span>本次检查字数目标（可选）</span>
-          <n-input-number v-model:value="storyMinWords" :min="1" :max="1000000" :precision="0" :disabled="streaming" :input-props="{ 'aria-label': '检查最低字数' }" placeholder="最低字数" />
+          <n-input-number v-model:value="storyMinWords" :min="1" :max="1000000" :precision="0" :disabled="streaming || repairApplying" :input-props="{ 'aria-label': '检查最低字数' }" placeholder="最低字数" />
           <span>至</span>
-          <n-input-number v-model:value="storyMaxWords" :min="1" :max="1000000" :precision="0" :disabled="streaming" :input-props="{ 'aria-label': '检查最高字数' }" placeholder="最高字数" />
+          <n-input-number v-model:value="storyMaxWords" :min="1" :max="1000000" :precision="0" :disabled="streaming || repairApplying" :input-props="{ 'aria-label': '检查最高字数' }" placeholder="最高字数" />
           <span class="cost-hint">按非空白字符计数，含标点</span>
           <p v-if="storyWordLimitError" class="story-review-hint" role="alert">{{ storyWordLimitError }}</p>
         </div>
@@ -934,12 +1145,13 @@ onBeforeUnmount(() => {
           <n-button
             type="error"
             secondary
-            :disabled="!selectedId || streaming"
+            :disabled="!selectedId || streaming || repairApplying"
             @click="showDelete = true"
           >
             删除章节
           </n-button>
         </div>
+        <p v-if="selectedId && isDirty" class="story-review-hint">生成修订稿前，请先保存当前正文、标题和章前指令。</p>
         </div>
         <div v-if="selectedId" class="next-chapter-hint">
           <template v-if="isLatestChapter">
@@ -982,6 +1194,7 @@ onBeforeUnmount(() => {
         <textarea
           ref="contentRef"
           v-model="content"
+          :disabled="repairApplying"
           class="content-editor"
           placeholder="在此写作，或点击上方按钮生成"
         ></textarea>
@@ -1122,6 +1335,55 @@ onBeforeUnmount(() => {
         </section>
       </div>
     </div>
+
+    <n-modal
+      :show="showRepair" preset="card" title="整章修订预览"
+      class="repair-modal" style="width: min(960px, calc(100vw - 32px))"
+      :mask-closable="!repairApplying" :close-on-esc="!repairApplying" :closable="!repairApplying"
+      @update:show="handleRepairVisibility"
+    >
+      <div class="repair-dialog-body">
+        <p class="summary-hint">以当前已保存正文为依据。生成候选稿调用模型 1 次；确认保存后再调用模型 1 次复检。覆盖正文前会保留旧版本。</p>
+        <p v-if="repairContext" class="story-context">
+          本次目标：{{ wordLimitLabel(repairContext.wordLimits) }} · 检查提示偏差 {{ repairContext.issues.length }} 项 · 待核构思 {{ repairContext.unreviewedIds.length }} 项
+        </p>
+        <label class="repair-instructions">
+          <span>修订要求（可选）</span>
+          <n-input
+            v-model:value="repairInstructions" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }"
+            :maxlength="4000" show-count
+            :disabled="repairLoading || repairApplying" :input-props="{ 'aria-label': '修订要求' }"
+            placeholder="例如：压缩重复描写，保留拒绝偷取档案与依法登记的场景"
+          />
+        </label>
+        <p v-if="repairError" class="repair-error" role="alert">{{ repairError }}</p>
+        <div v-if="repairPreview" class="preview-cols repair-cols">
+          <section class="preview-col" aria-label="修订原文">
+            <div class="preview-col-title">原文 · {{ repairPreview.original_word_count.count }} 字</div>
+            <div class="preview-col-text">{{ repairPreview.original_content }}</div>
+          </section>
+          <section class="preview-col" aria-label="修订候选稿">
+            <div class="preview-col-title">候选稿 · {{ repairPreview.word_count.count }} 字</div>
+            <n-tag v-if="repairPreview.word_count.within_limits !== null" :type="repairPreview.word_count.within_limits ? 'success' : 'warning'" size="small">
+              {{ repairPreview.word_count.within_limits ? '字数在目标范围内' : '字数未达到目标范围' }}
+            </n-tag>
+            <p v-for="warning in repairPreview.word_count.warnings" :key="warning" class="story-review-hint">{{ warning }}</p>
+            <div class="preview-col-text">{{ repairPreview.content }}</div>
+          </section>
+        </div>
+        <p v-if="repairPreview" class="summary-hint">候选稿尚未保存，也未完成剧情复检；请对照原文确认。保存不会自动定稿或继续自动驾驶。</p>
+        <p v-if="repairPreview && repairPreview.content === repairPreview.original_content" class="story-review-hint">候选稿与原文相同，未产生正文修改。可补充修订要求后重新生成。</p>
+        <p v-if="repairApplying" class="story-review-hint" role="status">正在保存修订，请等待保存回应。</p>
+      </div>
+      <template #footer>
+        <div class="modal-actions repair-actions">
+          <n-button :disabled="repairApplying" @click="discardRepair">放弃修订</n-button>
+          <n-button v-if="repairRefreshNeeded" :disabled="repairApplying" @click="refreshRepairChapter">刷新章节并核对</n-button>
+          <n-button :disabled="repairApplying || repairRefreshNeeded" :loading="repairLoading" @click="generateRepair">{{ repairPreview ? '重新生成候选稿' : '生成候选稿' }}</n-button>
+          <n-button type="primary" :loading="repairApplying" :disabled="!repairPreview || repairPreview.content === repairPreview.original_content || repairLoading || repairRefreshNeeded" @click="applyRepair">保存修订并复检</n-button>
+        </div>
+      </template>
+    </n-modal>
 
     <n-modal v-model:show="showPreview" preset="card" title="改写预览（尚未落库）" style="width: 760px">
       <div class="preview-cols">
@@ -1649,6 +1911,45 @@ onBeforeUnmount(() => {
   padding: 8px;
   max-height: 360px;
   overflow: auto;
+}
+.repair-dialog-body {
+  max-height: calc(100dvh - 230px);
+  overflow-y: auto;
+}
+.repair-modal {
+  max-height: calc(100dvh - 32px);
+}
+.repair-modal :deep(.n-card__content) {
+  min-height: 0;
+  overflow-y: auto;
+}
+.repair-instructions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+}
+.repair-cols {
+  margin-top: 12px;
+  align-items: flex-start;
+}
+.repair-cols .preview-col-text {
+  max-height: min(42dvh, 360px);
+}
+.repair-error {
+  color: #d03050;
+  white-space: pre-wrap;
+}
+.repair-actions {
+  flex-wrap: wrap;
+}
+@media (max-width: 640px) {
+  .repair-cols {
+    flex-direction: column;
+  }
+  .repair-cols .preview-col {
+    width: 100%;
+  }
 }
 .settle-summary {
   color: #666;

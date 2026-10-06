@@ -64,8 +64,10 @@ class LLMProvider:
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        *,
+        require_complete: bool = False,
     ) -> str:
-        """发起一次补全，返回文本内容。"""
+        """发起一次补全；整章替换预览可要求明确完整结束，旧调用兼容。"""
         self._ensure_key()
         resp = httpx.post(
             self._url,
@@ -76,10 +78,12 @@ class LLMProvider:
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             },
-            timeout=60.0,
+            timeout=180.0 if require_complete else 60.0,
         )
         resp.raise_for_status()
         data = resp.json()
+        if require_complete and data["choices"][0].get("finish_reason") != "stop":
+            raise RuntimeError("模型输出未完整结束，不能作为整章修订稿应用")
         return data["choices"][0]["message"]["content"] or ""
 
     def stream_complete(

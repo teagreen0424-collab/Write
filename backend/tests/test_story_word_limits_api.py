@@ -60,6 +60,7 @@ class StoryWordLimitsApiTest(unittest.TestCase):
                                                         'within_limits': True, 'warnings': []})
         self.assertFalse(response.json()['review_complete'])
         self.assertEqual(review.call_args.args[2], edited)
+        self.assertEqual(review.call_args.kwargs['word_limits'], {'min_words': 5, 'max_words': 5})
         self.assertEqual(self.snapshot(), before)
 
     def test_over_limit_warns_without_claiming_unsaved_edit_was_saved(self):

@@ -108,6 +108,24 @@ class _SqliteTest(unittest.TestCase):
 
 
 class AutopilotWordCountTest(_SqliteTest):
+    def test_auto_review_materials_receive_actual_full_count_and_task_limits(self):
+        from app.application.story_review import review_story
+        self.nodes(1)
+        body = "字" * 2272 + "\n \t"
+        response = json.dumps({"checks": [{"status": "satisfied", "category": "setting", "severity": "low",
+                                            "requirement": "没有明确设定冲突", "excerpt": "", "reason": "当前资料未见明确冲突"}]}, ensure_ascii=False)
+        with patch.object(auto_pilot, "review_story", side_effect=review_story), \
+             patch.object(auto_pilot.llm, "complete", return_value=response) as complete, \
+             patch.object(auto_pilot.llm, "stream_complete", return_value=iter([body])):
+            emitted = self.collect(auto_pilot.run_autopilot(self.novel_id, self.sessions, word_limits={"max_words": 1600}))
+        complete.assert_called_once()
+        prompt = complete.call_args.args[0][1]["content"]
+        material = json.loads(prompt.split("\n", 1)[1].split("\n\n返回 JSON：", 1)[0])
+        facts = material["程序计算的完整正文字数"]
+        self.assertEqual((facts["count"], facts["max_words"], facts["within_limits"]), (2272, 1600, False))
+        self.assertEqual(emitted[-1]["status"], "completed")
+        self.assertEqual(repos.ChapterRepo(self.db).list(self.novel_id)[0].content, body)
+
     def test_over_limit_saves_complete_body_and_pauses_before_next_generation(self):
         self.nodes(2)
         body = "完整正文，😀 不截断。"

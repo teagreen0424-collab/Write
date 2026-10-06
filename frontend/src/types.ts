@@ -619,3 +619,21 @@ export interface WordCountCheck extends WordLimits {
   within_limits: boolean | null
   warnings: string[]
 }
+
+export interface ChapterRepairRequest {
+  instructions?: string
+  word_limits?: WordLimits | null
+  issues?: StoryCheckIssue[]
+  unreviewed_requirement_ids?: string[]
+}
+
+export interface ChapterRepairPreview {
+  chapter_id: string
+  base_fingerprint: string
+  original_content: string
+  content: string
+  title: string
+  directive: string
+  original_word_count: WordCountCheck
+  word_count: WordCountCheck
+}

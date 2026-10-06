@@ -23,6 +23,40 @@ def _wire(*frames):
     )
 
 
+class LLMProviderCompletionTest(unittest.TestCase):
+    def setUp(self):
+        with patch("app.infrastructure.ai.llm_provider.get_settings", return_value=SimpleNamespace(
+            openai_api_key="test-only-key", openai_base_url="https://llm.invalid", openai_model="test-model",
+        )):
+            self.provider = LLMProvider()
+
+    @contextmanager
+    def response(self, finish_reason):
+        def handler(request):
+            self.request_body = json.loads(request.content)
+            return httpx.Response(200, json={"choices": [{"message": {"content": "完整正文。"}, "finish_reason": finish_reason}]})
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            with patch("app.infrastructure.ai.llm_provider.httpx.post", side_effect=client.post):
+                yield
+
+    def test_strict_completion_keeps_request_protocol_and_complete_body(self):
+        with self.response("stop"):
+            result = self.provider.complete([{"role": "user", "content": "修订"}], max_tokens=8192, require_complete=True)
+        self.assertEqual(result, "完整正文。")
+        self.assertEqual(self.request_body, {"model": "test-model", "messages": [{"role": "user", "content": "修订"}], "temperature": 0.7, "max_tokens": 8192})
+
+    def test_strict_completion_rejects_truncated_filtered_or_unconfirmed_output(self):
+        for reason in ("length", "content_filter", "tool_calls", None, "unknown"):
+            with self.subTest(reason=reason), self.response(reason):
+                with self.assertRaises(RuntimeError) as caught:
+                    self.provider.complete([{"role": "user", "content": "修订"}], require_complete=True)
+                self.assertNotIn("https://", str(caught.exception))
+
+    def test_legacy_completion_remains_compatible_without_new_argument(self):
+        with self.response(None):
+            self.assertEqual(self.provider.complete([{"role": "user", "content": "检查"}]), "完整正文。")
+
+
 class LLMProviderStreamTest(unittest.TestCase):
     def setUp(self):
         settings = SimpleNamespace(

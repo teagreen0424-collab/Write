@@ -455,6 +455,7 @@ def run_autopilot(novel_id: str, session_factory=SessionLocal, reserved_state: A
                 result = review_story(
                     db, novel_id, full, directive=directive, chapter_seq=seq,
                     outline_node_id=node_id, provider=llm,
+                    word_limits=state.word_limits,
                 )
                 review = result.model_dump()
                 issues = review.get("issues", [])

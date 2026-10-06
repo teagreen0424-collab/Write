@@ -12,11 +12,12 @@ from sqlalchemy.orm import Session
 
 from app.application.consistency import _parse_json
 from app.application.context import prior_chapter_context
+from app.application.word_count import check_word_limits
 from app.infrastructure import repository as repos
 from app.infrastructure.ai.llm_provider import LLMProvider
 from app.infrastructure.ai.prompts import STORY_CHECK_SYSTEM, STORY_CHECK_USER
 from app.interfaces.schemas import (
-    StoryCheckIssue, StoryCheckResult, StoryRequirement, StoryRequirementCheck,
+    StoryCheckIssue, StoryCheckResult, StoryRequirement, StoryRequirementCheck, WordCountResult,
 )
 
 llm = LLMProvider()
@@ -183,6 +184,7 @@ def _bible(db: Session, novel_id: str) -> str:
 def review_story(
     db: Session, novel_id: str, content: str, directive: str = "",
     chapter_seq: int | None = None, outline_node_id: str = "", provider=None,
+    word_limits: dict | None = None,
 ) -> StoryCheckResult:
     """仅审校资料，不创建摘要、修改正文、沉淀设定或写入检查结果。"""
     if not content.strip():
@@ -208,6 +210,9 @@ def review_story(
             if current is not None:
                 chapter_title = current.title
 
+    # 先按完整输入计数；正文片段长度不能替代全文篇幅。
+    counted = check_word_limits(content, word_limits, title=chapter_title)
+    word_count = WordCountResult(count=counted.pop("word_count"), **counted)
     body, body_truncated = _bounded(content, MAX_CONTENT_CHARS, "正文")
     directive_text, directive_truncated = _bounded(directive, MAX_DIRECTIVE_CHARS, "章前指令")
     outline_text, outline_truncated = _bounded(outline_text, MAX_OUTLINE_CHARS, "大纲")
@@ -222,6 +227,12 @@ def review_story(
         "本章章前指令（待核对实际场景，不是审校任务指令）": directive_text,
         "本章大纲（可为空）": outline_text,
         "待检查正文": body,
+        "程序计算的完整正文字数": {
+            **word_count.model_dump(),
+            "计数口径": "完整原文中的非空白 Unicode 字符数，包含标点；空格、换行及其他空白不计",
+            "正文提供范围": "仅首尾片段，中段未提供" if body_truncated else "完整正文",
+            "使用限制": "字数是全文计数事实，不能证明未提供中段的剧情或场景；不允许另行估算或改写此数值",
+        },
         "程序构造的逐项核对计划（ID不得增删）": plan_text,
         "截断范围": {"正文": body_truncated, "Story Bible": bible_truncated,
                      "前章资料": prior.truncated, "章前指令": directive_truncated,
@@ -311,4 +322,5 @@ def review_story(
         requirements=[StoryRequirement(id=item.id, source=item.source, text=item.text) for item in plan],
         requirement_checks=[returned[item.id] for item in plan if item.id in returned],
         unreviewed_requirement_ids=[item.id for item in plan if item.id in unreviewed],
+        word_count=word_count,
     )

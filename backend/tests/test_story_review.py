@@ -93,6 +93,32 @@ class StoryReviewTest(unittest.TestCase):
             for table in models.Base.metadata.sorted_tables
         }
 
+    def test_full_count_and_explicit_limits_are_supplied_without_model_estimation(self):
+        body = "字" * 2272 + " \n\t\u0085"
+        before = self.snapshot()
+        with patch.object(story_review.llm, "complete", return_value=self.satisfied_response(content=body)) as complete:
+            response = self.client.post(self.path, json={"content": body, "word_limits": {"min_words": 1200, "max_words": 1600}})
+        self.assertEqual(response.status_code, 200, response.text)
+        facts = self.materials(complete)["程序计算的完整正文字数"]
+        self.assertEqual((facts["count"], facts["min_words"], facts["max_words"], facts["within_limits"]), (2272, 1200, 1600, False))
+        self.assertIn("包含标点", facts["计数口径"])
+        self.assertEqual(facts["正文提供范围"], "完整正文")
+        self.assertEqual(response.json()["word_count"]["count"], 2272)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_truncated_review_uses_full_count_without_claiming_unseen_story(self):
+        body = "字" * (story_review.MAX_CONTENT_CHARS + 1200)
+        with patch.object(story_review.llm, "complete", return_value=self.satisfied_response(content=body)) as complete:
+            result = story_review.review_story(self.db, self.novel.id, body, chapter_seq=2, outline_node_id=self.outline.id)
+        facts = self.materials(complete)["程序计算的完整正文字数"]
+        self.assertEqual(facts["count"], len(body))
+        self.assertIsNone(facts["within_limits"])
+        self.assertIn("中段未提供", facts["正文提供范围"])
+        self.assertIn("不能证明未提供中段", facts["使用限制"])
+        self.assertTrue(result.truncated)
+        self.assertFalse(result.review_complete)
+        self.assertEqual(result.word_count.count, len(body))
+
     def test_unsaved_body_and_directive_are_reviewed_once_without_any_write(self):
         before = self.snapshot()
         sql = []

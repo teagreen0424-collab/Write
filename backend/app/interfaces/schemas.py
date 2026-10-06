@@ -1,5 +1,5 @@
 """接口层：请求/响应模型（Pydantic）。"""
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -380,6 +380,31 @@ class StoryCheckResult(BaseModel):
     requirement_checks: list[StoryRequirementCheck] = Field(default_factory=list)
     unreviewed_requirement_ids: list[str] = Field(default_factory=list)
     word_count: Optional[WordCountResult] = None
+
+
+class ChapterRepairPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    instructions: str = Field(default="", max_length=4000, strict=True)
+    word_limits: Optional[WordCountLimits] = None
+    issues: list[StoryCheckIssue] = Field(default_factory=list, max_length=6)
+    unreviewed_requirement_ids: list[Annotated[str, Field(min_length=1, max_length=16, strict=True)]] = Field(default_factory=list, max_length=200)
+
+
+class ChapterRepairPreview(BaseModel):
+    chapter_id: str
+    base_fingerprint: str
+    original_content: str
+    content: str
+    title: str
+    directive: str
+    original_word_count: WordCountResult
+    word_count: WordCountResult
+
+
+class ChapterRepairApplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    base_fingerprint: str = Field(..., pattern=r"^[0-9a-f]{64}$", strict=True)
+    content: str = Field(..., min_length=1, max_length=40000, strict=True)
 
 
 class ContinueChapterRequest(BaseModel):

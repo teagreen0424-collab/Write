@@ -8,6 +8,7 @@ from app.application import settle as settle_uc
 from app.application import writing as writing_uc
 from app.application import outline_check as outline_check_uc
 from app.application import story_review as story_review_uc
+from app.application import chapter_repair as chapter_repair_uc
 from app.application.word_count import check_word_limits
 from app.infrastructure.db import SessionLocal, get_db
 from app.infrastructure.repository import ChapterRepo, ChapterRevisionRepo
@@ -125,6 +126,7 @@ def check_chapter_story(
             chapter.content if payload.content is None else payload.content,
             directive=chapter.directive if payload.directive is None else payload.directive,
             chapter_seq=chapter.seq, outline_node_id=chapter.outline_node_id,
+            word_limits=payload.word_limits.model_dump() if payload.word_limits is not None else None,
         )
         counted = check_word_limits(
             chapter.content if payload.content is None else payload.content,
@@ -138,6 +140,24 @@ def check_chapter_story(
         )
     result.chapter_title = chapter.title
     return result
+
+
+@router.post("/{chapter_id}/repair-preview", response_model=schemas.ChapterRepairPreview)
+def preview_chapter_repair(
+    novel_id: str, chapter_id: str, payload: schemas.ChapterRepairPreviewRequest,
+    db: Session = Depends(get_db),
+):
+    """基于已保存全文生成整章修订预览，不改正文、版本或设定。"""
+    return chapter_repair_uc.preview_repair(db, novel_id, chapter_id, payload)
+
+
+@router.post("/{chapter_id}/repair-apply", response_model=schemas.ChapterRead)
+def apply_chapter_repair(
+    novel_id: str, chapter_id: str, payload: schemas.ChapterRepairApplyRequest,
+    db: Session = Depends(get_db),
+):
+    """作者确认后条件应用修订稿，保留旧版；过期预览拒绝覆盖。"""
+    return chapter_repair_uc.apply_repair(db, novel_id, chapter_id, payload)
 
 
 @router.post("/{chapter_id}/continue")

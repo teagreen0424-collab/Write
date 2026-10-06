@@ -4,6 +4,8 @@ import type {
   AutopilotEvent,
   AutopilotTaskSnapshot,
   Chapter,
+  ChapterRepairPreview,
+  ChapterRepairRequest,
   ChatAction,
   ChapterRevision,
   ChapterRevisionMeta,
@@ -315,6 +317,14 @@ export const api = {
     request<StoryCheckResult>(`${BASE}/novels/${novelId}/chapters/${chapterId}/story-check`, {
       method: 'POST',
       body: JSON.stringify({ content, directive, ...(wordLimits === undefined ? {} : { word_limits: wordLimits }) }),
+    }),
+  previewChapterRepair: (novelId: string, chapterId: string, data: ChapterRepairRequest) =>
+    request<ChapterRepairPreview>(`${BASE}/novels/${novelId}/chapters/${chapterId}/repair-preview`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+  applyChapterRepair: (novelId: string, chapterId: string, baseFingerprint: string, content: string) =>
+    request<Chapter>(`${BASE}/novels/${novelId}/chapters/${chapterId}/repair-apply`, {
+      method: 'POST', body: JSON.stringify({ base_fingerprint: baseFingerprint, content }),
     }),
 
   // 质量治理（阶段七）
