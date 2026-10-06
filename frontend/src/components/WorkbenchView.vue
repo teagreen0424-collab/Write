@@ -38,6 +38,9 @@ const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'foresh
 const focusTarget = ref<{ type: EntityType; id: string } | null>(null)
 const refreshKey = ref(0)
 const writingDirty = ref(false)
+const showNavigationConfirm = ref(false)
+const navigationTarget = ref('')
+const pendingNavigation = ref<(() => void) | null>(null)
 
 const showCreate = ref(false)
 const createForm = ref({ title: '', genre: '', summary: '' })
@@ -47,7 +50,7 @@ const novelOptions = computed(() => novels.value.map((n) => ({ label: n.title, v
 async function loadNovels() {
   try {
     novels.value = await api.listNovels()
-    if (props.initialNovelId && novels.value.some((n) => n.id === props.initialNovelId)) {
+    if (!novelId.value && props.initialNovelId && novels.value.some((n) => n.id === props.initialNovelId)) {
       novelId.value = props.initialNovelId
     } else if (!novelId.value && novels.value.length) {
       novelId.value = novels.value[0].id
@@ -71,7 +74,7 @@ async function submitCreate() {
     const novel = await api.createNovel(createForm.value)
     showCreate.value = false
     await loadNovels()
-    novelId.value = novel.id
+    changeNovel(novel.id)
     message.success('已创建作品')
   } catch (e) {
     message.error((e as Error).message)
@@ -83,17 +86,40 @@ function onGraphEdit(payload: { type: EntityType; id: string }) {
   activeTab.value = 'settings'
 }
 
+function navigateSafely(target: string, navigate: () => void) {
+  if (activeTab.value === 'writing' && writingDirty.value) {
+    navigationTarget.value = target
+    pendingNavigation.value = navigate
+    showNavigationConfirm.value = true
+  } else {
+    navigate()
+  }
+}
+
+function cancelNavigation() {
+  showNavigationConfirm.value = false
+  pendingNavigation.value = null
+}
+
+function confirmNavigation() {
+  const navigate = pendingNavigation.value
+  cancelNavigation()
+  navigate?.()
+}
+
+function changeNovel(value: string | null) {
+  if (value === novelId.value) return
+  navigateSafely('切换作品', () => { novelId.value = value })
+}
+
+function returnToChat() {
+  navigateSafely('返回对话', () => emit('back'))
+}
+
 function changeTab(value: string) {
   const next = value as typeof activeTab.value
-  if (
-    activeTab.value === 'writing' &&
-    next !== 'writing' &&
-    writingDirty.value &&
-    !window.confirm('当前章节有未保存修改，确定离开写作页吗？')
-  ) {
-    return
-  }
-  activeTab.value = next
+  if (next === activeTab.value) return
+  navigateSafely('离开写作页', () => { activeTab.value = next })
 }
 
 onMounted(loadNovels)
@@ -104,13 +130,14 @@ onMounted(loadNovels)
     <header class="header">
       <div class="top-row">
         <div class="left">
-          <n-button size="small" quaternary @click="emit('back')">← 返回对话</n-button>
+          <n-button size="small" quaternary @click="returnToChat">← 返回对话</n-button>
           <span class="brand">灵墨 Lingmo</span>
         </div>
         <div class="novel-bar">
           <n-select
-            v-model:value="novelId"
+            :value="novelId"
             :options="novelOptions"
+            @update:value="changeNovel"
             placeholder="选择作品"
             style="width: 260px"
           />
@@ -155,6 +182,22 @@ onMounted(loadNovels)
       />
       <BookDeliveryPanel v-if="activeTab === 'delivery'" :novel-id="novelId ?? ''" />
     </main>
+
+    <n-modal
+      :show="showNavigationConfirm"
+      preset="card"
+      title="放弃未保存修改？"
+      style="width: min(480px, calc(100vw - 32px))"
+      @update:show="cancelNavigation"
+    >
+      <p>当前章节有未保存修改，确定放弃并{{ navigationTarget }}吗？</p>
+      <template #footer>
+        <div class="modal-actions">
+          <n-button @click="cancelNavigation">继续编辑</n-button>
+          <n-button type="warning" @click="confirmNavigation">放弃并继续</n-button>
+        </div>
+      </template>
+    </n-modal>
 
     <n-modal v-model:show="showCreate" preset="card" title="新建作品" style="width: 480px">
       <n-form label-placement="top">

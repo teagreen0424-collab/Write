@@ -66,6 +66,12 @@ const previewFullContent = ref('')
 
 const showSettle = ref(false)
 const showSummary = ref(false)
+const summaryDraft = ref('')
+const savedSummary = ref('')
+const summarySaving = ref(false)
+const showDiscard = ref(false)
+const discardPrompt = ref('')
+let resolveDiscard: ((confirmed: boolean) => void) | null = null
 const showDelete = ref(false)
 const showWriteNext = ref(false)
 const showRevisions = ref(false)
@@ -116,6 +122,8 @@ const isDirty = computed(
       directive.value !== savedSnapshot.value.directive ||
       content.value !== savedSnapshot.value.content),
 )
+const isSummaryDirty = computed(() => showSummary.value && summaryDraft.value !== savedSummary.value)
+const hasUnsavedChanges = computed(() => isDirty.value || isSummaryDirty.value)
 
 function rememberSaved() {
   savedSnapshot.value = {
@@ -125,8 +133,22 @@ function rememberSaved() {
   }
 }
 
-function confirmDiscard(): boolean {
-  return !isDirty.value || window.confirm('当前章节有未保存修改，确定放弃并离开吗？')
+function askDiscard(prompt: string): Promise<boolean> {
+  if (resolveDiscard) return Promise.resolve(false)
+  discardPrompt.value = prompt
+  showDiscard.value = true
+  return new Promise((resolve) => { resolveDiscard = resolve })
+}
+
+function finishDiscard(confirmed: boolean) {
+  showDiscard.value = false
+  const resolve = resolveDiscard
+  resolveDiscard = null
+  resolve?.(confirmed)
+}
+
+async function confirmDiscard(): Promise<boolean> {
+  return !hasUnsavedChanges.value || await askDiscard('当前章节有未保存修改，确定放弃并离开吗？')
 }
 
 function requireSaved(action: string): boolean {
@@ -136,7 +158,7 @@ function requireSaved(action: string): boolean {
 }
 
 function handleBeforeUnload(event: BeforeUnloadEvent) {
-  if (!isDirty.value) return
+  if (!hasUnsavedChanges.value) return
   event.preventDefault()
   event.returnValue = ''
 }
@@ -186,8 +208,9 @@ function clearMarks() {
   outlineCheckResult.value = null
 }
 
-function selectChapter(c: Chapter, force = false) {
-  if (!force && c.id !== selectedId.value && !confirmDiscard()) return
+async function selectChapter(c: Chapter, force = false) {
+  if (!force && c.id === selectedId.value) return
+  if (!force && !await confirmDiscard()) return
   if (c.id !== selectedId.value) {
     showRevisions.value = false
     showSummary.value = false
@@ -200,8 +223,8 @@ function selectChapter(c: Chapter, force = false) {
   clearMarks()
 }
 
-function startNew(force = false) {
-  if (!force && !confirmDiscard()) return
+async function startNew(force = false) {
+  if (!force && !await confirmDiscard()) return
   showRevisions.value = false
   showSummary.value = false
   selectedId.value = null
@@ -258,11 +281,11 @@ async function generateChapter(
     {
       onToken: (t) => (streamText.value += t),
       onDone: async () => {
-        streaming.value = false
         await loadChapters()
         const last = chapters.value[chapters.value.length - 1]
         if (last) selectChapter(last, true)
         streamText.value = ''
+        streaming.value = false
         message.success('已生成新章')
       },
       onError: (m) => {
@@ -322,9 +345,9 @@ async function doContinue() {
     {
       onToken: (t) => (streamText.value += t),
       onDone: async () => {
-        streaming.value = false
         await reloadAndReselect()
         streamText.value = ''
+        streaming.value = false
         message.success('已续写')
       },
       onError: (m) => {
@@ -495,6 +518,46 @@ async function saveContent() {
   }
 }
 
+function openSummary() {
+  if (!selectedChapter.value || summarySaving.value || streaming.value) return
+  summaryDraft.value = selectedChapter.value.summary || ''
+  savedSummary.value = summaryDraft.value
+  showSummary.value = true
+}
+
+async function closeSummary() {
+  if (summarySaving.value) return
+  if (isSummaryDirty.value && !await askDiscard('摘要有未保存修改，确定放弃并关闭吗？')) return
+  showSummary.value = false
+}
+
+async function saveSummary() {
+  if (!selectedId.value || summarySaving.value || !isSummaryDirty.value) return
+  const novelId = props.novelId
+  const chapterId = selectedId.value
+  const submittedSummary = summaryDraft.value
+  summarySaving.value = true
+  try {
+    const updated = await api.updateChapter(novelId, chapterId, { summary: submittedSummary })
+    if (props.novelId !== novelId || selectedId.value !== chapterId || !showSummary.value) return
+    const chapter = chapters.value.find((c) => c.id === chapterId)
+    if (chapter) {
+      chapter.summary = updated.summary
+      chapter.updated_at = updated.updated_at
+    }
+    // 只同步摘要，保留编辑区尚未保存的正文、标题和章前指令。
+    summaryDraft.value = updated.summary
+    savedSummary.value = updated.summary
+    message.success('摘要已保存')
+  } catch (e) {
+    if (props.novelId === novelId && selectedId.value === chapterId && showSummary.value) {
+      message.error((e as Error).message)
+    }
+  } finally {
+    summarySaving.value = false
+  }
+}
+
 async function deleteChapter() {
   if (!selectedId.value || deleting.value || streaming.value) return
   const deletedIndex = chapters.value.findIndex((chapter) => chapter.id === selectedId.value)
@@ -589,11 +652,14 @@ watch(
   { immediate: true },
 )
 
-watch(isDirty, (dirty) => emit('dirty-change', dirty), { immediate: true })
+watch(hasUnsavedChanges, (dirty) => emit('dirty-change', dirty), { immediate: true })
 watch(content, () => { outlineCheckResult.value = null })
 
 onMounted(() => window.addEventListener('beforeunload', handleBeforeUnload))
-onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnload))
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+  finishDiscard(false)
+})
 </script>
 
 <template>
@@ -674,7 +740,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
           <n-button type="success" :disabled="!selectedId" @click="doSettle">定稿沉淀</n-button>
         </div>
         <div class="btn-row version-actions">
-          <n-button :disabled="!selectedId" @click="showSummary = true">章节摘要</n-button>
+          <n-button :disabled="!selectedId || summarySaving || streaming" @click="openSummary">章节摘要</n-button>
           <n-button :disabled="!selectedId" @click="openRevisionHistory">版本历史</n-button>
           <span class="cost-hint">覆盖正文前会自动保存旧版本</span>
         </div>
@@ -881,23 +947,46 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
     </n-modal>
 
     <n-modal
-      v-model:show="showSummary"
+      :show="showSummary"
+      :closable="!summarySaving"
+      :mask-closable="!summarySaving"
+      :close-on-esc="!summarySaving"
+      @update:show="closeSummary"
       preset="card"
       :title="selectedChapter ? `章节摘要 · ${chapterLabel(selectedChapter)}` : '章节摘要'"
       style="width: min(560px, calc(100vw - 32px))"
     >
-      <template v-if="selectedChapter?.summary?.trim()">
-        <p class="chapter-summary">{{ selectedChapter.summary }}</p>
-        <p class="summary-hint">这是已保存的摘要；正文修改后请重新核对。</p>
-        <p v-if="isDirty" class="summary-hint">当前章节有未保存修改，摘要尚未反映这些修改。</p>
-      </template>
-      <n-empty v-else description="暂无章节摘要。完成“定稿沉淀”后会生成摘要。" />
+      <n-input
+        v-model:value="summaryDraft"
+        type="textarea"
+        :autosize="{ minRows: 4, maxRows: 12 }"
+        :disabled="summarySaving"
+        placeholder="填写或校正本章摘要"
+      />
+      <p v-if="!savedSummary.trim()" class="summary-hint">暂无已保存摘要，可在这里填写，也可在定稿沉淀后校正。</p>
+      <p class="summary-hint">摘要会用于后续写作。这里只保存摘要，定稿仍需点击“定稿沉淀”。</p>
+      <p v-if="isDirty" class="summary-hint">当前章节有未保存修改，保存摘要不会保存这些修改。</p>
+      <p v-if="isSummaryDirty" class="summary-hint">摘要有未保存修改。</p>
       <template #footer>
         <div class="modal-actions">
-          <n-button @click="showSummary = false">关闭</n-button>
+          <n-button :disabled="summarySaving" @click="closeSummary">关闭</n-button>
+          <n-button type="primary" :disabled="!isSummaryDirty" :loading="summarySaving" @click="saveSummary">保存摘要</n-button>
         </div>
       </template>
     </n-modal>
+
+    <n-modal
+      :show="showDiscard"
+      preset="dialog"
+      type="warning"
+      title="未保存修改"
+      :content="discardPrompt"
+      positive-text="放弃修改"
+      negative-text="继续编辑"
+      @positive-click="finishDiscard(true)"
+      @negative-click="finishDiscard(false)"
+      @update:show="finishDiscard(false)"
+    />
 
     <n-modal v-model:show="showSettle" preset="card" title="设定变更建议" style="width: 560px">
       <p class="settle-summary">摘要：{{ settleSummary }}</p>
@@ -1224,13 +1313,6 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 }
 .settle-summary {
   color: #666;
-}
-.chapter-summary {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  line-height: 1.7;
-  max-height: 360px;
-  overflow: auto;
 }
 .summary-hint {
   color: #888;

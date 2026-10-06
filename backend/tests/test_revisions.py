@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -403,6 +403,123 @@ class WritePathRevisionTest(RevisionTestBase):
         self.assertEqual(len(chapters), 1)
         self.assertEqual(chapters[0].outline_node_id, node.id)
         self.assertEqual(self._revision_count(chapters[0].id), 0)
+
+
+# ================= 摘要独立保存与续章上下文 =================
+class SummarySaveContractTest(RevisionTestBase):
+    def _persisted_rows(self, summary_chapter_id=None):
+        """摘要更新只允许目标章的摘要、更新时间变化，其余持久化内容逐字段比较。"""
+        self.db.expire_all()
+        stored = {}
+        for table in models.Base.metadata.sorted_tables:
+            rows = []
+            for row in self.db.execute(select(table)).mappings():
+                values = dict(row)
+                if table.name == "chapter" and values["id"] == summary_chapter_id:
+                    values.pop("summary")
+                    values.pop("updated_at")
+                rows.append(values)
+            stored[table.name] = sorted(rows, key=lambda row: row["id"])
+        return stored
+
+    def test_put_summary_only_preserves_other_persisted_fields_and_can_clear(self):
+        outline = repos.OutlineRepo(self.db).create(
+            self.novel_id, title="再试一次", level="chapter", summary="尝试瞬移"
+        )
+        repos.CharacterRepo(self.db).create(self.novel_id, name="吴迪", known_info="能力原因未明")
+        for seq, status in enumerate(("draft", "finalized"), start=1):
+            with self.subTest(status=status):
+                chapter = self._chapter(
+                    seq=seq, status=status, summary="旧摘要", directive="保留原因未明",
+                    outline_node_id=outline.id, tension_score=6.5, drift_score=0.2,
+                )
+                revisions_uc.update_chapter_with_revision(
+                    self.db, self.novel_id, chapter.id,
+                    {"content": "近距离成功，四米尝试未成，原因未明。"},
+                    revisions_uc.SOURCE_MANUAL_SAVE,
+                )
+                self._add_memory(chapter.id, text="正文记忆不随摘要校正改写")
+                repos.ForeshadowingRepo(self.db).create(
+                    self.novel_id, content="触发原因未明", planted_chapter_id=chapter.id
+                )
+                before = self._persisted_rows(chapter.id)
+                endpoint = f"/api/v1/novels/{self.novel_id}/chapters/{chapter.id}"
+
+                with (
+                    patch("app.infrastructure.ai.llm_provider.LLMProvider.complete") as complete,
+                    patch("app.infrastructure.ai.llm_provider.LLMProvider.stream_complete") as stream,
+                    patch("app.interfaces.api.v1.chapters.settle_uc.settle_chapter") as settle,
+                ):
+                    for summary in ("四米的几次尝试未成，原因未明。", ""):
+                        response = client.put(endpoint, json={"summary": summary})
+
+                        self.assertEqual(response.status_code, 200, response.text)
+                        saved = client.get(endpoint)
+                        self.assertEqual(saved.status_code, 200, saved.text)
+                        self.assertEqual(saved.json()["summary"], summary)
+                        self.assertEqual(self._persisted_rows(chapter.id), before)
+                    complete.assert_not_called()
+                    stream.assert_not_called()
+                    settle.assert_not_called()
+
+    def test_put_summary_cannot_write_chapter_from_another_novel(self):
+        chapter = self._chapter(summary="原作品摘要")
+        other_novel_id = self._new_novel()
+        before = self._persisted_rows()
+
+        response = client.put(
+            f"/api/v1/novels/{other_novel_id}/chapters/{chapter.id}",
+            json={"summary": "不该写入的摘要"},
+        )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(self._persisted_rows(), before)
+
+    def test_api_saved_summaries_are_sent_to_model_when_writing_third_chapter(self):
+        first = self._chapter(status="finalized", summary="第一章旧摘要已作废")
+        second = self._chapter(
+            seq=2, title="再试一次", content="吴迪应下赵鹏介绍的工作。",
+            status="draft", summary="第二章旧摘要已作废",
+        )
+        summaries = {
+            first.id: "吴迪失衡时意外瞬移，后来困在树枝上。",
+            second.id: "吴迪回屋，四米尝试未成，原因未明，并应下赵鹏介绍的工作。",
+        }
+        for chapter_id, summary in summaries.items():
+            saved = client.put(
+                f"/api/v1/novels/{self.novel_id}/chapters/{chapter_id}",
+                json={"summary": summary},
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
+
+        with (
+            patch("app.interfaces.api.v1.chapters.SessionLocal", side_effect=Session),
+            patch("app.application.context._semantic_recall", return_value=""),
+            patch(
+                "app.application.writing.llm.stream_complete",
+                return_value=iter(["吴迪去做第一单跑腿。"]),
+            ) as stream,
+        ):
+            response = client.post(
+                f"/api/v1/novels/{self.novel_id}/chapters/write",
+                json={"previous_chapter_id": second.id, "title": "跑腿第一单"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('"type": "done"', response.text)
+        stream.assert_called_once()
+        prompt = stream.call_args.args[0][1]["content"]
+        for summary in summaries.values():
+            self.assertIn(summary, prompt)
+        self.assertNotIn("第一章旧摘要已作废", prompt)
+        self.assertNotIn("第二章旧摘要已作废", prompt)
+        self.assertIn("吴迪应下赵鹏介绍的工作。", prompt)
+        chapters = repos.ChapterRepo(self.db).list(self.novel_id)
+        self.assertEqual(len(chapters), 3)
+        self.assertEqual(chapters[-1].content, "吴迪去做第一单跑腿。")
+        self.assertEqual(chapters[-1].status, "draft")
+        self.assertEqual(self._revision_count(first.id), 0)
+        self.assertEqual(self._revision_count(second.id), 0)
 
 
 # ================= 3. 版本 API =================
