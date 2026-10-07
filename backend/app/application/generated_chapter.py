@@ -7,7 +7,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.application.chapter_creation import validate_outline_binding
-from app.application.revisions import _begin_chapter_write, _freeze_chapter, _require_clean_session
+from app.application.revisions import AUTHOR_FIELDS, _begin_chapter_write, _freeze_chapter, _require_clean_session
 from app.infrastructure import models
 from app.infrastructure.repository import ChapterRepo
 
@@ -26,6 +26,33 @@ class GenerationSource:
     latest_id: str
     latest_seq: int | None
     next_seq: int
+
+
+@dataclass(frozen=True)
+class PreviousChapterSource:
+    """实际用于提示的前章作者原值；不包括摘要、评分和其他章节。"""
+    novel_id: str
+    chapter_id: str
+    title: str | None
+    content: str | None
+    directive: str | None
+
+
+def capture_previous_source(previous) -> PreviousChapterSource:
+    return PreviousChapterSource(previous.novel_id, previous.id,
+        **{field: getattr(previous, field) for field in AUTHOR_FIELDS})
+
+
+def _check_previous_source(db: Session, novel_id: str, source: PreviousChapterSource | None):
+    if source is None:
+        return
+    chapter = models.Chapter.__table__
+    current = db.execute(select(*(chapter.c[field] for field in AUTHOR_FIELDS)).where(
+        chapter.c.id == source.chapter_id, chapter.c.novel_id == novel_id,
+    )).first()
+    if (source.novel_id != novel_id or current is None
+            or tuple(current) != tuple(getattr(source, field) for field in AUTHOR_FIELDS)):
+        raise GeneratedChapterConflict("生成期间实际前章的标题、正文或章前指令已改变或来源已不存在；本次候选未保存，请核对前章后重新生成")
 
 
 def require_generation_session(db: Session):
@@ -85,6 +112,7 @@ def existing_chat_chapter(db: Session, novel_id: str, message_id: str) -> dict |
 
 def save_generated_chapter(
     db: Session, novel_id: str, source: GenerationSource, fields: dict, *, action_message_id: str = "",
+    previous_source: PreviousChapterSource | None = None,
 ) -> dict:
     # try之外拒绝调用方DML；外层生成入口也不能rollback此拒绝。
     require_generation_session(db)
@@ -98,6 +126,7 @@ def save_generated_chapter(
         current = capture_source(db, novel_id)
         if current != source or source.novel_id != novel_id or fields.get("seq") != source.next_seq:
             raise GeneratedChapterConflict()
+        _check_previous_source(db, novel_id, previous_source)
         try:
             validate_outline_binding(db, novel_id, fields.get("outline_node_id"))
         except HTTPException:

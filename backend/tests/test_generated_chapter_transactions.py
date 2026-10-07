@@ -71,6 +71,7 @@ class GeneratedChapterTransactionTest(unittest.TestCase):
     def assert_conflict(self, values):
         self.assertEqual(values[0], {"type": "token", "content": self.body})
         error = values[-1]
+        self.assertEqual(error["type"], "error", values)
         self.assertEqual((error["type"], error["code"], error["status"], error["saved"]),
                          ("error", "chapter_write_conflict", 409, False))
         self.assertIn("候选", error["hint"])
@@ -197,14 +198,19 @@ class GeneratedChapterTransactionTest(unittest.TestCase):
         self.assertEqual(next(row for row in rows if row["id"] == "prior")["content"], "原前章事实")
         self.assertEqual(next(row for row in rows if row["id"] == "foreign-chapter")["content"], "他作不动")
 
-    def test_prior_author_and_metadata_changes_alone_are_outside_latest_identity_contract(self):
+    def test_previous_author_change_conflicts_without_overriding_saved_author(self):
         def mutate():
             self.assertEqual(self.client.put(self.base + "/prior", json={"title": "新前章标题", "content": "新前章事实",
                 "directive": "新作者指令", "summary": "作者摘要"}).status_code, 200)
         values = self.paused_generation(self.ordinary, mutate)
-        self.assertEqual(values[-1]["type"], "done", values)
-        self.assertEqual(next(row for row in self.rows()["chapter"] if row["id"] == "prior")["content"], "新前章事实")
-        # This stage protects latest identity/seq, not a Story Bible or author-field snapshot during generation.
+        self.assert_conflict(values)
+        rows = self.rows()
+        current = next(row for row in rows["chapter"] if row["id"] == "prior")
+        self.assertEqual((current["title"], current["content"], current["directive"]), ("新前章标题", "新前章事实", "新作者指令"))
+        self.assertEqual(len(rows["chapter_revision"]), 1)
+        self.assertEqual(rows["chapter_revision"][0]["content"], "原前章事实")
+        self.assertEqual(len([row for row in rows["chapter"] if row["novel_id"] == "work"]), 1)
+        self.assertEqual(next(row for row in rows["chapter"] if row["id"] == "foreign-chapter")["content"], "他作不动")
 
     def test_same_chat_source_replay_after_newer_chapter_is_readonly_zero_model(self):
         with patch.object(writing.llm, "stream_complete", return_value=iter([self.body])):

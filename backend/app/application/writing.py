@@ -140,14 +140,15 @@ def write_chapter(
                 raise ValueError("只能从最新章节生成下一章，请先选择章节列表中的最后一章")
             if previous.id not in {chapter.id for chapter in chapters}:
                 raise ValueError("所选上一章不在本章大纲之前，请先核对章节与大纲顺序")
-        if previous is not None:
+        previous_source = generated_chapter.capture_previous_source(previous) if previous is not None else None
+        if previous_source is not None:
             system_prompt = NEXT_CHAPTER_SYSTEM
             user_prompt = NEXT_CHAPTER_USER.format(
                 context=context,
                 recent_history=_recent_history(chapters, previous),
-                previous_title=previous.title or f"第{previous.seq}章",
+                previous_title=previous_source.title or f"第{previous.seq}章",
                 previous_summary=(previous.summary or "未沉淀，以正文为准"),
-                previous_content=_chapter_context(previous.content),
+                previous_content=_chapter_context(previous_source.content),
                 outline_contract=outline_contract,
             )
         messages = [
@@ -169,6 +170,7 @@ def write_chapter(
         )
         chapter = generated_chapter.save_generated_chapter(
             db, novel_id, source, data, action_message_id=action_message_id,
+            previous_source=previous_source,
         )
         yield sse({"type": "done", "chapter": _chapter_dict(chapter)})
     except SQLAlchemyError:
