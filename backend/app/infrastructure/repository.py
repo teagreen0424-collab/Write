@@ -645,15 +645,26 @@ class ConversationRepo:
         self.db.delete(obj)
         self.db.commit()
 
-    def add_message(self, conversation_id: str, role: str, content: str, meta=None):
+    def add_message(
+        self, conversation_id: str, role: str, content: str, meta=None,
+        *, message_id: str | None = None, commit: bool = True,
+    ):
+        """共享写入保持原调用方提交语义；提交后返回同一身份，不再refresh。"""
         conv = self.get(conversation_id)
         obj = models.Message(
             conversation_id=conversation_id, role=role, content=content, meta=meta
         )
+        if message_id is not None:
+            obj.id = message_id
         self.db.add(obj)
         conv.updated_at = models._now()
+        self.db.flush()
+        if not commit:
+            return obj
+        frozen = {column.key: getattr(obj, column.key) for column in models.Message.__table__.columns}
         self.db.commit()
-        self.db.refresh(obj)
+        for key, value in frozen.items():
+            set_committed_value(obj, key, value)
         return obj
 
     def list_messages(self, conversation_id: str):

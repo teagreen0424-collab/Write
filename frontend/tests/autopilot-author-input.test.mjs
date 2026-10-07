@@ -266,6 +266,9 @@ test('旧实例网络未知或明确拒绝跨remount完成只更新共享事实�
 test('任务结束后的晚200不清构思或冒称本页继续注入，空scope和空白稿不发送', async () => {
   const response = deferred(), context = await panel({ api: { injectAutopilot: async () => response.promise } })
   context.vm.directive.value = '任务结束仍保留的构思'; const saving = context.vm.inject()
+  // 先等真实 SHA/来源核对完成并进入 API，才制造“已提交后任务结束”的晚回应。
+  for (let attempt = 0; injectionRequests(context).length === 0 && attempt < 200; attempt += 1) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.equal(injectionRequests(context).length, 1)
   context.vm.applySnapshot(snapshot('novel-a', { status: 'completed', running: false, event_id: 3 }))
   await flush(); response.resolve(receipt(...injectionRequests(context)[0].args)); await saving
   assert.equal(context.vm.directive.value, '任务结束仍保留的构思'); assert.equal(context.messages.length, 0)

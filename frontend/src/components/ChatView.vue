@@ -14,6 +14,7 @@ import { api } from '../api'
 import type { Conversation, Novel } from '../types'
 import ConversationSidebar from './ConversationSidebar.vue'
 import ChatWindow from './ChatWindow.vue'
+import { removeChatSubmissions } from '../utils/chatSubmission'
 
 const emit = defineEmits<{
   (e: 'enter-workbench', novelId: string): void
@@ -140,12 +141,13 @@ async function submitMove() {
 function removeConversation(c: Conversation) {
   dialog.warning({
     title: '删除会话',
-    content: `确定删除会话「${c.title || '新对话'}」及其全部消息吗？`,
+    content: `确定删除会话「${c.title || '新对话'}」及其全部消息吗？该会话在本页保留的输入和原发送稿也会移除，请先复制需要保留的内容。`,
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
       try {
         await api.deleteConversation(c.id)
+        removeChatSubmissions([c.id])
         if (!alive) return
         loadId += 1
         conversations.value = conversations.value.filter((item) => item.id !== c.id)
@@ -185,8 +187,8 @@ function enterWorkbench(novelId: string) {
 function leaveChat(navigate: () => void) {
   if (!chatDirty.value) return navigate()
   dialog.warning({
-    title: '离开对话？', content: '有尚未发送的对话输入。确定放弃输入并离开吗？',
-    positiveText: '放弃并继续', negativeText: '继续编辑', onPositiveClick: navigate,
+    title: '离开对话？', content: '有未保存输入、待核对原稿或未处理回复。当前页面内暂保留，完整刷新或关闭前请先复制；确定继续离开吗？',
+    positiveText: '保留并继续', negativeText: '继续编辑', onPositiveClick: navigate,
   })
 }
 
@@ -194,13 +196,15 @@ function removeNovel(novel: Novel) {
   if (deletingNovel.value) return
   dialog.warning({
     title: '删除作品',
-    content: `确定删除作品「${novel.title}」及全部设定、大纲、章节、版本和作品会话吗？此操作不可恢复。`,
+    content: `确定删除作品「${novel.title}」及全部设定、大纲、章节、版本和作品会话吗？这些会话在本页保留的输入和原发送稿也会移除，请先复制。此操作不可恢复。`,
     positiveText: '删除作品', negativeText: '取消',
     onPositiveClick: async () => {
       if (deletingNovel.value) return false
       deletingNovel.value = true
+      const removedConversationIds = conversations.value.filter(item => item.novel_id === novel.id).map(item => item.id)
       try {
         await api.deleteNovel(novel.id)
+        removeChatSubmissions(removedConversationIds, novel.id)
         if (!alive) return
         loadId += 1
         novels.value = novels.value.filter((item) => item.id !== novel.id)

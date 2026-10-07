@@ -733,6 +733,7 @@ class ConversationRead(ORMBase):
 
 class MessageCreate(BaseModel):
     content: str = Field(..., min_length=1)
+    request_id: Optional[UUID] = None
 
 
 class MessageUpdate(BaseModel):

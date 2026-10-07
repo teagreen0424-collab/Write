@@ -1,6 +1,8 @@
 """全局对话路由（SSE 流式）。"""
+from uuid import UUID
+
 from fastapi import APIRouter, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.application import chat as chat_uc
@@ -90,6 +92,14 @@ def list_messages(conversation_id: str, db: Session = Depends(get_db)):
     return ConversationRepo(db).list_messages(conversation_id)
 
 
+@router.get("/{conversation_id}/messages/requests/{request_id}")
+def get_message_receipt(conversation_id: str, request_id: UUID, db: Session = Depends(get_db)):
+    try:
+        return chat_uc.get_message_receipt(db, conversation_id, request_id)
+    except chat_uc.ChatMessageRequestError as error:
+        return JSONResponse(status_code=error.status_code, content={"detail": error.detail, "code": error.code})
+
+
 @router.patch("/{conversation_id}/messages/{message_id}", response_model=schemas.MessageRead)
 def update_message(
     conversation_id: str, message_id: str, payload: schemas.MessageUpdate, db: Session = Depends(get_db)
@@ -100,7 +110,7 @@ def update_message(
 @router.post("/{conversation_id}/messages")
 def send_message(conversation_id: str, payload: schemas.MessageCreate):
     return _streaming(
-        lambda db: chat_uc.reply_conversation(db, conversation_id, payload.content)
+        lambda db: chat_uc.reply_conversation(db, conversation_id, payload.content, request_id=payload.request_id)
     )
 
 

@@ -427,6 +427,17 @@ export interface OutlineApplyResult {
   node_ids: string[]
 }
 
+/** 仅证明原用户消息已保存，不证明模型回复完成。 */
+export interface ChatSubmissionReceipt {
+  request_id: string
+  conversation_id: string
+  user_message_id: string
+  content: string
+  content_hash: string
+  accepted: true
+  receipt_replayed: boolean
+}
+
 export interface ChatAction {
   action_type: string
   status: string

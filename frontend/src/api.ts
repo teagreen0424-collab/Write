@@ -14,6 +14,7 @@ import type {
   ChapterRevision,
   ChapterRevisionMeta,
   ChatMessage,
+  ChatSubmissionReceipt,
   ClicheResult,
   BookSummary,
   Conflict,
@@ -74,7 +75,9 @@ async function fetchText(url: string): Promise<string> {
 export interface StreamHandlers {
   onToken: (text: string) => void
   onDone: (data: any) => void | Promise<void>
-  onError: (message: string, code?: string) => void | Promise<void>
+  onError: (message: string, code?: string, status?: number) => void | Promise<void>
+  onUserSaved?: (data: unknown) => void | Promise<void>
+  onReceipt?: (data: unknown) => void | Promise<void>
 }
 
 export async function streamSSE(
@@ -83,11 +86,11 @@ export async function streamSSE(
   handlers: StreamHandlers,
 ): Promise<void> {
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
-  let terminal: 'done' | 'error' | null = null
+  let terminal: 'done' | 'error' | 'receipt' | null = null
   let errorReported = false
-  const reportError = async (message: string, code?: string) => {
+  const reportError = async (message: string, code?: string, status?: number) => {
     errorReported = true
-    await handlers.onError(message, code)
+    await handlers.onError(message, code, status)
   }
   const processEvent = async (part: string) => {
     const payload = part.split('\n')
@@ -105,6 +108,11 @@ export async function streamSSE(
     if (obj.type === 'token') {
       if (typeof obj.content !== 'string') throw new Error('生成文本格式无效')
       await handlers.onToken(obj.content)
+    } else if (obj.type === 'user_saved' && handlers.onUserSaved) {
+      await handlers.onUserSaved(obj)
+    } else if (obj.type === 'receipt' && handlers.onReceipt) {
+      terminal = 'receipt'
+      await handlers.onReceipt(obj)
     } else if (obj.type === 'done') {
       terminal = 'done'
       await handlers.onDone(obj)
@@ -112,7 +120,7 @@ export async function streamSSE(
       terminal = 'error'
       const message = typeof obj.detail === 'string' ? obj.detail
         : typeof obj.message === 'string' ? obj.message : '生成失败'
-      await reportError(message || '生成失败', typeof obj.code === 'string' ? obj.code : undefined)
+      await reportError(message || '生成失败', typeof obj.code === 'string' ? obj.code : undefined, Number.isInteger(obj.status) ? obj.status : undefined)
     }
   }
   try {
@@ -123,7 +131,7 @@ export async function streamSSE(
     })
     if (!resp.ok || !resp.body) {
       const err = await resp.json().catch(() => null)
-      await reportError(typeof err?.detail === 'string' ? err.detail : `HTTP ${resp.status}`, err?.code)
+      await reportError(typeof err?.detail === 'string' ? err.detail : `HTTP ${resp.status}`, err?.code, resp.status)
       return
     }
     reader = resp.body.getReader()
@@ -504,6 +512,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  sendMessage: (id: string, content: string, handlers: StreamHandlers) =>
-    streamSSE(`${BASE}/conversations/${id}/messages`, { content }, handlers),
+  getChatSubmission: (id: string, requestId: string) =>
+    request<ChatSubmissionReceipt>(`${BASE}/conversations/${id}/messages/requests/${requestId}`),
+  sendMessage: (id: string, content: string, handlers: StreamHandlers, requestId?: string) =>
+    streamSSE(`${BASE}/conversations/${id}/messages`, { content, ...(requestId ? { request_id: requestId } : {}) }, handlers),
 }

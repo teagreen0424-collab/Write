@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { createHash, randomUUID } from 'node:crypto'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import { effectScope, nextTick, reactive } from 'vue'
 import ts from 'typescript'
@@ -11,10 +12,14 @@ const compile = (source) => ts.transpileModule(source, { compilerOptions: {
 const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 const typesUrl = moduleUrl(compile(await readFile(new URL('../src/types.ts', import.meta.url), 'utf8')))
 const wait = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
-const settle = async () => { for (let i = 0; i < 12; i += 1) { await Promise.resolve(); await nextTick() } }
+const settle = async () => { for (let i = 0; i < 12; i += 1) { await new Promise(resolve => setTimeout(resolve, 1)); await nextTick() } }
 const conversation = (id, novel = `novel-${id}`) => ({ id, novel_id: novel, title: id })
 const chatMessage = (id, content = id) => ({ id: `message-${id}`, conversation_id: id, role: 'assistant', content, meta: null, created_at: '' })
 let sequence = 0
+const chatReceipt = stream => ({ type: 'user_saved', request_id: stream.requestId, user_message_id: stream.requestId,
+  conversation_id: stream.id, content: stream.text, content_hash: createHash('sha256').update(stream.text).digest('hex'), accepted: true, receipt_replayed: false })
+const chatDone = stream => ({ type: 'done', request_id: stream.requestId, conversation_id: stream.id,
+  user_message_id: stream.requestId, assistant_message_id: randomUUID(), title: '实际回复保存夹具' })
 
 async function component(name, props, api, extras = {}) {
   const hooks = {}, events = [], notices = [], listeners = new Map()
@@ -27,6 +32,8 @@ async function component(name, props, api, extras = {}) {
     onMounted: (fn) => { hooks.mount = fn }, onBeforeUnmount: (fn) => { hooks.unmount = fn },
   }
   globalThis.__chatScopeHarness = harness
+  const chatHelperUrl = extras.chatHelperUrl ?? moduleUrl(compile((await readFile(new URL('../src/utils/chatSubmission.ts', import.meta.url), 'utf8'))
+    .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// chat-registry-${sequence + 1}`)
   const script = compileScript(parse(await readFile(new URL(`../src/components/${name}.vue`, import.meta.url), 'utf8')).descriptor, { id: name }).content
   const source = 'const __harness = globalThis.__chatScopeHarness\n' + script
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
@@ -35,6 +42,7 @@ async function component(name, props, api, extras = {}) {
     .replace(/import \* as echarts from ['"]echarts(?:\/core)?['"]/g, 'const echarts = { use() {}, ...__harness.echarts }')
     .replace(/import \{([^}]+)\} from ['"]echarts\/(?:charts|components|renderers)['"]/g, 'const {$1} = {}')
     .replace(/from ['"]\.\.\/types['"]/g, `from '${typesUrl}'`)
+    .replace(/from ['"]\.\.\/utils\/chatSubmission['"]/g, `from '${chatHelperUrl}'`)
     .replace(/import (\w+) from ['"]\.\/\w+\.vue['"]/g, 'const $1 = {}')
     .replace(/\bonMounted\(/g, '__harness.onMounted(')
     .replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')
@@ -51,8 +59,9 @@ async function chat(options = {}) {
     listMessages: async (id) => {
       const pending = wait(); loads.push({ id, ...pending }); return pending.promise
     },
-    sendMessage: async (id, text, handlers) => {
-      const pending = wait(); streams.push({ id, text, handlers, ...pending }); return pending.promise
+    sendMessage: async (id, text, handlers, requestId) => {
+      const pending = wait(), stream = { id, text, handlers, requestId, ...pending }; streams.push(stream)
+      await handlers.onUserSaved(chatReceipt(stream)); return pending.promise
     },
     ...options.api,
   }
@@ -92,7 +101,7 @@ test('真实聊天SFC按会话保存未发送输入，发送A后B仍可编辑且
   c.props.conversation = conversation('a'); await settle()
   assert.equal(c.vm.streaming.value, true)
   assert.equal(c.vm.streamingText.value, 'A回复片段')
-  const done = c.streams[0].handlers.onDone()
+  const done = c.streams[0].handlers.onDone(chatDone(c.streams[0]))
   await settle()
   c.loads[2].resolve([chatMessage('a', 'A完成回复')]); await done
   c.streams[0].resolve(); await sending
@@ -143,7 +152,7 @@ test('真实聊天SFC同会话移动作品后使用新作用域，卸载后的�
   const before = c.events.length
   c.loads[0].reject(new Error('迟到加载失败'))
   c.loads[1].resolve([chatMessage('a')]); await settle()
-  await c.streams[0].handlers.onDone()
+  await c.streams[0].handlers.onDone(chatDone(c.streams[0]))
   c.streams[0].resolve(); await sending
   assert.equal(c.events.length, before)
   assert.equal(c.notices.length, 0)
@@ -177,7 +186,7 @@ test('真实聊天SFC完成后历史加载失败保留片段，等待期间卸�
     c.vm.input.value = '输入'
     const sending = c.vm.send(); await settle()
     c.streams[0].handlers.onToken('完整回复')
-    const done = c.streams[0].handlers.onDone(); await settle()
+    const done = c.streams[0].handlers.onDone(chatDone(c.streams[0])); await settle()
     if (unmount) c.stop()
     const eventCount = c.events.length
     c.loads[1].reject(new Error('读取失败')); await done
@@ -240,7 +249,8 @@ test('真实ChatView离开前保护未发送输入，取消不导航，确认才
   c.vm.chatDirty.value = true
   c.vm.enterWorkbench('a')
   assert.equal(c.events.length, 0)
-  assert.match(confirmation.content, /尚未发送/)
+  assert.match(confirmation.content, /未保存输入.*待核对原稿/)
+  assert.equal(confirmation.positiveText, '保留并继续')
   confirmation.onPositiveClick()
   assert.deepEqual(c.events, [['enter-workbench', 'a']])
   c.stop()
