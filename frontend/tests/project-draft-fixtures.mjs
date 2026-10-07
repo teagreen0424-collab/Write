@@ -35,34 +35,45 @@ export async function projectRuntime(overrides = {}, options = {}) {
     useDialog: () => { const context = active; return { warning: settings => context.dialogs.push(settings) } },
     onMounted: fn => active.hooks.mount = fn, onBeforeUnmount: fn => active.hooks.unmount = fn,
   }
-  for (const name of ['NButton','NForm','NFormItem','NInput','NModal','NSelect']) harness[name] = { name }
+  for (const name of ['NButton','NForm','NFormItem','NInput','NModal','NSelect','NTabPane','NTabs']) harness[name] = { name }
   globalThis[key] = harness
   const helpers = {}
-  for (const name of ['chatSubmission', 'projectDraft']) helpers[name] = url(compile((await readFile(new URL(`../src/utils/${name}.ts`, import.meta.url),'utf8'))
+  for (const name of ['chatSubmission', 'projectDraft', 'asyncScope']) helpers[name] = url(compile((await readFile(new URL(`../src/utils/${name}.ts`, import.meta.url),'utf8'))
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// ${key}`)
-  const descriptor = parse(await readFile(new URL('../src/components/ChatView.vue', import.meta.url), 'utf8')).descriptor
+  const definitions = new Map()
+  async function definition(name) {
+  if (definitions.has(name)) return definitions.get(name)
+  const descriptor = parse(await readFile(new URL(`../src/components/${name}.vue`, import.meta.url), 'utf8')).descriptor
   const script = compileScript(descriptor, { id: key })
   const source = `const __harness=globalThis.${key}\n` + script.content
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
     .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1}=__harness')
     .replace(/import \{ api \} from ['"]\.\.\/api['"]/g, 'const {api}=__harness')
-    .replace(/from ['"]\.\.\/utils\/(chatSubmission|projectDraft)['"]/g, (_all, name) => `from '${helpers[name]}'`)
+    .replace(/from ['"]\.\.\/utils\/(chatSubmission|projectDraft|asyncScope)['"]/g, (_all, name) => `from '${helpers[name]}'`)
     .replace(/import (\w+) from ['"]\.\/[^'"]+\.vue['"]/g, 'const $1={name:"$1"}')
+    .replace(/import\(['"]\.\/([^'"]+)\.vue['"]\)/g, 'Promise.resolve({ name: "$1", render: () => null })')
     .replace(/\bonMounted\(/g, '__harness.onMounted(').replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')
-  const definition = (await import(url(compile(source)))).default
-  const template = compileTemplate({ source: descriptor.template.content, filename: 'ChatView.vue', id: key, compilerOptions: { bindingMetadata: script.bindings } })
+  const component = (await import(url(compile(source)))).default
+  const template = compileTemplate({ source: descriptor.template.content, filename: name+'.vue', id: key, compilerOptions: { bindingMetadata: script.bindings } })
   assert.deepEqual(template.errors, [])
   const rendering = await import(url(compile(template.code.replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`))))
+  const result = { component, rendering }; definitions.set(name, result); return result
+  }
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async text => { if (options.clipboardError) throw new Error('clipboard blocked'); copied.push(text) } } } })
-  async function mount() {
-    const listeners = new Map(), context = { hooks: {}, notices: [], dialogs: [], events: [], listeners }
-    globalThis.window = { addEventListener: (name, fn) => listeners.set(name,fn), removeEventListener: name => listeners.delete(name) }
+  const listeners = new Map()
+  const listenerOwners = new WeakMap()
+  globalThis.window = { addEventListener: (name, fn) => { active.listeners.set(name,fn); listenerOwners.set(fn,active.listeners); if (!listeners.has(name)) listeners.set(name,new Set()); listeners.get(name).add(fn) },
+    removeEventListener: (name, fn) => { listenerOwners.get(fn)?.delete(name); listeners.get(name)?.delete(fn); if (!listeners.get(name)?.size) listeners.delete(name) } }
+  async function mountDefinition(name, initial = {}) {
+    const { component, rendering } = await definition(name)
+    const localListeners = new Map(), context = { hooks: {}, notices: [], dialogs: [], events: [], listeners: localListeners, props: reactive(initial) }
     active = context; const scope = effectScope()
-    context.vm = scope.run(() => definition.setup(reactive({}), { expose() {}, emit: (...args) => context.events.push(args) }))
+    context.vm = scope.run(() => component.setup(context.props, { expose() {}, emit: (...args) => context.events.push(args) }))
     context.hooks.mount?.(); await settle()
-    context.render = () => rendering.render({}, [], {}, proxyRefs(context.vm), {}, {})
+    context.render = () => rendering.render({}, [], context.props, proxyRefs(context.vm), {}, {})
     context.stop = () => { context.hooks.unmount?.(); scope.stop() }
     contexts.push(context); return context
   }
-  return { mount, calls, copied, helper: await import(helpers.projectDraft), stop: () => contexts.forEach(context => context.stop()) }
+  return { mount: () => mountDefinition('ChatView'), mountWorkbench: props => mountDefinition('WorkbenchView',props ?? {}),
+    calls, copied, helper: await import(helpers.projectDraft), stop: () => contexts.forEach(context => context.stop()) }
 }

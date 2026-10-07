@@ -48,8 +48,12 @@ class NovelRepo:
     def create(self, **data):
         obj = self.model(**data)
         self.db.add(obj)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(obj)
+        frozen = {column.key: getattr(obj, column.key) for column in obj.__table__.columns}
+        self.db.commit()
+        for field, value in frozen.items():
+            set_committed_value(obj, field, value)
         return obj
 
     def update(self, novel_id: str, **data):
@@ -57,8 +61,12 @@ class NovelRepo:
         for k, v in data.items():
             if v is not None:
                 setattr(obj, k, v)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(obj)
+        frozen = {column.key: getattr(obj, column.key) for column in obj.__table__.columns}
+        self.db.commit()
+        for field, value in frozen.items():
+            set_committed_value(obj, field, value)
         return obj
 
     def delete(self, novel_id: str):

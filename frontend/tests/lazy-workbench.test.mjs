@@ -14,7 +14,9 @@ const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source)
 const dependencyUrls = Object.fromEntries(await Promise.all([
   ['../types', '../src/types.ts'], ['../utils/chapter', '../src/utils/chapter.ts'], ['../utils/chapterCreation', '../src/utils/chapterCreation.ts'],
   ['../utils/asyncScope', '../src/utils/asyncScope.ts'],
-].map(async ([name, path]) => [name, moduleUrl(compile(await readFile(new URL(path, import.meta.url), 'utf8')))])))
+  ['../utils/projectDraft', '../src/utils/projectDraft.ts'],
+].map(async ([name, path]) => [name, moduleUrl(compile((await readFile(new URL(path, import.meta.url), 'utf8'))
+  .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)))])))
 const settle = async () => { for (let index = 0; index < 50; index += 1) { await Promise.resolve(); await nextTick() } }
 const wait = () => { let resolve; const promise = new Promise((done) => { resolve = done }); return { promise, resolve } }
 let sequence = 0
@@ -82,6 +84,7 @@ async function mounted(options = {}) {
       requests.push({ name, args: structuredClone(args) }); return fn(...args)
     }])),
     useMessage: () => Object.fromEntries(['success', 'warning', 'error', 'info'].map((type) => [type, (text) => messages.push({ type, text })])),
+    useDialog: () => ({ warning() {} }),
     loadComponent: async (name) => {
       loads.push(name)
       await options.delay?.[name]?.promise
@@ -92,6 +95,10 @@ async function mounted(options = {}) {
   harness.NModal = modal
   const key = `__lazyWorkbench${++sequence}`
   globalThis[key] = harness
+  const dependencies = { ...dependencyUrls, '../utils/projectDraft': moduleUrl(compile(
+    (await readFile(new URL('../src/utils/projectDraft.ts', import.meta.url), 'utf8'))
+      .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+  ) + `\n// fixture-page-${sequence}`) }
   async function compileComponent(name) {
     const path = name === 'App' ? '../src/App.vue' : `../src/components/${name}.vue`
     const descriptor = parse(await readFile(new URL(path, import.meta.url), 'utf8')).descriptor
@@ -107,7 +114,7 @@ async function mounted(options = {}) {
       .replace(/import \{ api \} from ['"]\.\.\/api['"]/g, 'const { api } = __harness')
       .replace(/import (\w+) from ['"]\.\/(?:components\/)?[^'"]+\.vue['"]/g, 'const $1 = __harness.components.$1')
       .replace(/import\(['"]\.\/(?:components\/)?([^'"]+)\.vue['"]\)/g, '__harness.loadComponent("$1")')
-    for (const [name, url] of Object.entries(dependencyUrls)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)
+    for (const [name, url] of Object.entries(dependencies)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)
     return (await import(moduleUrl(compile(source) + `\n// ${sequence}-${name}`))).default
   }
   components.SettingsPanel = await compileComponent('SettingsPanel')

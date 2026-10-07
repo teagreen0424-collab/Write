@@ -15,7 +15,9 @@ const dependencyUrls = Object.fromEntries(await Promise.all([
   ['../utils/chapter', '../src/utils/chapter.ts'], ['../utils/chapterCreation', '../src/utils/chapterCreation.ts'],
   ['../utils/wordLimits', '../src/utils/wordLimits.ts'],
   ['../utils/asyncScope', '../src/utils/asyncScope.ts'],
-].map(async ([name, path]) => [name, moduleUrl(compile(await readFile(new URL(path, import.meta.url), 'utf8')))])))
+  ['../utils/projectDraft', '../src/utils/projectDraft.ts'],
+].map(async ([name, path]) => [name, moduleUrl(compile((await readFile(new URL(path, import.meta.url), 'utf8'))
+  .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)))])))
 const settle = async () => { for (let index = 0; index < 20; index += 1) { await Promise.resolve(); await nextTick() } }
 const wait = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
 const character = (novelId = 'novel-a') => ({ id: `${novelId}-character`, novel_id: novelId, name: `${novelId}人物`, extras: { 阵营: '原有设定' } })
@@ -48,7 +50,7 @@ async function panel(name, options = {}) {
     createEntity: async (novelId, apiPath, payload) => ({ ...payload, id: `${novelId}-created` }),
     updateEntity: async (novelId, apiPath, id, payload) => ({ ...payload, id }),
     deleteEntity: async () => {}, updateNovel: async () => {},
-    createNovel: async (payload) => ({ id: 'created-novel', ...payload }),
+    createNovel: async (payload) => ({ id: 'created-novel', ...payload, style_anchor: '', created_at: '', updated_at: '' }),
     listOutline: async (novelId) => [outlineNode(novelId)],
     createOutline: async (novelId, payload) => ({ ...payload, id: `${novelId}-created` }),
     updateOutline: async (novelId, id, payload) => ({ ...payload, id }),
@@ -69,6 +71,7 @@ async function panel(name, options = {}) {
     api,
     streamSSE: async () => {},
     useMessage: () => Object.fromEntries(['success', 'warning', 'error', 'info'].map((type) => [type, (text) => messages.push({ type, text })])),
+    useDialog: () => ({ warning() {} }),
     onMounted: (fn) => { hooks.mount = fn }, onBeforeUnmount: (fn) => { hooks.unmount = fn },
   }
   for (const component of ['NButton', 'NCheckbox', 'NEmpty', 'NForm', 'NFormItem', 'NInput', 'NInputNumber', 'NList', 'NListItem', 'NMenu', 'NModal', 'NSelect', 'NSpin', 'NTag', 'NSwitch', 'NTabPane', 'NTabs']) harness[component] = component.toLowerCase()
@@ -84,7 +87,12 @@ async function panel(name, options = {}) {
     .replace(/import\(['"]\.\/([^'"]+)\.vue['"]\)/g, 'Promise.resolve({ name: "$1", render: () => null })')
     .replace(/\bonMounted\(/g, '__harness.onMounted(')
     .replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')
-  for (const [name, url] of Object.entries(dependencyUrls)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)
+  // 每个独立夹具代表新的页面；页内共享记录只在同一运行期复用。
+  const dependencies = { ...dependencyUrls, '../utils/projectDraft': moduleUrl(compile(
+    (await readFile(new URL('../src/utils/projectDraft.ts', import.meta.url), 'utf8'))
+      .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+  ) + `\n// fixture-page-${sequence}`) }
+  for (const [name, url] of Object.entries(dependencies)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)
   const component = (await import(moduleUrl(compile(source) + `\n// ${++sequence}`))).default
   const scope = effectScope()
   const vm = scope.run(() => component.setup(props, { expose() {}, emit: (...args) => emitted.push(args) }))
@@ -854,8 +862,9 @@ test('工作台真实 SFC 作品创建中新表单不被旧成功关闭，卸载
   const context = await panel('WorkbenchView', { props: { initialNovelId: 'novel-a' }, api: { createNovel: async () => pending.promise } })
   context.vm.openCreate(); context.vm.createForm.value.title = '提交的作品'
   const creating = context.vm.submitCreate()
+  assert.equal(context.requests.filter((request) => request.method === 'createNovel').length, 1)
   context.vm.createForm.value.title = '创建中新编辑的作品'
-  pending.resolve({ id: 'created-novel', title: '提交的作品' }); await creating
+  pending.resolve({ id: 'created-novel', title: '提交的作品', genre: '', summary: '', style_anchor: '', created_at: '', updated_at: '' }); await creating
   assert.equal(context.vm.showCreate.value, true)
   assert.equal(context.vm.createForm.value.title, '创建中新编辑的作品')
   assert.equal(context.vm.novelId.value, 'novel-a')
@@ -863,8 +872,10 @@ test('工作台真实 SFC 作品创建中新表单不被旧成功关闭，卸载
   const late = wait()
   const disposed = await panel('WorkbenchView', { props: { initialNovelId: 'novel-a' }, api: { createNovel: async () => late.promise } })
   disposed.vm.openCreate(); disposed.vm.createForm.value.title = '旧作品'
-  const oldCreate = disposed.vm.submitCreate(); disposed.dispose()
-  late.resolve({ id: 'late-novel', title: '旧作品' }); await oldCreate
+  const oldCreate = disposed.vm.submitCreate()
+  assert.equal(disposed.requests.filter((request) => request.method === 'createNovel').length, 1)
+  disposed.dispose()
+  late.resolve({ id: 'late-novel', title: '旧作品', genre: '', summary: '', style_anchor: '', created_at: '', updated_at: '' }); await oldCreate
   assert.equal(disposed.vm.novelId.value, 'novel-a')
   assert.equal(disposed.messages.length, 0)
 })
