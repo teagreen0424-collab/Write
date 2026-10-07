@@ -2,7 +2,7 @@
 from typing import Optional, Type
 
 from fastapi import HTTPException
-from sqlalchemy import func, literal_column
+from sqlalchemy import and_, func, literal_column, or_
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -18,6 +18,14 @@ def _chapter_word_count(content: str | None) -> int:
 def _chapter_is_written(content: str | None) -> bool:
     """伏笔已写口径保留正文strip语义；无需为布尔结果拼接整段正文。"""
     return bool((content or "").strip())
+
+
+class ConversationReadError(HTTPException):
+    """聊天只读查询的可判定作用域/游标错误。"""
+
+    def __init__(self, status_code: int, detail: str, code: str):
+        super().__init__(status_code=status_code, detail=detail)
+        self.code = code
 
 
 class NovelRepo:
@@ -620,6 +628,15 @@ class ConversationRepo:
             raise HTTPException(status_code=404, detail="会话不存在")
         return obj
 
+    def get_scope(self, conversation_id: str):
+        """只读取真实会话归属列，保持调用方默认autoflush与显式no_autoflush。"""
+        scope = self.db.query(self.model.id, self.model.novel_id).filter(
+            self.model.id == conversation_id,
+        ).first()
+        if scope is None:
+            raise ConversationReadError(404, "会话不存在", "chat_conversation_not_found")
+        return scope
+
     def create(self, novel_id: Optional[str] = None, title: str = ""):
         if novel_id is not None:
             self._ensure_novel(novel_id)
@@ -689,6 +706,32 @@ class ConversationRepo:
             .order_by(models.Message.created_at)
             .all()
         )
+
+    def list_message_window(self, conversation_id: str, limit: int = 50, before_message_id: str | None = None):
+        """完整消息有界窗口；游标只接受同会话真实消息，不暴露/相信客户端rowid。"""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ConversationReadError(422, "每页消息数必须为1至100的整数", "chat_message_window_invalid")
+        if before_message_id is not None and (not isinstance(before_message_id, str) or not 1 <= len(before_message_id) <= 200):
+            raise ConversationReadError(422, "消息游标格式无效", "chat_message_window_invalid")
+        scope = self.get_scope(conversation_id)
+        message = models.Message
+        rowid = literal_column("message.rowid")
+        query = self.db.query(
+            message.id, message.conversation_id, message.role, message.content, message.meta, message.created_at,
+        ).filter(message.conversation_id == conversation_id)
+        if before_message_id is not None:
+            anchor = self.db.query(message.created_at, rowid.label("rowid")).filter(
+                message.id == before_message_id, message.conversation_id == conversation_id,
+            ).first()
+            if anchor is None:
+                raise ConversationReadError(404, "消息游标不属于当前会话或已不存在", "chat_message_cursor_not_found")
+            query = query.filter(or_(message.created_at < anchor.created_at,
+                and_(message.created_at == anchor.created_at, rowid < anchor.rowid)))
+        rows = query.order_by(message.created_at.desc(), rowid.desc()).limit(limit + 1).all()
+        has_more = len(rows) > limit
+        items = list(reversed(rows[:limit]))
+        return {"conversation_id": scope.id, "novel_id": scope.novel_id, "items": items,
+                "has_more": has_more, "next_before_message_id": items[0].id if has_more else None}
 
     def recent_messages(self, conversation_id: str):
         """模型只读最近二十条role/content；并列时间戳按SQLite原行顺序截取。"""

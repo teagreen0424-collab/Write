@@ -2,8 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton, NEmpty, NInput, NModal, useMessage } from 'naive-ui'
 import { api } from '../api'
-import type { Conversation, Novel } from '../types'
-import { chatSubmissionStates as states, chatSubmissionState as stateFor, newChatSubmission, hashChatSubmission, isChatSubmissionReceipt, isChatReplyDone } from '../utils/chatSubmission'
+import type { ChatAction, ChatMessage, Conversation, Novel } from '../types'
+import { chatSubmissionStates as states, chatSubmissionState as stateFor, newChatSubmission, hashChatSubmission, isChatSubmissionReceipt, isChatReplyDone, isChatMessageWindow, isChatActionBatch, mergeChatMessages, newChatActionsToken } from '../utils/chatSubmission'
 import type { ChatSubmission, ChatSubmissionState } from '../utils/chatSubmission'
 import MessageBubble from './MessageBubble.vue'
 
@@ -54,16 +54,112 @@ async function loadMessages(conversationId = props.conversation?.id, scope = con
   if (!conversationId || !scope || !alive || (props.conversationIds && !props.conversationIds.includes(conversationId))) return false
   const state = stateFor(scope)
   const requestId = ++state.loadId
+  const epoch = pageEpoch
+  const novelId = JSON.parse(scope)[1] as string | null
+  const current = () => alive && epoch === pageEpoch && scope === conversationScope() && states.get(scope) === state && requestId === state.loadId
+  state.historyLoading = true
   try {
-    const loaded = await api.listMessages(conversationId)
-    if (!alive || states.get(scope) !== state || requestId !== state.loadId) return false
-    state.messages = loaded.filter((item) => item.conversation_id === conversationId)
-    if (scope === conversationScope()) scrollToBottom()
+    const loaded = await api.listMessageWindow(conversationId)
+    if (!current()) return false
+    if (!isChatMessageWindow(loaded, conversationId, novelId)) throw new Error('历史窗口来源或内容未得到完整核对，请重试读取；原稿仍保留')
+    const connected = state.historyLoaded && loaded.items.some(item => state.messages.some(existing => existing.id === item.id))
+    const cached = state.streaming ? state.messages : state.messages.filter(item => !item.id.startsWith('local-'))
+    state.messages = mergeChatMessages(cached, loaded.items)
+    if (!connected) { state.hasEarlier = loaded.has_more; state.beforeMessageId = loaded.next_before_message_id }
+    state.historyLoaded = true
+    void loadActions(loaded.items.filter(item => item.role === 'assistant').map(item => item.id), conversationId, scope)
+    scrollToBottom()
     return true
   } catch (e) {
-    if (alive && states.get(scope) === state && requestId === state.loadId && scope === conversationScope()) toast.error((e as Error).message)
+    if (current()) toast.error((e as Error).message)
     return false
+  } finally {
+    if (states.get(scope) === state && requestId === state.loadId) state.historyLoading = false
   }
+}
+
+async function loadEarlier() {
+  const scope = conversationScope(), conversationId = props.conversation?.id, state = currentState.value
+  if (!scope || !conversationId || !state || !state.historyLoaded || !state.hasEarlier || !state.beforeMessageId || state.olderLoading) return
+  const beforeId = state.beforeMessageId, requestId = ++state.olderLoadId, epoch = pageEpoch
+  const novelId = JSON.parse(scope)[1] as string | null
+  const current = () => alive && epoch === pageEpoch && scope === conversationScope() && states.get(scope) === state
+    && requestId === state.olderLoadId && state.beforeMessageId === beforeId
+  const element = listEl.value, height = element?.scrollHeight ?? 0, top = element?.scrollTop ?? 0
+  const anchor = element?.querySelector<HTMLElement>('.bubble-row')
+  const anchorTop = anchor?.getBoundingClientRect().top
+  const restorePosition = () => {
+    if (!alive || epoch !== pageEpoch || scope !== conversationScope() || !element || element !== listEl.value) return
+    element.scrollTop = anchor?.isConnected && anchorTop !== undefined
+      ? element.scrollTop + anchor.getBoundingClientRect().top - anchorTop : top + element.scrollHeight - height
+  }
+  state.olderLoading = true
+  try {
+    const loaded = await api.listMessageWindow(conversationId, beforeId)
+    if (!current()) return
+    if (!isChatMessageWindow(loaded, conversationId, novelId) || loaded.items.some(item => item.id === beforeId)) throw new Error('更早历史窗口未得到完整核对，请重试读取')
+    state.messages = mergeChatMessages(state.messages, loaded.items, beforeId)
+    state.hasEarlier = loaded.has_more
+    state.beforeMessageId = loaded.next_before_message_id
+    const actions = loadActions(loaded.items.filter(item => item.role === 'assistant').map(item => item.id), conversationId, scope)
+    await nextTick()
+    restorePosition()
+    const restoredTop = element?.scrollTop
+    await actions
+    await nextTick()
+    // 标签高度随后变化时再保留原锚点；作者已主动滚动则尊重当前位置。
+    if (element && restoredTop !== undefined && Math.abs(element.scrollTop - restoredTop) < 2) restorePosition()
+  } catch (e) { if (current()) toast.error((e as Error).message) }
+  finally { if (states.get(scope) === state && requestId === state.olderLoadId) state.olderLoading = false }
+}
+
+async function loadActions(messageIds: string[], conversationId = props.conversation?.id, scope = conversationScope()) {
+  if (!conversationId || !scope || !alive) return
+  const state = states.get(scope), novelId = JSON.parse(scope)[1] as string | null, epoch = pageEpoch
+  if (!state) return
+  const ids = [...new Set(messageIds)].filter(id => state.messages.some(item => item.id === id && item.role === 'assistant' && !id.startsWith('local-')))
+  if (!ids.length) return
+  const token = newChatActionsToken()
+  for (const id of ids) state.actions[id] = { status: novelId ? 'pending' : 'ready', items: state.actions[id]?.items ?? [], token }
+  if (!novelId) return
+  const current = () => alive && epoch === pageEpoch && scope === conversationScope() && states.get(scope) === state
+  const same = (id: string) => current() && state.actions[id]?.token === token
+  try {
+    const result = await api.listMessageActionsBatch(conversationId, ids)
+    if (!current()) return
+    if (!isChatActionBatch(result, conversationId, novelId, ids)) throw new Error('动作记录来源或范围未得到完整核对')
+    for (const id of ids) if (same(id)) state.actions[id] = { status: 'ready', items: result.actions_by_message_id[id], token }
+  } catch (e) {
+    for (const id of ids) if (same(id)) state.actions[id] = { ...state.actions[id], status: 'failed' }
+    if (current() && ids.some(id => state.actions[id]?.token === token)) toast.warning('消息已读取，动作记录读取未完成，可明确重试')
+  } finally {
+    if (states.get(scope) === state) for (const id of ids) {
+      if (state.actions[id]?.token === token && state.actions[id].status === 'pending') state.actions[id].status = 'failed'
+    }
+  }
+}
+
+function reloadMessageActions(messageId: string) { void loadActions([messageId]) }
+
+function onActionConfirmed(messageId: string, action: ChatAction) {
+  const state = currentState.value, conversation = props.conversation
+  if (!alive || !state || !conversation || !conversation.novel_id || !state.messages.some(item => item.id === messageId && item.role === 'assistant')
+    || !isChatActionBatch({ conversation_id: conversation.id, novel_id: conversation.novel_id, actions_by_message_id: { [messageId]: [action] } }, conversation.id, conversation.novel_id, [messageId])) return
+  const previous = state.actions[messageId]
+  state.actions[messageId] = { status: previous?.status ?? 'pending', token: newChatActionsToken(),
+    items: [...(previous?.items ?? []).filter(item => item.action_type !== action.action_type), action] }
+}
+
+function onMessageUpdated(message: ChatMessage) {
+  const state = currentState.value, conversation = props.conversation
+  if (!alive || !state || !conversation || !state.messages.some(item => item.id === message?.id)
+    || !isChatMessageWindow({ conversation_id: conversation.id, novel_id: conversation.novel_id, items: [message], has_more: false, next_before_message_id: null }, conversation.id, conversation.novel_id)) return
+  // 已确认的meta写入不能被此前取得的窗口快照撤回；旧页缓存也保存真实回包。
+  state.loadId += 1
+  state.olderLoadId += 1
+  state.historyLoading = false
+  state.olderLoading = false
+  state.messages = state.messages.map(item => item.id === message.id ? message : item)
 }
 
 async function send() {
@@ -312,11 +408,20 @@ onBeforeUnmount(() => {
       </header>
 
       <div ref="listEl" class="message-list">
+        <div class="history-actions">
+          <n-button v-if="currentState?.hasEarlier" size="small" :loading="currentState.olderLoading" :disabled="currentState.olderLoading" @click="loadEarlier">加载更早消息</n-button>
+          <n-button v-if="!currentState?.historyLoaded && !streaming" size="small" :loading="currentState?.historyLoading" :disabled="currentState?.historyLoading" @click="loadMessages()">重新读取消息</n-button>
+        </div>
         <MessageBubble
           v-for="m in messages"
           :key="conversationScope() + ':' + m.id"
           :message="m"
           :novel-id="conversation.novel_id"
+          :actions="currentState?.actions[m.id]?.items ?? []"
+          :actions-status="currentState?.actions[m.id]?.status ?? (conversation.novel_id ? 'pending' : 'ready')"
+          @reload-actions="reloadMessageActions(m.id)"
+          @message-updated="onMessageUpdated"
+          @action-confirmed="onActionConfirmed(m.id, $event)"
           @open-outline="emit('open-outline', $event)"
           @open-writing="(novelId: string, chapterId: string) => emit('open-writing', novelId, chapterId)"
         />

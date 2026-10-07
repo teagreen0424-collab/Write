@@ -1,5 +1,6 @@
 """聊天来源校验与动作去重。"""
 from fastapi import HTTPException
+from sqlalchemy import literal_column
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -7,7 +8,7 @@ from app.application import outline_plan
 from app.application import writing
 from app.application import inject_idea
 from app.infrastructure import models
-from app.infrastructure.repository import ConversationRepo
+from app.infrastructure.repository import ConversationReadError, ConversationRepo
 from app.interfaces.schemas import OutlineVolumeDraft
 from app.interfaces.schemas import WriteChapterRequest
 
@@ -51,6 +52,42 @@ def list_actions(db: Session, conversation_id: str, message_id: str) -> list[dic
             "target_deleted": target_deleted,
         })
     return result
+
+
+def list_actions_batch(db: Session, conversation_id: str, message_ids: list[str]) -> dict:
+    """一次核对全部来源，再批量读取原动作与本作品目标，不触发任何落地操作。"""
+    if (not 1 <= len(message_ids) <= 100
+            or any(not isinstance(mid, str) or not 1 <= len(mid) <= 200 for mid in message_ids)
+            or len(set(message_ids)) != len(message_ids)):
+        raise ConversationReadError(422, "请提供1至100个不重复的消息身份", "chat_action_batch_invalid")
+    scope = ConversationRepo(db).get_scope(conversation_id)
+    sources = db.query(models.Message.id).filter(
+        models.Message.conversation_id == conversation_id, models.Message.role == "assistant",
+        models.Message.id.in_(message_ids),
+    ).all()
+    if len(sources) != len(message_ids):
+        raise ConversationReadError(404, "部分来源不是当前会话中的助手消息", "chat_action_sources_not_found")
+    result = {mid: [] for mid in message_ids}
+    if scope.novel_id is None:
+        return {"conversation_id": scope.id, "novel_id": None, "actions_by_message_id": result}
+    action = models.ChatAction
+    actions = db.query(action.message_id, action.action_type, action.status, action.result_id, action.result_summary).filter(
+        action.novel_id == scope.novel_id, action.message_id.in_(message_ids),
+    ).order_by(action.created_at, literal_column("chat_action.rowid")).all()
+    outline_ids = {row.result_id for row in actions if row.action_type == "outline"}
+    chapter_ids = {row.result_id for row in actions if row.action_type == "chapter"}
+    present_outlines = {row.id for row in db.query(models.OutlineNode.id).filter(
+        models.OutlineNode.novel_id == scope.novel_id, models.OutlineNode.id.in_(outline_ids),
+    ).all()} if outline_ids else set()
+    present_chapters = {row.id for row in db.query(models.Chapter.id).filter(
+        models.Chapter.novel_id == scope.novel_id, models.Chapter.id.in_(chapter_ids),
+    ).all()} if chapter_ids else set()
+    for row in actions:
+        deleted = ((row.action_type == "outline" and row.result_id not in present_outlines)
+            or (row.action_type == "chapter" and row.result_id not in present_chapters))
+        result[row.message_id].append({"action_type": row.action_type, "status": row.status,
+            "result_id": row.result_id, "result_summary": row.result_summary, "target_deleted": deleted})
+    return {"conversation_id": scope.id, "novel_id": scope.novel_id, "actions_by_message_id": result}
 
 
 def preview_outline(db: Session, conversation_id: str, message_id: str) -> OutlineVolumeDraft:

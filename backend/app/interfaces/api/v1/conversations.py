@@ -1,17 +1,38 @@
 """全局对话路由（SSE 流式）。"""
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.application import chat as chat_uc
 from app.application import chat_actions
 from app.infrastructure.db import SessionLocal, get_db
-from app.infrastructure.repository import ConversationRepo
+from app.infrastructure.repository import ConversationReadError, ConversationRepo
 from app.interfaces import schemas
 
 router = APIRouter(prefix="/conversations", tags=["conversation"])
+
+
+@router.get("/{conversation_id}/messages/window", response_model=schemas.MessageWindowRead)
+def list_message_window(
+    conversation_id: str, limit: int = Query(default=50, ge=1, le=100),
+    before_message_id: str | None = Query(default=None, min_length=1, max_length=200), db: Session = Depends(get_db),
+):
+    try:
+        return ConversationRepo(db).list_message_window(conversation_id, limit, before_message_id)
+    except ConversationReadError as error:
+        return JSONResponse(status_code=error.status_code, content={"detail": error.detail, "code": error.code})
+
+
+@router.post("/{conversation_id}/messages/actions/batch", response_model=schemas.ChatActionBatchRead)
+def list_message_actions_batch(
+    conversation_id: str, payload: schemas.ChatActionBatchRequest, db: Session = Depends(get_db),
+):
+    try:
+        return chat_actions.list_actions_batch(db, conversation_id, payload.message_ids)
+    except ConversationReadError as error:
+        return JSONResponse(status_code=error.status_code, content={"detail": error.detail, "code": error.code})
 
 
 @router.get("/{conversation_id}/messages/{message_id}/actions")

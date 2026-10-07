@@ -1,19 +1,26 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton, NTag, useMessage } from 'naive-ui'
 import { api } from '../api'
-import type { Chapter, ChatMessage, OutlineApplyResult } from '../types'
+import type { Chapter, ChatAction, ChatMessage, OutlineApplyResult } from '../types'
 import ApplySuggestionCard from './ApplySuggestionCard.vue'
 import OutlinePlanCard from './OutlinePlanCard.vue'
 import ChapterWriteCard from './ChapterWriteCard.vue'
 
-const props = defineProps<{ message: ChatMessage; novelId: string | null }>()
+const props = defineProps<{ message: ChatMessage; novelId: string | null; actions?: ChatAction[]; actionsStatus?: 'pending' | 'ready' | 'failed' }>()
 const emit = defineEmits<{
   (e: 'open-outline', novelId: string): void
   (e: 'open-writing', novelId: string, chapterId: string): void
+  (e: 'reload-actions'): void
+  (e: 'message-updated', message: ChatMessage): void
+  (e: 'action-confirmed', action: ChatAction): void
 }>()
 
 const toast = useMessage()
+let alive = true
+let actionEpoch = 0
+const standaloneActionsStatus = ref<'pending' | 'ready' | 'failed'>('pending')
+const actionsStatus = computed(() => props.actionsStatus ?? standaloneActionsStatus.value)
 const showApply = ref(false)
 const showSettings = ref(false)
 const showOutline = ref(false)
@@ -28,8 +35,9 @@ const appliedInfo = ref<Record<string, unknown> | null>(
 )
 
 const isAssistant = computed(() => props.message.role === 'assistant')
+const hasActionSource = computed(() => isAssistant.value && !!props.novelId && !props.message.id.startsWith('local-'))
 const canApply = computed(
-  () => isAssistant.value && !!props.novelId && !props.message.id.startsWith('local-'),
+  () => hasActionSource.value && actionsStatus.value === 'ready',
 )
 
 interface InlinePart {
@@ -70,58 +78,90 @@ const contentBlocks = computed<ContentBlock[]>(() => {
 
 async function onApplied(summary: { type: string; action: string; id: string }[]) {
   const meta = { applied: summary, at: new Date().toISOString() }
+  const source = [props.novelId, props.message.conversation_id, props.message.id].join(':')
   try {
-    await api.updateMessage(props.message.conversation_id, props.message.id, meta)
+    const updated = await api.updateMessage(props.message.conversation_id, props.message.id, meta)
+    if (!alive || source !== [props.novelId, props.message.conversation_id, props.message.id].join(':')) return
     appliedInfo.value = meta
     showApply.value = false
     toast.success('已应用到作品')
+    emit('message-updated', updated)
+    if (props.actionsStatus !== undefined) emit('reload-actions')
   } catch (e) {
-    toast.error((e as Error).message)
+    if (alive && source === [props.novelId, props.message.conversation_id, props.message.id].join(':')) toast.error((e as Error).message)
   }
 }
 
+function adoptActions(actions: ChatAction[]) {
+  const summary = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+  const outline = actions.find((action) => action.action_type === 'outline')
+  const outlineSummary = summary(outline?.result_summary)
+  outlineResult.value = typeof outlineSummary?.volume_id === 'string' && outlineSummary.volume_id ? outlineSummary as unknown as OutlineApplyResult : null
+  outlineDeleted.value = !!outline?.target_deleted
+  const chapter = actions.find((action) => action.action_type === 'chapter')
+  const chapterSummary = summary(chapter?.result_summary)
+  chapterResult.value = typeof chapterSummary?.chapter_id === 'string' && chapterSummary.chapter_id ? chapterSummary as unknown as { chapter_id: string; title: string } : null
+  chapterDeleted.value = !!chapter?.target_deleted
+  settingsApplied.value = actions.some((action) => action.action_type === 'settings')
+}
+async function loadStandaloneActions() {
+  if (props.actionsStatus !== undefined) { emit('reload-actions'); return }
+  const epoch = ++actionEpoch, source = [props.novelId, props.message.conversation_id, props.message.id].join(':')
+  if (!props.novelId || !isAssistant.value || props.message.id.startsWith('local-')) { standaloneActionsStatus.value = 'ready'; return }
+  standaloneActionsStatus.value = 'pending'
+  try {
+    const actions = await api.listMessageActions(props.message.conversation_id, props.message.id)
+    if (!alive || epoch !== actionEpoch || source !== [props.novelId, props.message.conversation_id, props.message.id].join(':')) return
+    adoptActions(actions); standaloneActionsStatus.value = 'ready'
+  } catch {
+    if (alive && epoch === actionEpoch) standaloneActionsStatus.value = 'failed'
+  }
+}
 watch(
-  () => [props.novelId, props.message.id],
-  async () => {
+  () => [props.novelId, props.message.id, props.message.conversation_id, props.actions],
+  () => {
+    actionEpoch += 1
     outlineResult.value = null
     chapterResult.value = null
     settingsApplied.value = false
     outlineDeleted.value = false
     chapterDeleted.value = false
-    if (!props.novelId || !isAssistant.value || props.message.id.startsWith('local-')) return
-    try {
-      const actions = await api.listMessageActions(props.message.conversation_id, props.message.id)
-      const outline = actions.find((action) => action.action_type === 'outline')
-      if (outline?.result_summary?.volume_id) {
-        outlineResult.value = outline.result_summary as unknown as OutlineApplyResult
-        outlineDeleted.value = outline.target_deleted
-      }
-      const chapter = actions.find((action) => action.action_type === 'chapter')
-      if (chapter?.result_summary?.chapter_id) {
-        chapterResult.value = chapter.result_summary as unknown as { chapter_id: string; title: string }
-        chapterDeleted.value = chapter.target_deleted
-      }
-      settingsApplied.value = actions.some((action) => action.action_type === 'settings')
-    } catch {
-      // 动作标签读取失败不影响消息展示。
-    }
+    if (props.actionsStatus !== undefined) adoptActions(props.actions ?? [])
+    else void loadStandaloneActions()
   },
   { immediate: true },
 )
+watch(() => props.message.meta, meta => { appliedInfo.value = meta && (meta as any).applied ? meta : null })
+onBeforeUnmount(() => { alive = false; actionEpoch += 1 })
 
 function onOutlineApplied(result: OutlineApplyResult) {
+  if (!alive) return
   outlineResult.value = result
   showOutline.value = false
+  if (props.actionsStatus !== undefined) {
+    emit('action-confirmed', { action_type: 'outline', status: 'done', result_id: result.volume_id, result_summary: result, target_deleted: false })
+    emit('reload-actions')
+  }
 }
 
 function onChapterApplied(chapter: Chapter) {
+  if (!alive) return
   chapterResult.value = { chapter_id: chapter.id, title: chapter.title }
   showWriting.value = false
+  if (props.actionsStatus !== undefined) {
+    emit('action-confirmed', { action_type: 'chapter', status: 'done', result_id: chapter.id, result_summary: { chapter_id: chapter.id, title: chapter.title }, target_deleted: false })
+    emit('reload-actions')
+  }
 }
 
-function onSettingsApplied() {
+function onSettingsApplied(summary: { type: string; action: string; id: string }[] = []) {
+  if (!alive) return
   settingsApplied.value = true
   showSettings.value = false
+  if (props.actionsStatus !== undefined) {
+    if (summary.length) emit('action-confirmed', { action_type: 'settings', status: 'done', result_id: summary[0].id, result_summary: { applied: summary }, target_deleted: false })
+    emit('reload-actions')
+  }
 }
 </script>
 
@@ -148,6 +188,8 @@ function onSettingsApplied() {
         </template>
       </div>
       <div v-if="isAssistant" class="footer">
+        <span v-if="novelId && !message.id.startsWith('local-') && actionsStatus !== 'ready'" role="status">{{ actionsStatus === 'pending' ? '动作记录读取中…' : '动作记录读取未完成' }}</span>
+        <n-button v-if="actionsStatus === 'failed'" size="tiny" quaternary @click="loadStandaloneActions">重试动作记录</n-button>
         <n-tag v-if="appliedInfo?.applied" type="success" size="small">已落地</n-tag>
         <n-button
           v-else
@@ -192,14 +234,15 @@ function onSettingsApplied() {
         >提炼设定</n-button>
       </div>
     </div>
+    <div v-if="showApply && hasActionSource" :inert="actionsStatus !== 'ready'">
     <ApplySuggestionCard
-      v-if="showApply && canApply"
       :novel-id="novelId!"
       :text="message.content"
       @applied="onApplied"
       @cancel="showApply = false"
     />
-    <div v-if="showOutline && canApply" class="outline-card">
+    </div>
+    <div v-if="showOutline && hasActionSource" class="outline-card" :inert="actionsStatus !== 'ready'">
       <OutlinePlanCard
         :novel-id="novelId!"
         :conversation-id="message.conversation_id"
@@ -208,8 +251,8 @@ function onSettingsApplied() {
         @cancel="showOutline = false"
       />
     </div>
+    <div v-if="showWriting && hasActionSource" :inert="actionsStatus !== 'ready'">
     <ChapterWriteCard
-      v-if="showWriting && canApply"
       :novel-id="novelId!"
       :conversation-id="message.conversation_id"
       :message-id="message.id"
@@ -217,8 +260,9 @@ function onSettingsApplied() {
       @applied="onChapterApplied"
       @cancel="showWriting = false"
     />
+    </div>
+    <div v-if="showSettings && hasActionSource" :inert="actionsStatus !== 'ready'">
     <ApplySuggestionCard
-      v-if="showSettings && canApply"
       :novel-id="novelId!"
       :text="message.content"
       :conversation-id="message.conversation_id"
@@ -227,6 +271,7 @@ function onSettingsApplied() {
       @applied="onSettingsApplied"
       @cancel="showSettings = false"
     />
+    </div>
   </div>
 </template>
 

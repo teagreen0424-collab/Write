@@ -749,6 +749,38 @@ class MessageRead(ORMBase):
     created_at: str
 
 
+class MessageWindowRead(BaseModel):
+    conversation_id: str
+    novel_id: Optional[str]
+    items: list[MessageRead]
+    has_more: bool
+    next_before_message_id: Optional[str]
+
+
+class ChatActionBatchRequest(BaseModel):
+    message_ids: list[Annotated[str, Field(strict=True, min_length=1, max_length=200)]] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def unique_message_ids(self):
+        if len(set(self.message_ids)) != len(self.message_ids):
+            raise ValueError("消息身份不能重复")
+        return self
+
+
+class ChatActionRead(BaseModel):
+    action_type: str
+    status: str
+    result_id: str
+    result_summary: object
+    target_deleted: bool
+
+
+class ChatActionBatchRead(BaseModel):
+    conversation_id: str
+    novel_id: Optional[str]
+    actions_by_message_id: dict[str, list[ChatActionRead]]
+
+
 class PromoteRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     genre: str = ""

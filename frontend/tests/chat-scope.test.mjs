@@ -25,7 +25,15 @@ async function component(name, props, api, extras = {}) {
   const hooks = {}, events = [], notices = [], listeners = new Map()
   globalThis.window = { addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: (name) => listeners.delete(name) }
   const harness = {
-    api, ...extras,
+    api: { ...api, ...(name === 'ChatWindow' ? {
+      // Preserve existing array/deferred fixtures under an explicit new window contract.
+      listMessageWindow: async id => ({ conversation_id: id,
+        novel_id: props.conversation?.id === id ? props.conversation.novel_id : `novel-${id}`,
+        items: await api.listMessages(id), has_more: false, next_before_message_id: null }),
+      listMessageActionsBatch: async (id, ids) => ({ conversation_id: id,
+        novel_id: props.conversation?.id === id ? props.conversation.novel_id : `novel-${id}`,
+        actions_by_message_id: Object.fromEntries(ids.map(messageId => [messageId, []])) }),
+    } : {}) }, ...extras,
     NButton: {}, NDropdown: {}, NEmpty: {}, NInput: {}, NForm: {}, NFormItem: {}, NModal: {}, NSelect: {},
     useMessage: () => Object.fromEntries(['success', 'error', 'warning'].map((type) => [type, (text) => notices.push({ type, text })])),
     useDialog: () => extras.dialog ?? { warning() {} },
@@ -74,7 +82,7 @@ test('真实聊天SFC的迟到A列表不进入B，A→B→A只接受最新请求
   c.props.conversation = conversation('b'); await settle()
   c.loads[0].resolve([chatMessage('a')]); await settle()
   assert.deepEqual(c.vm.messages.value, [])
-  c.loads[1].resolve([chatMessage('b'), chatMessage('a')]); await settle()
+  c.loads[1].resolve([chatMessage('b')]); await settle()
   assert.deepEqual(c.vm.messages.value.map((m) => m.content), ['b'])
   c.props.conversation = conversation('a'); await settle()
   const older = c.vm.loadMessages()

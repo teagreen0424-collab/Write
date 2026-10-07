@@ -11,9 +11,11 @@ import type {
   ChapterRepairPreview,
   ChapterRepairRequest,
   ChatAction,
+  ChatActionBatch,
   ChapterRevision,
   ChapterRevisionMeta,
   ChatMessage,
+  ChatMessageWindow,
   ChatSubmissionReceipt,
   ClicheResult,
   BookSummary,
@@ -478,6 +480,12 @@ export const api = {
   deleteConversation: (id: string) =>
     request<void>(`${BASE}/conversations/${id}`, { method: 'DELETE' }),
   listMessages: (id: string) => request<ChatMessage[]>(`${BASE}/conversations/${id}/messages`),
+  listMessageWindow: (id: string, beforeMessageId?: string) =>
+    request<ChatMessageWindow>(`${BASE}/conversations/${id}/messages/window?limit=50${beforeMessageId ? `&before_message_id=${encodeURIComponent(beforeMessageId)}` : ''}`),
+  listMessageActionsBatch: (id: string, messageIds: string[]) =>
+    request<ChatActionBatch>(`${BASE}/conversations/${id}/messages/actions/batch`, {
+      method: 'POST', body: JSON.stringify({ message_ids: messageIds }),
+    }),
   listMessageActions: (id: string, messageId: string) =>
     request<ChatAction[]>(`${BASE}/conversations/${id}/messages/${messageId}/actions`),
   previewMessageSettings: (id: string, messageId: string) =>

@@ -29,9 +29,14 @@ async function runtime(options = {}) {
     }, ...options.api,
   }
   const harness = {
-    api: Object.fromEntries(Object.entries(api).map(([name, fn]) => [name, (...args) => {
-      calls.push({ name, args: args.map(value => typeof value === 'object' && value?.onToken ? '[handlers]' : structuredClone(value)) })
+    // Existing author-state scenarios keep their array fixtures; expose the new window shape
+    // explicitly and record the actual new API method, never claim an old full-list GET.
+    api: Object.fromEntries(Object.entries(api).map(([name, fn]) => [name === 'listMessages' ? 'listMessageWindow' : name, (...args) => {
+      calls.push({ name: name === 'listMessages' ? 'listMessageWindow' : name, args: args.map(value => typeof value === 'object' && value?.onToken ? '[handlers]' : structuredClone(value)) })
       if (name === 'sendMessage') streams.push({ id: args[0], raw: args[1], handlers: args[2], requestId: args[3] })
+      if (name === 'listMessages') return Promise.resolve(fn(...args)).then(items => ({ conversation_id: args[0],
+        novel_id: mounting.props?.conversation?.id === args[0] ? mounting.props.conversation.novel_id : null,
+        items, has_more: false, next_before_message_id: null }))
       return fn(...args)
     }])),
     NButton: { name: 'NButton' }, NInput: { name: 'NInput' }, NEmpty: { name: 'NEmpty' }, NModal: { name: 'NModal' },
@@ -53,7 +58,7 @@ async function runtime(options = {}) {
   async function mount(extra = {}) {
     const notices = [], events = [], props = reactive({ conversation: { id: 'conversation-a', novel_id: null, title: 'A' }, novels: [], ...extra })
     globalThis.window = { addEventListener: (name, fn) => { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(fn) }, removeEventListener: (name, fn) => listeners.get(name)?.delete(fn) }
-    mounting = { notices }
+    mounting = { notices, props }
     const scope = effectScope(), vm = scope.run(() => definition.setup(props, { expose() {}, emit: (...args) => events.push(args) }))
     const unmount = mounting.unmount; await flush()
     return { vm, props, notices, events, render: () => rendering.render({}, [], props, proxyRefs(vm), {}, {}),
@@ -77,9 +82,9 @@ test('会话目录后到：恢复的会话最初被空目录挡住，资格到�
   const history = wait()
   const r = await runtime({ api: { listMessages: () => history.promise } })
   const c = await r.mount({ conversationIds: [] })
-  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, 0)
+  assert.equal(r.calls.filter(row => row.name === 'listMessageWindow').length, 0)
   c.props.conversationIds = ['conversation-a']; await flush()
-  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, 1)
+  assert.equal(r.calls.filter(row => row.name === 'listMessageWindow').length, 1)
   c.vm.input.value = '目录等待期间作者新构思'
   history.resolve([{ id: 'persisted-history', conversation_id: 'conversation-a', role: 'assistant', content: '已经保存的历史', meta: null, created_at: '' }])
   await flush()
@@ -87,16 +92,16 @@ test('会话目录后到：恢复的会话最初被空目录挡住，资格到�
   assert.equal(nodes(c.render(), row => row.type?.name === 'MessageBubble').length, 1)
   assert.equal(c.vm.input.value, '目录等待期间作者新构思')
   c.props.conversationIds = ['conversation-a', 'b']; await flush()
-  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, 1)
+  assert.equal(r.calls.filter(row => row.name === 'listMessageWindow').length, 1)
   assert.equal(posts(r).length, 0); c.dispose()
 })
 
 test('会话目录首次无过滤已读取，后来提供合法目录不重复读同一历史', async () => {
   const r = await runtime(), c = await r.mount()
-  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, 1)
+  assert.equal(r.calls.filter(row => row.name === 'listMessageWindow').length, 1)
   c.vm.input.value = '已有未发送稿'
   c.props.conversationIds = ['conversation-a']; await flush()
-  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, 1)
+  assert.equal(r.calls.filter(row => row.name === 'listMessageWindow').length, 1)
   assert.equal(c.vm.input.value, '已有未发送稿'); assert.equal(posts(r).length, 0); c.dispose()
 })
 
@@ -109,9 +114,9 @@ test('目录资格后到不能重载跨挂载同会话的在途发送或清除�
   const sending = first.vm.send(); await until(() => posts(r).length === 1)
   const original = first.vm.submission.value; first.dispose()
   const next = await r.mount({ conversationIds: [] })
-  const reads = r.calls.filter(row => row.name === 'listMessages').length
+  const reads = r.calls.filter(row => row.name === 'listMessageWindow').length
   next.props.conversationIds = ['conversation-a']; await flush()
-  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, reads)
+  assert.equal(r.calls.filter(row => row.name === 'listMessageWindow').length, reads)
   assert.equal(next.vm.streaming.value, true)
   assert.equal(next.vm.submission.value, original)
   assert.equal(nodes(next.render(), row => row.type?.name === 'NInput')[0].props.disabled, true)

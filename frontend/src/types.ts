@@ -442,7 +442,7 @@ export interface ChatAction {
   action_type: string
   status: string
   result_id: string
-  result_summary: Record<string, unknown>
+  result_summary: unknown
   target_deleted: boolean
 }
 
@@ -597,6 +597,20 @@ export interface ChatMessage {
   content: string
   meta: Record<string, unknown> | null
   created_at: string
+}
+
+export interface ChatMessageWindow {
+  conversation_id: string
+  novel_id: string | null
+  items: ChatMessage[]
+  has_more: boolean
+  next_before_message_id: string | null
+}
+
+export interface ChatActionBatch {
+  conversation_id: string
+  novel_id: string | null
+  actions_by_message_id: Record<string, ChatAction[]>
 }
 
 // ================= 质量治理（阶段七） =================
