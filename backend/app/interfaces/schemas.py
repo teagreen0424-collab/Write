@@ -417,7 +417,19 @@ class RewritePassageRequest(BaseModel):
     preview: bool = False
 
 
+class SettleAuthorFields(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(..., strict=True)
+    content: str = Field(..., strict=True)
+    directive: str = Field(..., strict=True)
+
+
+class SettleRequest(BaseModel):
+    expected_author_fields: Optional[SettleAuthorFields] = None
+
+
 class SettleApplyRequest(BaseModel):
+    source_fingerprint: str = Field(..., pattern=r"^[0-9a-f]{64}$", strict=True)
     suggestions: list[dict] = Field(default_factory=list)
 
 

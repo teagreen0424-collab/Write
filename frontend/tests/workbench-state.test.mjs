@@ -22,7 +22,13 @@ const outlineNode = (novelId = 'novel-a', patch = {}) => ({ id: `${novelId}-volu
 const book = (novelId = 'novel-a') => ({ title: novelId, chapter_count: 1, word_count: 10, draft_count: 0, finalized_count: 1, volumes: [], chapters: [] })
 const preflight = (patch = {}) => ({ chapter_count: 1, word_count: 10, ready: true, draft_chapters: [], unbound_chapters: [], unresolved_foreshadowings: [], rule_conflicts: [], ...patch })
 const outlineDraft = (title = '第一卷') => ({ title, summary: '卷概要', chapters: [{ title: '第一章', summary: '章概要' }], acts: [] })
-const settleResult = (patch = {}) => ({ summary: '定稿摘要', suggestions: [{ type: 'character', data: { name: '章节人物' } }], ...patch })
+// 受控后端夹具；来源指纹由真实后端生成，本测试仅固定其返回契约。
+const settleResult = (patch = {}) => ({ source_fingerprint: 'a'.repeat(64), summary: '定稿摘要', suggestions: [{ type: 'character', data: { name: '章节人物' } }], ...patch })
+const settleReceiptResult = (result) => ({ ...result,
+  created: result.created.map((row, index) => ({ receipt_id: `fixture-receipt-${index}`, replayed: false, deleted: false, ...row })),
+  new_count: result.new_count ?? result.created.filter((row) => !row.replayed).length,
+  replayed_count: result.replayed_count ?? result.created.filter((row) => row.replayed).length,
+})
 let sequence = 0
 
 async function panel(name, options = {}) {
@@ -55,7 +61,8 @@ async function panel(name, options = {}) {
   const implementations = { ...defaults, ...options.api }
   const api = Object.fromEntries(Object.entries(implementations).map(([method, implementation]) => [method, (...args) => {
     requests.push({ method, args: JSON.parse(JSON.stringify(args)) })
-    return implementation(...args)
+    const result = implementation(...args)
+    return method === 'settleApply' ? Promise.resolve(result).then(settleReceiptResult) : result
   }]))
   const harness = {
     api,

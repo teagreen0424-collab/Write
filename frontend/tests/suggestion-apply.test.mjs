@@ -61,9 +61,18 @@ async function writing(apply) {
   const api = {
     listChapters: async () => [{ id: 'chapter-a', novel_id: 'novel-a', title: '第一章', content: '正文', directive: '', seq: 1,
       summary: '', outline_node_id: '', status: 'draft', tension_score: null, drift_score: null }],
-    settleChapter: async () => ({ chapter_id: 'chapter-a', summary: '摘要',
+    // 受控新后端契约，真实source hash的计算由后端回归覆盖。
+    settleChapter: async () => ({ chapter_id: 'chapter-a', source_fingerprint: 'a'.repeat(64), summary: '摘要',
       suggestions: structuredClone(changes).map(({ type, data }) => ({ type, data })), drift: null, conflicts: [] }),
-    settleApply: async (...args) => { requests.push(args); return apply(...args) },
+    settleApply: async (...args) => {
+      requests.push(args)
+      const result = await apply(...args)
+      return { ...result,
+        created: result.created.map((row, index) => ({ receipt_id: `fixture-receipt-${index}`, replayed: false, deleted: false, ...row })),
+        new_count: result.new_count ?? result.created.filter((row) => !row.replayed).length,
+        replayed_count: result.replayed_count ?? result.created.filter((row) => row.replayed).length,
+      }
+    },
   }
   const mounted = await mount('WritingPanel', { novelId: 'novel-a', initialChapterId: 'chapter-a' }, api)
   await mounted.vm.doSettle()

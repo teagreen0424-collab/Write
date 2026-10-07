@@ -1,10 +1,10 @@
 import type {
   AutopilotDraft,
-  ApplicationFailure,
   AutopilotDraftInput,
   AutopilotEvent,
   AutopilotTaskSnapshot,
   Chapter,
+  ChapterAuthorFields,
   ChapterRepairPreview,
   ChapterRepairRequest,
   ChatAction,
@@ -31,6 +31,7 @@ import type {
   Relationship,
   RevisionSourceInput,
   SettleResult,
+  SettleApplyResult,
   StoryCheckResult,
   WordLimits,
   Suggestion,
@@ -289,14 +290,15 @@ export const api = {
     }),
 
   // 定稿沉淀
-  settleChapter: (novelId: string, chapterId: string) =>
+  settleChapter: (novelId: string, chapterId: string, expectedAuthorFields?: ChapterAuthorFields) =>
     request<SettleResult>(`${BASE}/novels/${novelId}/chapters/${chapterId}/settle`, {
       method: 'POST',
+      ...(expectedAuthorFields ? { body: JSON.stringify({ expected_author_fields: expectedAuthorFields }) } : {}),
     }),
-  settleApply: (novelId: string, chapterId: string, suggestions: Suggestion[]) =>
-    request<{ created: { type: string; id: string; index?: number }[]; failed?: ApplicationFailure[] }>(
+  settleApply: (novelId: string, chapterId: string, suggestions: Suggestion[], sourceFingerprint: string) =>
+    request<SettleApplyResult>(
       `${BASE}/novels/${novelId}/chapters/${chapterId}/settle/apply`,
-      { method: 'POST', body: JSON.stringify({ suggestions }) },
+      { method: 'POST', body: JSON.stringify({ suggestions, source_fingerprint: sourceFingerprint }) },
     ),
 
   // 一致性检查

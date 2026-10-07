@@ -307,6 +307,8 @@ export interface ApplicationFailure {
   index: number
   type: string
   error: string
+  code?: string
+  existing_ids?: string[]
 }
 
 export interface AppliedChange {
@@ -326,6 +328,7 @@ export interface IdeaApplyResult {
 
 export interface SettleResult {
   chapter_id: string
+  source_fingerprint: string
   summary: string
   suggestions: Suggestion[]
   drift: number | null
@@ -341,6 +344,28 @@ export interface SettleResult {
     drift: 'skipped' | 'completed' | 'failed'
     consistency: 'completed' | 'failed'
   }
+}
+
+export interface ChapterAuthorFields {
+  title: string
+  content: string
+  directive: string
+}
+
+export interface SettleReceipt {
+  index?: number
+  type: string
+  id: string
+  receipt_id: string
+  replayed: boolean
+  deleted: boolean
+}
+
+export interface SettleApplyResult {
+  created: SettleReceipt[]
+  failed?: ApplicationFailure[]
+  new_count: number
+  replayed_count: number
 }
 
 // ================= 大纲 / 自动驾驶 =================

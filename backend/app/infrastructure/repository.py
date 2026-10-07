@@ -74,6 +74,7 @@ class NovelRepo:
         for model in (
             models.AutopilotTaskEvent,
             models.AutopilotTask,
+            models.ChapterSettleReceipt,
             models.Character,
             models.Location,
             models.WorldSetting,
@@ -232,6 +233,10 @@ class ChapterRepo:
 
     def delete(self, novel_id: str, chapter_id: str):
         obj = self.get(novel_id, chapter_id)
+        self.db.query(models.ChapterSettleReceipt).filter(
+            models.ChapterSettleReceipt.novel_id == novel_id,
+            models.ChapterSettleReceipt.chapter_id == chapter_id,
+        ).delete(synchronize_session=False)
         # 删除章节时同步清理它派生出的记忆，避免后续检索召回已经删除的正文。
         self.db.query(models.MemoryChunk).filter(
             models.MemoryChunk.novel_id == novel_id,

@@ -225,6 +225,29 @@ class ChapterRevision(Base):
     created_at: Mapped[str] = mapped_column(String(40), default=_now)
 
 
+class ChapterSettleReceipt(Base):
+    """原稿逐项建议的已确认记录；实体删除后保留，防止重试复活设定。"""
+
+    __tablename__ = "chapter_settle_receipt"
+    __table_args__ = (
+        UniqueConstraint(
+            "novel_id", "chapter_id", "source_fingerprint", "suggestion_fingerprint",
+            name="uq_chapter_settle_receipt_item",
+        ),
+        Index("ix_chapter_settle_receipt_scope", "novel_id", "chapter_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    novel_id: Mapped[str] = mapped_column(String(36), ForeignKey("novel.id", ondelete="CASCADE"))
+    chapter_id: Mapped[str] = mapped_column(String(36), ForeignKey("chapter.id", ondelete="CASCADE"))
+    source_fingerprint: Mapped[str] = mapped_column(String(64))
+    suggestion_fingerprint: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(30))
+    entity_id: Mapped[str] = mapped_column(String(36))
+    payload_json: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[str] = mapped_column(String(40), default=_now)
+
+
 class OutlineNode(Base, TimestampMixin):
     __tablename__ = "outline_node"
 

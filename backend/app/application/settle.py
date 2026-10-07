@@ -2,7 +2,7 @@
 import json
 
 from fastapi import HTTPException
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,7 @@ from app.application.consistency import consistency_check
 from app.application.memory import MemoryWriteResult, _slice_content, write_chapter_memory
 from app.application import setting_index
 from app.application.reference_resolution import resolve_references, failure
+from app.application.settlement_receipts import SettleSourceChanged, apply_with_receipts, chapter_source_fingerprint
 from app.domain.entities import ChapterStatus
 from app.infrastructure.ai.llm_provider import LLMProvider
 from app.infrastructure.ai.prompts import SETTLE_SYSTEM, SETTLE_USER
@@ -64,10 +65,19 @@ def _build_suggestions(data: dict) -> list[dict]:
     return suggestions
 
 
-def settle_chapter(db: Session, novel_id: str, chapter_id: str) -> dict:
+def settle_chapter(
+    db: Session, novel_id: str, chapter_id: str, *, expected_author_fields: dict | None = None,
+) -> dict:
     """定稿一章：LLM 抽取摘要 + 新增人物/事件/伏笔建议，并落库摘要与状态。"""
-    chapter = repos.ChapterRepo(db).get(novel_id, chapter_id)
-    source = {field: getattr(chapter, field) for field in ("title", "content", "directive")}
+    # 列投影绕过旧ORM身份缓存，当前UI原稿与真实已保存稿不一致时不能提炼/定稿另一稿。
+    row = db.execute(select(models.Chapter.title, models.Chapter.content, models.Chapter.directive).where(
+        models.Chapter.novel_id == novel_id, models.Chapter.id == chapter_id,
+    )).first()
+    if row is None:
+        raise HTTPException(404, detail="章节不存在")
+    source = dict(row._mapping)
+    if expected_author_fields is not None and source != expected_author_fields:
+        raise SettleSourceChanged()
     content = source["content"]
     style_anchor = repos.NovelRepo(db).get(novel_id).style_anchor or ""
     messages = [
@@ -97,7 +107,7 @@ def settle_chapter(db: Session, novel_id: str, chapter_id: str) -> dict:
             .execution_options(synchronize_session=False)
         )
         if changed.rowcount != 1:
-            raise HTTPException(status_code=409, detail="定稿期间章节内容、标题或指令已变化；本次定稿未应用，请核对新稿后重试")
+            raise SettleSourceChanged()
         db.commit()
     except OperationalError:
         db.rollback()
@@ -160,6 +170,7 @@ def settle_chapter(db: Session, novel_id: str, chapter_id: str) -> dict:
 
     return {
         "chapter_id": chapter_id,
+        "source_fingerprint": chapter_source_fingerprint(novel_id, chapter_id, source),
         "summary": summary,
         "suggestions": suggestions,
         "drift": drift,
@@ -171,12 +182,16 @@ def settle_chapter(db: Session, novel_id: str, chapter_id: str) -> dict:
 
 
 def apply_suggestions(
-    db: Session, novel_id: str, suggestions: list[dict], chapter_id: str = ""
+    db: Session, novel_id: str, suggestions: list[dict], chapter_id: str = "",
+    *, source_fingerprint: str | None = None,
 ) -> dict:
     """作者确认后，将设定变更建议落库到对应实体表。
 
+    HTTP确认必须传原稿指纹，走持久逐项receipt。无指纹的旧内部帮助调用保留历史合同。
     chapter_id 为当前定稿章节，落库伏笔时写入 planted_chapter_id。
     """
+    if source_fingerprint is not None:
+        return apply_with_receipts(db, novel_id, chapter_id, suggestions, source_fingerprint)
     created: list[dict] = []
     failed: list[dict] = []
     repos.NovelRepo(db).get(novel_id)

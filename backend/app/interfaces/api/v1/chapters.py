@@ -1,10 +1,11 @@
 """章节 CRUD + 写作/续写/改写/定稿/版本 路由。"""
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.application import revisions as revisions_uc
 from app.application import settle as settle_uc
+from app.application.settlement_receipts import SettleSourceChanged
 from app.application import writing as writing_uc
 from app.application import outline_check as outline_check_uc
 from app.application import story_review as story_review_uc
@@ -199,12 +200,25 @@ def rewrite_passage(
 
 # ================= 定稿沉淀 =================
 @router.post("/{chapter_id}/settle")
-def settle_chapter(novel_id: str, chapter_id: str, db: Session = Depends(get_db)):
-    return settle_uc.settle_chapter(db, novel_id, chapter_id)
+def settle_chapter(
+    novel_id: str, chapter_id: str, payload: schemas.SettleRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    expected = payload.expected_author_fields.model_dump() if payload and payload.expected_author_fields is not None else None
+    try:
+        return settle_uc.settle_chapter(db, novel_id, chapter_id, expected_author_fields=expected)
+    except SettleSourceChanged as error:
+        return JSONResponse(status_code=409, content={"detail": error.detail, "code": error.code})
 
 
 @router.post("/{chapter_id}/settle/apply")
 def settle_apply(
     novel_id: str, chapter_id: str, payload: schemas.SettleApplyRequest, db: Session = Depends(get_db)
 ):
-    return settle_uc.apply_suggestions(db, novel_id, payload.suggestions, chapter_id)
+    try:
+        return settle_uc.apply_suggestions(
+            db, novel_id, payload.suggestions, chapter_id,
+            source_fingerprint=payload.source_fingerprint,
+        )
+    except SettleSourceChanged as error:
+        return JSONResponse(status_code=409, content={"detail": error.detail, "code": error.code})

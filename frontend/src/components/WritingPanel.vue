@@ -19,6 +19,7 @@ import { wordLimitError, wordLimitLabel, wordLimits } from '../utils/wordLimits'
 import ChapterRevisionPanel from './ChapterRevisionPanel.vue'
 import type {
   Chapter,
+  ApplicationFailure,
   ChapterRepairPreview,
   ClicheHit,
   ClicheResult,
@@ -30,6 +31,8 @@ import type {
   StoryCheckResult,
   StoryCheckIssue,
   Suggestion,
+  SettleApplyResult,
+  SettleReceipt,
   WordLimits,
 } from '../types'
 
@@ -156,6 +159,21 @@ const settleApplying = ref(false)
 const settledCount = ref(0)
 const settleLoading = ref(false)
 const settleWarnings = ref<string[]>([])
+const settleReceipts = ref<Record<number, SettleReceipt>>({})
+const settleConfirmedTexts = ref<Record<number, string>>({})
+const settleRefreshNeeded = ref(false)
+const settleReceiptUnavailable = ref(false)
+interface SettleSubmission {
+  sourceIndices: number[]
+  sourceFingerprint: string
+  payloadJson: string
+  submittedTexts: Record<number, string>
+  editorRevision: number
+}
+const settlePendingSubmission = ref<SettleSubmission | null>(null)
+const settledNewCount = computed(() => Object.values(settleReceipts.value).filter((row) => !row.replayed).length)
+const settledReplayedCount = computed(() => Object.values(settleReceipts.value).filter((row) => row.replayed).length)
+const settledDeletedCount = computed(() => Object.values(settleReceipts.value).filter((row) => row.deleted).length)
 interface SettleContext {
   novelId: string
   chapterId: string
@@ -163,8 +181,11 @@ interface SettleContext {
   title: string
   directive: string
   content: string
+  sourceFingerprint: string | null
 }
 const settleContext = ref<SettleContext | null>(null)
+const settleConfirmBlocked = computed(() => !validSettleFingerprint(settleContext.value?.sourceFingerprint)
+  || settleRefreshNeeded.value || settleReceiptUnavailable.value)
 let settleEpoch = 0
 let settleRequestId = 0
 let settleApplyRequestId = 0
@@ -1215,14 +1236,18 @@ async function doSettle() {
   const context: SettleContext = {
     novelId: props.novelId, chapterId: selectedId.value, epoch: settleEpoch,
     title: title.value, directive: directive.value, content: content.value,
+    sourceFingerprint: null,
   }
   const requestId = ++settleRequestId
   const isCurrent = () => isCurrentSettle(context) && requestId === settleRequestId
   settleLoading.value = true
   try {
-    const res = await api.settleChapter(context.novelId, context.chapterId)
+    const res = await api.settleChapter(context.novelId, context.chapterId, {
+      title: context.title, content: context.content, directive: context.directive,
+    })
     if (!isCurrent()) return
-    settleContext.value = context
+    const sourceFingerprint = validSettleFingerprint(res.source_fingerprint) ? res.source_fingerprint : null
+    settleContext.value = Object.freeze({ ...context, sourceFingerprint })
     settleSummary.value = res.summary
     suggestions.value = res.suggestions
     checkedSuggestion.value = res.suggestions.map(() => true)
@@ -1231,6 +1256,7 @@ async function doSettle() {
     settleErrors.value = {}
     settledCount.value = 0
     settleWarnings.value = (res.warnings ?? []).filter((warning) => typeof warning === 'string' && warning.trim())
+    if (!sourceFingerprint) settleWarnings.value.push('未取得可核对的章节来源，不能确认建议；请更新后端并重新定稿。')
     showSettle.value = true
     // 定稿只改变摘要/状态等派生字段；重读目录不能覆盖等待期间的作者正文。
     try {
@@ -1244,7 +1270,12 @@ async function doSettle() {
       }
     }
   } catch (e) {
-    if (isCurrent()) message.error((e as Error).message)
+    if (!isCurrent()) return
+    if (isSettleSourceChanged(e)) {
+      settleContext.value = Object.freeze(context)
+      settleRefreshNeeded.value = true
+      message.warning('当前编辑稿与已保存章节的来源已变化，本次未开始定稿。请保留文本，重新读取章节核对后再定稿。')
+    } else message.error((e as Error).message)
   } finally {
     if (isCurrent()) settleLoading.value = false
   }
@@ -1264,6 +1295,9 @@ function invalidateSettle(clearPreview = true) {
   settleLoading.value = false
   settleApplying.value = false
   showSettle.value = false
+  settlePendingSubmission.value = null
+  settleRefreshNeeded.value = false
+  settleReceiptUnavailable.value = false
   if (clearPreview) {
     settleSummary.value = ''
     suggestions.value = []
@@ -1273,18 +1307,85 @@ function invalidateSettle(clearPreview = true) {
     settleErrors.value = {}
     settleWarnings.value = []
     settledCount.value = 0
+    settleReceipts.value = {}
+    settleConfirmedTexts.value = {}
   }
 }
 
 function handleSettleVisibility(visible: boolean) {
   if (visible) showSettle.value = true
-  else invalidateSettle(false)
+  else if (!settleApplying.value) invalidateSettle(false)
+}
+
+function validSettleFingerprint(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
+}
+
+function isSettleSourceChanged(error: unknown): boolean {
+  const failure = error as Error & { status?: number; code?: string }
+  return failure?.code === 'settle_source_changed' || failure?.status === 409
+}
+
+function settleReceiptLabel(index: number): string {
+  const row = settleReceipts.value[index]
+  return row?.deleted ? '原目标已删除，本次未重建' : row?.replayed ? '此前已确认' : '本次新建'
+}
+
+function settleReceiptSummary(): string {
+  return `新建 ${settledNewCount.value} 条，已确认 ${settledReplayedCount.value} 条`
+    + (settledDeletedCount.value ? `；其中 ${settledDeletedCount.value} 条原目标已删除，本次未重建` : '')
+}
+
+// 不完整回执不能推测哪些写入成功，也不能向旧后端盲目重复提交。
+function normalizeSettleReceipts(result: SettleApplyResult, picked: Suggestion[]): {
+  created: (SettleReceipt & { index: number })[]; failed: ApplicationFailure[]
+} | null {
+  if (!result || !Array.isArray(result.created) || (result.failed !== undefined && !Array.isArray(result.failed))
+    || !Number.isInteger(result.new_count) || !Number.isInteger(result.replayed_count)) return null
+  const failed = result.failed ?? []
+  const validIndex = (index: number) => Number.isInteger(index) && index >= 0 && index < picked.length
+  if (failed.some((row) => !row || typeof row !== 'object' || !validIndex(row.index) || typeof row.error !== 'string' || !row.error
+    || row.type !== picked[row.index]?.type)) return null
+  const failedIndices = new Set(failed.map((row) => row.index))
+  const remaining = picked.map((_, index) => index).filter((index) => !failedIndices.has(index))
+  if (result.created.some((row) => !row || typeof row !== 'object')) return null
+  const created = result.created.map((row, index) => ({ ...row, index: row.index ?? remaining[index] }))
+  if (created.some((row) => !validIndex(row.index) || row.type !== picked[row.index]?.type
+    || typeof row.id !== 'string' || !row.id || typeof row.receipt_id !== 'string' || !row.receipt_id
+    || typeof row.replayed !== 'boolean' || typeof row.deleted !== 'boolean' || (row.deleted && !row.replayed))) return null
+  const indices = [...failed.map((row) => row.index), ...created.map((row) => row.index)]
+  if (new Set(indices).size !== indices.length || indices.length !== picked.length
+    || result.new_count !== created.filter((row) => !row.replayed).length
+    || result.replayed_count !== created.filter((row) => row.replayed).length) return null
+  return { created, failed }
+}
+
+async function refreshSettleChapter() {
+  const context = settleContext.value
+  if (!context || !isCurrentSettle(context) || settleApplying.value || settleLoading.value || !requireSaved('读取已保存章节')) return
+  const requestId = ++settleRequestId
+  const isCurrent = () => isCurrentSettle(context) && requestId === settleRequestId
+  settleLoading.value = true
+  try {
+    await loadChapters()
+    if (!isCurrent()) return
+    const chapter = chapters.value.find((row) => row.id === context.chapterId)
+    if (!chapter) { message.warning('原章节已不存在，请保留文本并核对目录'); return }
+    await selectChapter(chapter, true)
+    invalidateSettle()
+    message.info('已读取章节，请核对正文后重新定稿')
+  } catch (error) {
+    if (isCurrent()) message.warning(`章节读取未完成，当前文本与候选仍保留：${(error as Error).message}`)
+  } finally {
+    if (isCurrent()) settleLoading.value = false
+  }
 }
 
 async function confirmSettle() {
   const context = settleContext.value
-  if (!showSettle.value || !context || !isCurrentSettle(context) || settleApplying.value || settleLoading.value) return
-  const sourceIndices = suggestions.value.map((_, i) => i)
+  if (!showSettle.value || !context || !isCurrentSettle(context) || settleApplying.value || settleLoading.value || settleConfirmBlocked.value) return
+  const pending = settlePendingSubmission.value
+  const sourceIndices = pending?.sourceIndices ?? suggestions.value.map((_, i) => i)
     .filter((i) => checkedSuggestion.value[i] && !settleCompleted.value[i])
   if (!sourceIndices.length) {
     if (settledCount.value) handleSettleVisibility(false)
@@ -1293,7 +1394,7 @@ async function confirmSettle() {
   }
   let picked: Suggestion[]
   try {
-    picked = sourceIndices.map((index) => {
+    picked = pending ? JSON.parse(pending.payloadJson) : sourceIndices.map((index) => {
       const data = JSON.parse(settleDataTexts.value[index] ?? JSON.stringify(suggestions.value[index].data))
       if (!data || Array.isArray(data) || typeof data !== 'object') throw new Error('建议数据必须是 JSON 对象')
       return { ...suggestions.value[index], data }
@@ -1302,47 +1403,80 @@ async function confirmSettle() {
     message.error((error as Error).message || '建议数据 JSON 格式错误')
     return
   }
+  const sourceFingerprint = context.sourceFingerprint!
+  const submission: SettleSubmission = pending ?? {
+    sourceIndices: [...sourceIndices], sourceFingerprint, payloadJson: JSON.stringify(picked),
+    submittedTexts: Object.fromEntries(sourceIndices.map((index) => [index, settleDataTexts.value[index]])),
+    editorRevision: settleEditorRevision,
+  }
+  if (submission.sourceFingerprint !== sourceFingerprint) return
   const requestId = ++settleApplyRequestId
-  const editorRevision = settleEditorRevision
   const isCurrent = () => isCurrentSettle(context) && requestId === settleApplyRequestId && showSettle.value
+    && settleContext.value === context && context.sourceFingerprint === sourceFingerprint
   settleApplying.value = true
+  settlePendingSubmission.value = submission
   try {
-    const res = await api.settleApply(context.novelId, context.chapterId, picked)
+    const res = await api.settleApply(context.novelId, context.chapterId, JSON.parse(submission.payloadJson), sourceFingerprint)
     if (!isCurrent()) return
-    const editedWhileApplying = settleEditorRevision !== editorRevision
+    const receipts = normalizeSettleReceipts(res, picked)
+    if (!receipts) {
+      settleReceiptUnavailable.value = true
+      message.warning('未收到完整的确认回执，不能判断本次新建或已确认的项目。请保留候选并核对后端版本和保存结果，不要重复提交。')
+      return
+    }
+    settlePendingSubmission.value = null
+    const editedWhileApplying = settleEditorRevision !== submission.editorRevision
     settleErrors.value = {}
-    const failed = res.failed ?? []
+    const failed = receipts.failed
     for (const item of failed) {
       const index = sourceIndices[item.index]
       if (index !== undefined) settleErrors.value[index] = item.error
     }
-    const failedIndices = new Set(failed.map((item) => item.index))
-    const succeeded = res.created.map((item, index) => item.index ??
-      sourceIndices.map((_, i) => i).filter((i) => !failedIndices.has(i))[index])
-    for (const index of succeeded) {
-      const source = sourceIndices[index]
+    for (const row of receipts.created) {
+      const source = sourceIndices[row.index]
       if (source !== undefined) {
+        settleReceipts.value[source] = row
+        settleConfirmedTexts.value[source] = submission.submittedTexts[source]
         settleCompleted.value[source] = true
         checkedSuggestion.value[source] = false
       }
     }
-    settledCount.value += res.created.length
+    settledCount.value = Object.keys(settleReceipts.value).length
+    if (failed.some((row) => row.code === 'settle_source_changed')) {
+      settleRefreshNeeded.value = true
+      message.warning(`${settleReceiptSummary()}；剩余建议的章节来源已变化，请保留候选，重新读取核对并定稿`)
+      return
+    }
     if (failed.length) {
-      message.warning(`本次已落库 ${res.created.length} 条，${failed.length} 条未落库；请修正标出的数据后重试`)
+      message.warning(`${settleReceiptSummary()}，${failed.length} 条未确认；请修正标出的数据后重试`)
       return
     }
-    if (!res.created.length) {
-      message.warning('本次未落库任何建议，请核对后重试')
+    if (!receipts.created.length) {
+      message.warning('本次未确认任何建议，请核对后重试')
       return
     }
-    if (editedWhileApplying) {
-      message.success(`已落库 ${settledCount.value} 条设定变更，等待期间的新编辑已保留，请核对后继续`)
+    if (editedWhileApplying || settledDeletedCount.value) {
+      const text = settleReceiptSummary() + (editedWhileApplying ? '；等待期间的新编辑已保留，已确认项以原提交为准，请核对后继续' : '')
+      if (settledDeletedCount.value) message.warning(text)
+      else message.success(text)
       return
     }
-    message.success(`已落库 ${settledCount.value} 条设定变更`)
-    handleSettleVisibility(false)
+    message.success(settleReceiptSummary())
+    // 已取得完整回执后的内部完成，不受请求在途时的用户关闭保护限制。
+    invalidateSettle(false)
   } catch (e) {
-    if (isCurrent()) message.error((e as Error).message)
+    if (!isCurrent()) return
+    const failure = e as Error & { status?: number }
+    if (isSettleSourceChanged(e)) {
+      settlePendingSubmission.value = null
+      settleRefreshNeeded.value = true
+      message.warning('章节来源已变化，本次未确认剩余建议。候选与当前文本已保留，请重新读取章节核对后重新定稿。')
+    } else if (failure.status && failure.status >= 400 && failure.status < 500 && failure.status !== 408 && failure.status !== 429) {
+      settlePendingSubmission.value = null
+      message.error(failure.message)
+    } else {
+      message.warning(`未收到确认回执，保存结果尚未核对：${failure.message}。重试将沿用原提交的建议和来源，等待期间的新编辑仍保留。`)
+    }
   } finally {
     if (isCurrent()) settleApplying.value = false
   }
@@ -1547,6 +1681,7 @@ onBeforeUnmount(() => {
             @click="openRepair"
           >生成修订稿</n-button>
           <n-button type="success" :disabled="!selectedId || streaming || hasIncompleteOutput || repairApplying || settleApplying" :loading="settleLoading" @click="doSettle">定稿沉淀</n-button>
+          <n-button v-if="settleRefreshNeeded && !showSettle" :disabled="settleApplying" :loading="settleLoading" @click="refreshSettleChapter">重新读取章节核对</n-button>
         </div>
         <div class="btn-row version-actions">
           <n-button :disabled="!selectedId || summarySaving || streaming || repairApplying" @click="openSummary">章节摘要</n-button>
@@ -1924,16 +2059,23 @@ onBeforeUnmount(() => {
       @update:show="finishDiscard(false)"
     />
 
-    <n-modal :show="showSettle" @update:show="handleSettleVisibility" :mask-closable="!settleApplying" :closable="!settleApplying" preset="card" title="设定变更建议" style="width: 560px">
+    <n-modal :show="showSettle" @update:show="handleSettleVisibility" :mask-closable="!settleApplying" :closable="!settleApplying" :close-on-esc="!settleApplying" preset="card" title="设定变更建议" style="width: 560px">
       <p class="settle-summary">摘要：{{ settleSummary }}</p>
       <ul v-if="settleWarnings.length" class="settle-warning"><li v-for="(warning, i) in settleWarnings" :key="i">{{ warning }}</li></ul>
+      <p v-if="settleRefreshNeeded" class="repair-error" role="alert">章节来源已变化。请先复制需要保留的候选，再重新读取章节核对并定稿。</p>
+      <p v-if="settleReceiptUnavailable" class="repair-error" role="alert">确认回执不完整，不能继续提交。请核对后端版本与已保存项目。</p>
+      <p v-else-if="settlePendingSubmission && !settleApplying" class="settle-warning">上次提交尚未得到确认。重试会核对原提交的建议，等待期间的新编辑不会作为新项目重复创建。</p>
       <div v-if="suggestions.length">
         <div v-for="(s, i) in suggestions" :key="i" class="suggestion-row">
-          <n-checkbox v-model:checked="checkedSuggestion[i]" :disabled="settleCompleted[i] || settleApplying">{{ suggestionLabel(s) }}</n-checkbox>
-          <n-tag v-if="settleCompleted[i]" type="success" size="small">已落库</n-tag>
+          <n-checkbox v-model:checked="checkedSuggestion[i]" :disabled="settleCompleted[i] || settleApplying || !!settlePendingSubmission || settleConfirmBlocked">{{ suggestionLabel(s) }}</n-checkbox>
+          <n-tag v-if="settleCompleted[i]" :type="settleReceipts[i]?.deleted ? 'warning' : 'success'" size="small">{{ settleReceiptLabel(i) }}</n-tag>
           <template v-if="settleErrors[i]">
             <p class="repair-error">{{ settleErrors[i] }}</p>
-            <n-input v-model:value="settleDataTexts[i]" type="textarea" :disabled="settleApplying" :autosize="{ minRows: 2, maxRows: 8 }" />
+            <n-input v-model:value="settleDataTexts[i]" type="textarea" :disabled="settleApplying || !!settlePendingSubmission || settleConfirmBlocked" :autosize="{ minRows: 2, maxRows: 8 }" />
+          </template>
+          <template v-if="settleCompleted[i] && settleDataTexts[i] !== settleConfirmedTexts[i]">
+            <p class="settle-warning">此项已按原提交确认，等待期间的新编辑保留供复制，不会再次创建。</p>
+            <n-input :value="settleDataTexts[i]" type="textarea" readonly :autosize="{ minRows: 2, maxRows: 8 }" />
           </template>
         </div>
       </div>
@@ -1941,7 +2083,8 @@ onBeforeUnmount(() => {
       <template #footer>
         <div class="modal-actions">
           <n-button :disabled="settleApplying" @click="handleSettleVisibility(false)">取消</n-button>
-          <n-button type="primary" :disabled="settleLoading" :loading="settleApplying" @click="confirmSettle">确认落库</n-button>
+          <n-button v-if="settleRefreshNeeded" :disabled="settleApplying" :loading="settleLoading" @click="refreshSettleChapter">重新读取章节核对</n-button>
+          <n-button type="primary" :disabled="settleLoading || settleConfirmBlocked" :loading="settleApplying" @click="confirmSettle">{{ settlePendingSubmission ? '重试核对原提交' : '确认落库' }}</n-button>
         </div>
       </template>
     </n-modal>
