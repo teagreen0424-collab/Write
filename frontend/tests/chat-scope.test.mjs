@@ -44,6 +44,8 @@ async function component(name, props, api, extras = {}) {
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// chat-registry-${sequence + 1}`)
   const projectHelperUrl = moduleUrl(compile((await readFile(new URL('../src/utils/projectDraft.ts', import.meta.url), 'utf8'))
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// project-registry-${sequence + 1}`)
+  const managementHelperUrl = moduleUrl(compile((await readFile(new URL('../src/utils/conversationManagement.ts', import.meta.url), 'utf8'))
+    .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// management-registry-${sequence + 1}`)
   const script = compileScript(parse(await readFile(new URL(`../src/components/${name}.vue`, import.meta.url), 'utf8')).descriptor, { id: name }).content
   const source = 'const __harness = globalThis.__chatScopeHarness\n' + script
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
@@ -54,6 +56,7 @@ async function component(name, props, api, extras = {}) {
     .replace(/from ['"]\.\.\/types['"]/g, `from '${typesUrl}'`)
     .replace(/from ['"]\.\.\/utils\/chatSubmission['"]/g, `from '${chatHelperUrl}'`)
     .replace(/from ['"]\.\.\/utils\/projectDraft['"]/g, `from '${projectHelperUrl}'`)
+    .replace(/from ['"]\.\.\/utils\/conversationManagement['"]/g, `from '${managementHelperUrl}'`)
     .replace(/import (\w+) from ['"]\.\/\w+\.vue['"]/g, 'const $1 = {}')
     .replace(/\bonMounted\(/g, '__harness.onMounted(')
     .replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')

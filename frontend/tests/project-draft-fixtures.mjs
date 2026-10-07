@@ -31,14 +31,14 @@ export async function projectRuntime(overrides = {}, options = {}) {
     updateNovel: async (_id, data) => novel(data), ...overrides,
   }
   const harness = { api: Object.fromEntries(Object.entries(api).map(([name, fn]) => [name, (...args) => { calls.push({ name, args }); return fn(...args) }])),
-    useMessage: () => { const context = active; return Object.fromEntries(['success','warning','error'].map(type => [type, text => context.notices.push({ type, text })])) },
+    useMessage: () => { const context = active; return Object.fromEntries(['success','warning','error','info'].map(type => [type, text => context.notices.push({ type, text })])) },
     useDialog: () => { const context = active; return { warning: settings => context.dialogs.push(settings) } },
     onMounted: fn => active.hooks.mount = fn, onBeforeUnmount: fn => active.hooks.unmount = fn,
   }
-  for (const name of ['NButton','NForm','NFormItem','NInput','NModal','NSelect','NTabPane','NTabs']) harness[name] = { name }
+  for (const name of ['NButton','NForm','NFormItem','NInput','NModal','NSelect','NTabPane','NTabs','NDropdown','NEmpty']) harness[name] = { name }
   globalThis[key] = harness
   const helpers = {}
-  for (const name of ['chatSubmission', 'projectDraft', 'asyncScope']) helpers[name] = url(compile((await readFile(new URL(`../src/utils/${name}.ts`, import.meta.url),'utf8'))
+  for (const name of ['chatSubmission', 'projectDraft', 'asyncScope', 'conversationManagement']) helpers[name] = url(compile((await readFile(new URL(`../src/utils/${name}.ts`, import.meta.url),'utf8'))
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// ${key}`)
   const definitions = new Map()
   async function definition(name) {
@@ -49,7 +49,7 @@ export async function projectRuntime(overrides = {}, options = {}) {
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
     .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1}=__harness')
     .replace(/import \{ api \} from ['"]\.\.\/api['"]/g, 'const {api}=__harness')
-    .replace(/from ['"]\.\.\/utils\/(chatSubmission|projectDraft|asyncScope)['"]/g, (_all, name) => `from '${helpers[name]}'`)
+    .replace(/from ['"]\.\.\/utils\/(chatSubmission|projectDraft|asyncScope|conversationManagement)['"]/g, (_all, name) => `from '${helpers[name]}'`)
     .replace(/import (\w+) from ['"]\.\/[^'"]+\.vue['"]/g, 'const $1={name:"$1"}')
     .replace(/import\(['"]\.\/([^'"]+)\.vue['"]\)/g, 'Promise.resolve({ name: "$1", render: () => null })')
     .replace(/\bonMounted\(/g, '__harness.onMounted(').replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')
@@ -74,6 +74,6 @@ export async function projectRuntime(overrides = {}, options = {}) {
     context.stop = () => { context.hooks.unmount?.(); scope.stop() }
     contexts.push(context); return context
   }
-  return { mount: () => mountDefinition('ChatView'), mountWorkbench: props => mountDefinition('WorkbenchView',props ?? {}),
+  return { mount: () => mountDefinition('ChatView'), mountWorkbench: props => mountDefinition('WorkbenchView',props ?? {}), mountSidebar: props => mountDefinition('ConversationSidebar',props),
     calls, copied, helper: await import(helpers.projectDraft), stop: () => contexts.forEach(context => context.stop()) }
 }

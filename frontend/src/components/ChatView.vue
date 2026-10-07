@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   NButton,
   NForm,
@@ -21,6 +21,12 @@ import {
   projectText, promotionDraft,
 } from '../utils/projectDraft'
 import type { ProjectDraft, ProjectFields } from '../utils/projectDraft'
+import {
+  conversationCreations, creationEntry, deletedConversations,
+  existingRenameDrafts, isConversation, managementDirty, managementOperation,
+  observeConversations, renameDirty, renameDraft,
+} from '../utils/conversationManagement'
+import type { ConversationCreation, RenameDraft } from '../utils/conversationManagement'
 
 const emit = defineEmits<{
   (e: 'enter-workbench', novelId: string): void
@@ -37,7 +43,17 @@ const selectedId = ref<string | null>(null)
 const selected = computed(() => conversations.value.find((c) => c.id === selectedId.value) ?? null)
 
 const renameTarget = ref<Conversation | null>(null)
-const renameTitle = ref('')
+const renameState = ref<RenameDraft | null>(null)
+const renameTitle = computed({ get: () => renameState.value?.draft ?? '', set: (value: string) => { if (renameState.value) renameState.value.draft = value } })
+const renameRecords = computed(existingRenameDrafts)
+const creationRecords = computed(() => [...conversationCreations.values()].filter(state => state.phase !== 'idle'))
+const conversationBusy = computed(() => Object.fromEntries([...conversationCreations].map(([key, state]) => [key, state.pending !== null])))
+const conversationBlocked = computed(() => Object.fromEntries([...conversationCreations].map(([key, state]) => [key, state.pending !== null || state.checking !== null || state.phase === 'unknown'])))
+const managerDirty = computed(managementDirty)
+const titleCopy = ref('')
+const showTitleCopy = ref(false)
+let renameEpoch = 0
+let selectionEpoch = 0
 const promoteTarget = ref<Conversation | null>(null)
 const promoteState = ref<ProjectDraft | null>(null)
 const promoteForm = computed({
@@ -66,19 +82,23 @@ const chatDirty = ref(false)
 const deletingNovel = ref(false)
 let alive = true
 let loadId = 0
+watch(selectedId, () => { selectionEpoch += 1 }, { flush: 'sync' })
+watch(chatDirty, () => { selectionEpoch += 1 }, { flush: 'sync' })
+watch(projectUnsaved, () => { selectionEpoch += 1 }, { flush: 'sync' })
 
 const novelOptions = computed(() => novels.value.map((n) => ({ label: n.title, value: n.id })))
 
-async function loadAll(errorPrefix = '', canReport: () => boolean = () => alive) {
+async function loadAll(errorPrefix = '', canReport: () => boolean = () => alive, selectInitial = true) {
   const requestId = ++loadId
   try {
     const [n, c] = await Promise.all([api.listNovels(), api.listConversations()])
     if (!alive || requestId !== loadId) return false
     novels.value = n
     conversations.value = c
+    observeConversations(c)
     if (selectedId.value && !c.some((x) => x.id === selectedId.value)) {
       selectedId.value = c[0]?.id ?? null
-    } else if (!selectedId.value && c.length) {
+    } else if (selectInitial && !selectedId.value && c.length) {
       selectedId.value = c[0].id
     }
     return true
@@ -89,43 +109,181 @@ async function loadAll(errorPrefix = '', canReport: () => boolean = () => alive)
 }
 
 function select(id: string) {
+  selectionEpoch += 1
   selectedId.value = id
 }
 
 async function newGlobal() {
-  try {
-    const c = await api.createConversation(null)
-    await loadAll()
-    selectedId.value = c.id
-  } catch (e) {
-    message.error((e as Error).message)
-  }
+  await createConversation(null)
 }
 
 async function newNovelConversation(novelId: string) {
+  await createConversation(novelId)
+}
+
+function rememberConversation(result: Conversation) {
+  loadId += 1
+  conversations.value = [result, ...conversations.value.filter(item => item.id !== result.id)]
+}
+
+async function createConversation(novelId: string | null) {
+  const state = creationEntry(novelId)
+  if (!alive || state.pending !== null || state.checking !== null || state.phase === 'unknown') return
+  if (novelId !== null && !novels.value.some(item => item.id === novelId)) { message.warning('该作品当前不在目录中，请先核对。'); return }
+  const operation = managementOperation(), epoch = selectionEpoch
+  const canSelect = !chatDirty.value && !projectUnsaved.value && !renameRecords.value.some(renameDirty)
+  const current = () => alive && selectionEpoch === epoch && state.pending === operation
+  state.pending = operation
+  state.phase = 'pending'
+  state.saved = null
+  state.directory = null
+  state.error = ''
   try {
     const c = await api.createConversation(novelId)
-    await loadAll()
-    selectedId.value = c.id
+    if (!isConversation(c) || c.novel_id !== novelId) throw new Error('新会话回应不完整或归属不一致，请核对实际目录。')
+    if (state.pending !== operation) return
+    state.saved = c
+    state.exists = true
+    state.phase = 'saved'
+    if (!alive) return
+    // 保存事实先采用，目录故障不能把真实201变成未知或漏掉会话入口。
+    rememberConversation(c)
+    if (current()) message.success('新会话已创建')
+    await loadAll('新会话已创建，目录刷新未完成：', current, false)
+    if (current() && canSelect && !chatDirty.value && !projectUnsaved.value && !renameRecords.value.some(renameDirty)) selectedId.value = c.id
   } catch (e) {
-    message.error((e as Error).message)
-  }
+    if (state.pending !== operation) return
+    state.phase = 'unknown'
+    state.error = (e as Error).message
+    if (current()) message.warning(`新会话创建结果待核对：${state.error}。不会自动重新创建，请核对实际目录。`)
+  } finally { if (state.pending === operation) state.pending = null }
+}
+
+async function checkConversationCreation(state: ConversationCreation) {
+  if (!alive || state.pending !== null || state.checking !== null) return
+  const operation = managementOperation()
+  state.checking = operation
+  try {
+    const items = await api.listConversations()
+    if (!Array.isArray(items) || !items.every(isConversation)) throw new Error('会话目录回应不完整。')
+    if (state.checking !== operation) return
+    state.directory = items.filter(item => item.novel_id === state.novelId)
+    if (state.saved) state.exists = items.some(item => item.id === state.saved!.id)
+    if (alive) message.info('已读取当前会话目录；名称或归属不能证明原创建请求是否成功。')
+  } catch (error) { if (alive) message.error(`会话目录读取未完成：${(error as Error).message}`) }
+  finally { if (state.checking === operation) state.checking = null }
+}
+
+function freshConversationIntent(state: ConversationCreation) {
+  if (!alive || state.pending !== null || state.checking !== null || !state.directory) return
+  const phase = state.phase
+  dialog.warning({ title: '核对后另建会话？', content: '原请求可能已经创建会话。目录不是原请求回执；请人工核对后再开始一次新的创建意图，不会重发原请求或删除已有会话。',
+    positiveText: '已核对，允许另建', negativeText: '继续核对', onPositiveClick: () => {
+      if (!alive || state.pending !== null || state.checking !== null || state.phase !== phase) return false
+      state.phase = 'idle'; state.error = ''
+    } })
+}
+
+function openCreatedConversation(state: ConversationCreation) {
+  if (!alive || !state.saved || !state.exists) return
+  rememberConversation(conversations.value.find(item => item.id === state.saved!.id) ?? state.saved)
+  select(state.saved.id)
 }
 
 function openRename(c: Conversation) {
+  if (!alive || !isConversation(c)) return
+  renameEpoch += 1
   renameTarget.value = c
-  renameTitle.value = c.title
+  renameState.value = renameDraft(c)
+}
+
+function reopenRename(state: RenameDraft) {
+  openRename(conversations.value.find(item => item.id === state.id) ?? state.source)
+}
+
+function renameCurrent(state: RenameDraft, epoch: number) {
+  return alive && renameState.value === state && renameTarget.value?.id === state.id && renameEpoch === epoch
+}
+
+function renameNotice(state: RenameDraft) {
+  if (!state.exists) return '原会话当前不在目录中；标题稿仍可复制，不会重新创建或写入。'
+  if (state.phase === 'pending') return '正在保存原提交标题，后来输入另行保留；关闭不会取消请求。'
+  if (state.phase === 'unknown') return '会话标题保存结果待核对。原提交与后来稿保留；当前目录标题不是原请求回执。'
+  if (state.saved) return '本次提交的会话标题已保存；后来修改仍需另行明确保存。'
+  return '标题稿仅保留在当前页面；完整刷新或关闭页面前请复制。'
+}
+
+function closeRename() {
+  const state = renameState.value
+  if (!state) return
+  const epoch = renameEpoch, revision = state.revision
+  const close = () => {
+    if (!renameCurrent(state, epoch)) return false
+    if (state.revision !== revision) { message.warning('确认期间标题又有修改，请重新核对。'); return false }
+    renameEpoch += 1; renameTarget.value = null
+  }
+  if (!renameDirty(state)) return close()
+  dialog.warning({ title: '关闭并保留会话标题？', content: '原提交与当前标题在本页面的“会话标题草稿”入口保留。关闭不会取消后台保存；完整刷新前请先复制。', positiveText: '关闭并保留', negativeText: '继续编辑', onPositiveClick: close })
 }
 
 async function submitRename() {
-  if (!renameTarget.value) return
+  const state = renameState.value
+  if (!alive || !state || !renameTarget.value || !state.exists || state.pending !== null || state.checking !== null || state.phase === 'unknown') return
+  if (!conversations.value.some(item => item.id === state.id)) { message.warning('原会话当前不在目录中，请先核对；稿件仍可复制。'); return }
+  if (state.draft === state.baseline) { message.warning('会话标题没有需要保存的修改。'); return }
+  const title = state.draft, revision = state.revision, epoch = renameEpoch, operation = managementOperation()
+  state.original = title; state.pending = operation; state.phase = 'pending'; state.error = ''; state.observed = null
+  const current = () => renameCurrent(state, epoch)
   try {
-    await api.updateConversation(renameTarget.value.id, { title: renameTitle.value })
-    renameTarget.value = null
-    await loadAll()
+    const result = await api.updateConversation(state.id, { title })
+    if (state.pending !== operation) return
+    if (!isConversation(result) || result.id !== state.id || result.title !== title) throw new Error('标题保存回应不完整或与原提交不一致，请核对当前会话。')
+    state.saved = result; state.source = result; state.baseline = title; state.phase = 'saved'
+    if (state.revision === revision) state.draft = title
+    if (!current()) return
+    rememberConversation(result)
+    message.success('会话标题已保存')
+    await loadAll('会话标题已保存，目录刷新未完成：', current)
   } catch (e) {
-    message.error((e as Error).message)
-  }
+    if (state.pending !== operation) return
+    state.phase = 'unknown'; state.error = (e as Error).message
+    if (current()) message.warning(`会话标题保存结果待核对：${state.error}。请保留原提交和当前标题。`)
+  } finally { if (state.pending === operation) state.pending = null }
+}
+
+async function checkRename() {
+  const state = renameState.value
+  if (!alive || !state || state.pending !== null || state.checking !== null) return
+  const epoch = renameEpoch, operation = managementOperation()
+  state.checking = operation
+  try {
+    const items = await api.listConversations()
+    if (!Array.isArray(items) || !items.every(isConversation)) throw new Error('会话目录回应不完整。')
+    if (state.checking !== operation) return
+    state.observed = items.find(item => item.id === state.id) ?? null
+    state.exists = !!state.observed
+    if (renameCurrent(state, epoch)) message.info('已读取会话当前资料；这不是原标题请求的回执，请人工核对。')
+  } catch (error) { if (renameCurrent(state, epoch)) message.error(`会话核对未完成：${(error as Error).message}`) }
+  finally { if (state.checking === operation) state.checking = null }
+}
+
+function continueRename() {
+  const state = renameState.value
+  if (!state?.observed || !state.exists || state.pending !== null || state.checking !== null) return
+  const epoch = renameEpoch, revision = state.revision, observed = state.observed
+  dialog.warning({ title: '以当前会话资料继续编辑？', content: `当前目录标题为「${observed.title}」。它不证明原提交是否保存；保留当前稿，以这次明确读取的标题作为比较基准，后续修改仍需点击保存。`, positiveText: '采用当前资料，保留稿件', negativeText: '继续核对', onPositiveClick: () => {
+    if (!renameCurrent(state, epoch) || state.revision !== revision || state.observed !== observed || state.pending !== null || state.checking !== null) return false
+    state.baseline = observed.title; state.source = observed; state.phase = 'idle'; state.error = ''; state.saved = null
+  } })
+}
+
+async function copyRename(original = false) {
+  const state = renameState.value
+  if (!state) return
+  const epoch = renameEpoch, text = original ? state.original : state.draft
+  if (text === null) return
+  try { await navigator.clipboard.writeText(text) }
+  catch { if (renameCurrent(state, epoch)) { titleCopy.value = text; showTitleCopy.value = true; message.warning('复制不可用，请从只读会话标题框手动复制。') } }
 }
 
 function openPromote(c: Conversation) {
@@ -164,6 +322,7 @@ function removeConversation(c: Conversation) {
       try {
         await api.deleteConversation(c.id)
         removeChatSubmissions([c.id])
+        deletedConversations([c.id])
         if (!alive) return
         loadId += 1
         conversations.value = conversations.value.filter((item) => item.id !== c.id)
@@ -363,7 +522,7 @@ function startFreshCreate() {
 }
 
 function beforeUnload(event: BeforeUnloadEvent) {
-  if (!projectUnsaved.value) return
+  if (!projectUnsaved.value && !managerDirty.value) return
   event.preventDefault()
   event.returnValue = ''
 }
@@ -373,9 +532,9 @@ function enterWorkbench(novelId: string) {
 }
 
 function leaveChat(navigate: () => void) {
-  if (!chatDirty.value && !projectUnsaved.value) return navigate()
+  if (!chatDirty.value && !projectUnsaved.value && !managerDirty.value) return navigate()
   dialog.warning({
-    title: '离开对话？', content: '有未保存输入、待核对原稿、作品构思或未处理回复。当前页面内暂保留，完整刷新或关闭前请先复制；确定继续离开吗？',
+    title: '离开对话？', content: '有未保存输入、待核对原稿、作品构思、会话标题稿或未核对的新会话创建。当前页面内暂保留，完整刷新或关闭前请先复制；确定继续离开吗？',
     positiveText: '保留并继续', negativeText: '继续编辑', onPositiveClick: navigate,
   })
 }
@@ -393,6 +552,7 @@ function removeNovel(novel: Novel) {
       try {
         await api.deleteNovel(novel.id)
         removeChatSubmissions(removedConversationIds, novel.id)
+        deletedConversations(removedConversationIds)
         if (!alive) return
         loadId += 1
         novels.value = novels.value.filter((item) => item.id !== novel.id)
@@ -409,7 +569,7 @@ function removeNovel(novel: Novel) {
 }
 
 onMounted(() => { loadAll(); window.addEventListener('beforeunload', beforeUnload) })
-onBeforeUnmount(() => { alive = false; loadId += 1; createEpoch += 1; promoteEpoch += 1; window.removeEventListener('beforeunload', beforeUnload) })
+onBeforeUnmount(() => { alive = false; loadId += 1; createEpoch += 1; promoteEpoch += 1; renameEpoch += 1; window.removeEventListener('beforeunload', beforeUnload) })
 </script>
 
 <template>
@@ -418,6 +578,8 @@ onBeforeUnmount(() => { alive = false; loadId += 1; createEpoch += 1; promoteEpo
       :novels="novels"
       :conversations="conversations"
       :selected-id="selectedId"
+      :creation-busy="conversationBusy"
+      :creation-blocked="conversationBlocked"
       @new-global="newGlobal"
       @new-novel-conversation="newNovelConversation"
       @select="select"
@@ -430,6 +592,21 @@ onBeforeUnmount(() => { alive = false; loadId += 1; createEpoch += 1; promoteEpo
       @delete-novel="removeNovel"
     />
     <div class="chat-content">
+    <section v-if="renameRecords.length || creationRecords.length" class="project-recovery" aria-label="页内会话管理稿件">
+      <strong>会话管理</strong><span>仅在本页面保留；完整刷新前请复制标题稿并核对创建结果。</span>
+      <n-button v-for="record in renameRecords" :key="record.id" size="small" @click="reopenRename(record)">会话标题草稿 · {{ record.draft || record.source.title || '新对话' }}</n-button>
+      <div v-for="record in creationRecords" :key="record.key" aria-label="新会话创建记录">
+        <p role="alert">{{ record.novelId ? novels.find(item => item.id === record.novelId)?.title || '原作品' : '全局' }} · {{ record.phase === 'pending' ? '新会话正在创建，关闭页面不会取消请求' : record.phase === 'unknown' ? '新会话创建结果待核对，不会自动重试' : '新会话已创建' }}</p>
+        <p v-if="record.error">{{ record.error }}</p>
+        <n-button v-if="record.saved" size="small" :disabled="!record.exists" @click="openCreatedConversation(record)">打开已创建会话</n-button>
+        <n-button v-if="record.phase === 'unknown' || record.directory" size="small" :loading="record.checking !== null" :disabled="record.pending !== null" @click="checkConversationCreation(record)">核对会话目录</n-button>
+        <template v-if="record.directory">
+          <p>只显示当前目录，不按名称或归属判断原创建请求是否已保存。</p>
+          <ul aria-label="会话创建目录核对"><li v-for="item in record.directory" :key="item.id">{{ item.title || '新对话' }}</li></ul>
+          <n-button v-if="record.phase === 'unknown'" size="small" :disabled="record.pending !== null || record.checking !== null" @click="freshConversationIntent(record)">确认核对后另建会话</n-button>
+        </template>
+      </div>
+    </section>
     <section v-if="projectRecords.length" class="project-recovery" aria-label="页内作品构思">
       <strong>作品构思</strong>
       <span>仅保留在本页面，完整刷新前请先复制。</span>
@@ -455,12 +632,29 @@ onBeforeUnmount(() => { alive = false; loadId += 1; createEpoch += 1; promoteEpo
       preset="card"
       title="重命名会话"
       style="width: 400px"
-      @update:show="(v: boolean) => { if (!v) renameTarget = null }"
+      :mask-closable="false"
+      :close-on-esc="false"
+      @update:show="(v: boolean) => { if (!v) closeRename() }"
     >
-      <n-input v-model:value="renameTitle" placeholder="会话标题" />
+      <template v-if="renameState">
+        <p role="alert">{{ renameNotice(renameState) }}</p>
+        <p v-if="renameState.error" role="alert">{{ renameState.error }}</p>
+        <n-input v-model:value="renameTitle" placeholder="会话标题" :input-props="{ 'aria-label': '当前会话标题' }" />
+        <n-button size="small" @click="copyRename()">复制当前会话标题</n-button>
+        <template v-if="renameState.original !== null">
+          <p>原提交标题（与后来输入分开）</p>
+          <n-input readonly :value="renameState.original" :input-props="{ 'aria-label': '原提交会话标题' }" />
+          <n-button size="small" @click="copyRename(true)">复制原提交会话标题</n-button>
+        </template>
+        <n-button size="small" :loading="renameState.checking !== null" :disabled="renameState.pending !== null" @click="checkRename">核对当前会话</n-button>
+        <template v-if="renameState.observed">
+          <p>明确读取的当前标题：{{ renameState.observed.title || '空标题' }}。这不是原请求回执。</p>
+          <n-button size="small" :disabled="renameState.pending !== null || renameState.checking !== null" @click="continueRename">以当前资料继续编辑</n-button>
+        </template>
+      </template>
       <template #footer>
-        <n-button @click="renameTarget = null">取消</n-button>
-        <n-button type="primary" @click="submitRename">确定</n-button>
+        <n-button @click="closeRename">关闭并保留会话标题</n-button>
+        <n-button type="primary" :loading="renameState?.pending !== null" :disabled="!renameState || !renameState.exists || renameState.phase === 'unknown' || renameState.checking !== null || renameState.draft === renameState.baseline" @click="submitRename">保存会话标题</n-button>
       </template>
     </n-modal>
 
@@ -517,6 +711,10 @@ onBeforeUnmount(() => { alive = false; loadId += 1; createEpoch += 1; promoteEpo
     <n-modal :show="!!copyFallback" preset="card" title="手动复制构思" style="width: 560px" @update:show="(v: boolean) => { if (!v) copyFallback = '' }">
       <p>剪贴板不可用，请手动选中并复制。关闭此框不会清除页内稿件。</p>
       <n-input type="textarea" readonly :value="copyFallback" :input-props="{ 'aria-label': copyFallbackOriginal ? '手动复制原提交' : '当前作品构思' }" :autosize="{ minRows: 4, maxRows: 14 }" />
+    </n-modal>
+    <n-modal :show="showTitleCopy" preset="card" title="手动复制会话标题" style="width: 500px" @update:show="(v: boolean) => { if (!v) showTitleCopy = false }">
+      <p>剪贴板不可用，请手动选中复制。关闭不会清除页内标题稿。</p>
+      <n-input type="textarea" readonly :value="titleCopy" :input-props="{ 'aria-label': '手动复制会话标题' }" :autosize="{ minRows: 2, maxRows: 8 }" />
     </n-modal>
   </div>
 </template>

@@ -650,8 +650,12 @@ class ConversationRepo:
             self._ensure_novel(novel_id)
         obj = self.model(novel_id=novel_id, title=title)
         self.db.add(obj)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(obj)
+        frozen = {column.key: getattr(obj, column.key) for column in self.model.__table__.columns}
+        self.db.commit()
+        for key, value in frozen.items():
+            set_committed_value(obj, key, value)
         return obj
 
     def update(self, conversation_id: str, **data):
@@ -663,8 +667,12 @@ class ConversationRepo:
         for k, v in data.items():
             if v is not None:
                 setattr(obj, k, v)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(obj)
+        frozen = {column.key: getattr(obj, column.key) for column in self.model.__table__.columns}
+        self.db.commit()
+        for key, value in frozen.items():
+            set_committed_value(obj, key, value)
         return obj
 
     def delete(self, conversation_id: str):

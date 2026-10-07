@@ -7,6 +7,8 @@ const props = defineProps<{
   novels: Novel[]
   conversations: Conversation[]
   selectedId: string | null
+  creationBusy?: Record<string, boolean>
+  creationBlocked?: Record<string, boolean>
 }>()
 
 const emit = defineEmits<{
@@ -61,7 +63,7 @@ function onAction(key: string, c: Conversation) {
     <div class="section">
       <div class="section-head">
         <span class="section-title">全局对话</span>
-        <n-button size="tiny" @click="emit('new-global')">+ 新对话</n-button>
+        <n-button size="tiny" :loading="creationBusy?.global" :disabled="creationBlocked?.global" @click="emit('new-global')">+ 新对话</n-button>
       </div>
       <div class="list">
         <div
@@ -93,7 +95,7 @@ function onAction(key: string, c: Conversation) {
               {{ expanded.has(n.id) ? '▾' : '▸' }} {{ n.title }}
             </span>
             <div class="novel-actions">
-              <n-button size="tiny" quaternary title="新会话" @click="emit('new-novel-conversation', n.id)">
+              <n-button size="tiny" quaternary title="新会话" :loading="creationBusy?.[`novel:${n.id}`]" :disabled="creationBlocked?.[`novel:${n.id}`]" @click="emit('new-novel-conversation', n.id)">
                 +
               </n-button>
               <n-button size="tiny" quaternary title="进入工作台" @click="emit('enter-workbench', n.id)">
