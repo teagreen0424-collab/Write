@@ -112,7 +112,11 @@ class DeepCheckTest(unittest.TestCase):
         ):
             result = consistency_uc.deep_check(self.db, self.novel_id, content)
 
-        self.assertEqual(result["chunks_checked"], 2)
+        self.assertEqual(result["chunks_checked"], 0)
+        self.assertEqual(result["chunks_attempted"], 2)
+        self.assertEqual(result["chunks_failed"], 2)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(len(result["warnings"]), 2)
         self.assertEqual(result["conflicts"], [])
 
 

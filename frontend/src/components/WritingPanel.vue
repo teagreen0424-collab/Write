@@ -28,6 +28,7 @@ import type {
   ClicheResult,
   Conflict,
   DeepCheckConflict,
+  DeepCheckResult,
   OutlineCheckResult,
   OutlineNode,
   Segment,
@@ -100,12 +101,32 @@ const rewriteIntent = ref('去AI味')
 const clicheHits = ref<ClicheHit[]>([])
 const cliche = ref<ClicheResult | null>(null)
 const deepConflicts = ref<DeepCheckConflict[]>([])
-const deepMeta = ref<{
-  chunks_checked: number
-  chunks_skipped: number
-  truncated: boolean
-} | null>(null)
+const deepMeta = ref<DeepCheckResult | null>(null)
+const deepResultConfirmed = ref(false)
+const deepCoverageConfirmed = ref(false)
+const deepRequestError = ref('')
 const deepLoading = ref(false)
+const DEEP_STATUS_LABEL = { complete: '已完成可核对范围', partial: '部分完成', failed: '检查失败', skipped: '未执行语义检查' }
+const deepRuleConflicts = computed(() => deepMeta.value?.rule_conflicts ?? [])
+const deepStatusLabel = computed(() => {
+  if (deepLoading.value) return '正在检查'
+  if (deepRequestError.value) return '请求未完成'
+  if (!deepResultConfirmed.value || !deepMeta.value) return '未完整确认'
+  return DEEP_STATUS_LABEL[deepMeta.value.status]
+})
+const deepClean = computed(() => deepResultConfirmed.value && deepMeta.value?.status === 'complete'
+  && !deepConflicts.value.length && !deepRuleConflicts.value.length)
+const deepIncompleteHint = computed(() => {
+  if (deepRequestError.value) return '深度检查请求未完成，不能判断是否存在语义冲突；请重试或人工核对。'
+  if (!deepResultConfirmed.value) return '本次深度检查未得到完整确认，不能判断是否存在语义冲突；请核对服务版本并重试或人工校对。'
+  if (deepMeta.value?.status === 'failed') return '语义检查未完成，所有尝试分块均失败；请重试并人工核对。'
+  if (deepMeta.value?.status === 'partial') return '部分范围未完成核对；返回的冲突只来自已检查内容，请重试并人工核对失败及未查范围。'
+  if (deepMeta.value?.status === 'skipped') return '未执行语义检查，本次没有可核对分块；请查看跳过原因与规则冲突并人工校对。'
+  return ''
+})
+const deepCheckEmptyText = computed(() => deepIncompleteHint.value
+  || (deepRuleConflicts.value.length ? '语义已检查范围未返回冲突；规则层发现问题，请核对下方冲突。'
+    : '已检查范围内未发现明显冲突，仍需人工校对'))
 const outlineCheckResult = ref<OutlineCheckResult | null>(null)
 const outlineCheckLoading = ref(false)
 const storyCheckResult = ref<StoryCheckResult | null>(null)
@@ -599,6 +620,9 @@ function clearMarks() {
   cliche.value = null
   deepConflicts.value = []
   deepMeta.value = null
+  deepResultConfirmed.value = false
+  deepCoverageConfirmed.value = false
+  deepRequestError.value = ''
   outlineCheckResult.value = null
   invalidateStoryCheck()
 }
@@ -1141,6 +1165,49 @@ async function doScanCliche() {
   }
 }
 
+const DEEP_COUNT_KEYS = ['chunks_total', 'chunks_eligible', 'chunks_attempted', 'chunks_checked',
+  'chunks_failed', 'chunks_skipped', 'chunks_skipped_rule', 'chunks_skipped_no_entity', 'chunks_unchecked'] as const
+
+function readDeepCheckResult(value: unknown, checkedContent: string) {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  const integer = (item: unknown): item is number => typeof item === 'number' && Number.isSafeInteger(item) && item >= 0
+  const counts = Object.fromEntries(DEEP_COUNT_KEYS.map((key) => [key, integer(raw[key]) ? raw[key] : 0])) as Pick<DeepCheckResult, typeof DEEP_COUNT_KEYS[number]>
+  const coverage = DEEP_COUNT_KEYS.every((key) => integer(raw[key]))
+    && counts.chunks_total === counts.chunks_eligible + counts.chunks_skipped
+    && counts.chunks_eligible === counts.chunks_attempted + counts.chunks_unchecked
+    && counts.chunks_attempted === counts.chunks_checked + counts.chunks_failed
+    && counts.chunks_skipped === counts.chunks_skipped_rule + counts.chunks_skipped_no_entity
+    && counts.chunks_attempted === Math.min(counts.chunks_eligible, 8) && typeof raw.truncated === 'boolean'
+    && raw.truncated === (counts.chunks_unchecked > 0)
+  const status: DeepCheckResult['status'] = !counts.chunks_attempted ? 'skipped'
+    : !counts.chunks_checked ? 'failed' : counts.chunks_failed || counts.chunks_unchecked ? 'partial' : 'complete'
+  const object = (item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item)
+  const text = (item: unknown): item is string => typeof item === 'string' && !!item.trim()
+  const semantic = (item: unknown): item is DeepCheckConflict => object(item) && item.rule === 'semantic'
+    && text(item.type) && text(item.excerpt) && checkedContent.includes(item.excerpt) && text(item.reason)
+    && ['high', 'medium', 'low'].includes(item.severity as string) && integer(item.chunk_index)
+    && (!coverage || item.chunk_index < counts.chunks_total)
+  const contentLength = Array.from(checkedContent).length
+  const rule = (item: unknown): item is Conflict => object(item) && text(item.rule) && text(item.message)
+    && integer(item.start) && integer(item.end) && item.start < item.end && item.end <= contentLength && text(item.entity_id)
+  const semanticRows = Array.isArray(raw.conflicts) ? raw.conflicts : []
+  const ruleRows = Array.isArray(raw.rule_conflicts) ? raw.rule_conflicts : []
+  const warningRows = Array.isArray(raw.warnings) ? raw.warnings : []
+  const validConflicts = semanticRows.filter(semantic)
+  const validRules = ruleRows.filter(rule)
+  const warnings = warningRows.filter(text)
+  const confirmed = coverage && raw.status === status
+    && Array.isArray(raw.conflicts) && validConflicts.length === semanticRows.length
+    && Array.isArray(raw.rule_conflicts) && validRules.length === ruleRows.length
+    && Array.isArray(raw.warnings) && warnings.length === warningRows.length
+    && new Set(validConflicts.map((item) => item.chunk_index)).size <= counts.chunks_checked
+    && (validRules.length > 0) === (counts.chunks_skipped_rule > 0)
+  if (!confirmed) warnings.push('检查回应缺少完整状态或包含不一致数据，本次结果未得到完整确认；请核对服务版本并重试或人工校对。')
+  const result: DeepCheckResult = { ...counts, status, conflicts: validConflicts, rule_conflicts: validRules,
+    truncated: raw.truncated === true, warnings }
+  return { result, confirmed, coverage }
+}
+
 // 语义深度检查（每个有效分块一次模型调用，最多 8 次，结果不落库）
 async function doDeepCheck() {
   if (!content.value.trim() || deepLoading.value) return
@@ -1148,20 +1215,30 @@ async function doDeepCheck() {
   const checkedContent = content.value
   const requestId = ++qualityRequests.deep
   const isCurrent = () => isCurrentEditorScope(scope) && epoch === qualityEpoch && requestId === qualityRequests.deep
+  deepConflicts.value = []
+  deepMeta.value = null
+  deepResultConfirmed.value = false
+  deepCoverageConfirmed.value = false
+  deepRequestError.value = ''
   deepLoading.value = true
   try {
     const res = await api.checkConsistencyDeep(scope.novelId, checkedContent)
     if (!isCurrent()) return
-    deepConflicts.value = res.conflicts
-    deepMeta.value = {
-      chunks_checked: res.chunks_checked,
-      chunks_skipped: res.chunks_skipped,
-      truncated: res.truncated,
-    }
-    if (res.conflicts.length) message.warning(`语义层发现 ${res.conflicts.length} 处冲突`)
-    else message.success('语义层未发现冲突')
+    const view = readDeepCheckResult(res, checkedContent)
+    deepConflicts.value = view.result.conflicts
+    deepMeta.value = view.result
+    deepResultConfirmed.value = view.confirmed
+    deepCoverageConfirmed.value = view.coverage
+    if (!view.confirmed) message.warning('深度检查结果未得到完整确认，请核对返回提示并重试或人工校对')
+    else if (view.result.status !== 'complete') message.warning(`${DEEP_STATUS_LABEL[view.result.status]}：已完成 ${view.result.chunks_checked} 块，失败 ${view.result.chunks_failed} 块，未查 ${view.result.chunks_unchecked} 块；请核对检查范围${view.result.rule_conflicts.length ? '与规则冲突' : ''}`)
+    else if (deepConflicts.value.length || deepRuleConflicts.value.length) message.warning(`语义层发现 ${deepConflicts.value.length} 处冲突，规则层发现 ${deepRuleConflicts.value.length} 处冲突`)
+    else message.success('已检查范围内未发现明显冲突，仍需人工校对')
   } catch (e) {
-    if (isCurrent()) message.error((e as Error).message)
+    if (isCurrent()) {
+      deepRequestError.value = (e as Error).message
+      deepMeta.value = { ...readDeepCheckResult(null, checkedContent).result, warnings: [`检查请求未完成：${deepRequestError.value}`] }
+      message.error(`深度检查未完成：${deepRequestError.value}`)
+    }
   } finally {
     if (isCurrent()) deepLoading.value = false
   }
@@ -2058,7 +2135,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div v-if="conflicts.length || deepMeta || outlineCheckResult || storyCheckResult" class="result-cols">
+      <div v-if="conflicts.length || deepLoading || deepMeta || outlineCheckResult || storyCheckResult" class="result-cols">
         <div v-if="conflicts.length" class="result-col result-conflicts">
           <div class="result-title">规则层一致性冲突</div>
           <n-list>
@@ -2069,30 +2146,46 @@ onBeforeUnmount(() => {
           </n-list>
         </div>
 
-        <div v-if="deepMeta" class="result-col result-deep">
+        <section v-if="deepLoading || deepMeta" class="result-col result-deep" aria-label="语义深度检查结果">
           <div class="result-title">
             语义深度检查
-            <span class="deep-meta">
-              已查 {{ deepMeta.chunks_checked }} 块 / 跳过 {{ deepMeta.chunks_skipped }} 块
-            </span>
-            <n-tag v-if="deepMeta.truncated" type="warning" size="tiny">已截断（上限 8 块）</n-tag>
+            <n-tag :type="deepLoading ? 'default' : deepClean ? 'success' : 'warning'" size="small">{{ deepStatusLabel }}</n-tag>
           </div>
-          <n-empty v-if="!deepConflicts.length" description="语义层未发现冲突" />
-          <n-list v-else>
-            <n-list-item v-for="(d, i) in deepConflicts" :key="i">
-              <div class="deep-item" @click="locateExcerpt(d.excerpt)">
-                <div class="deep-head">
-                  <n-tag size="small" :type="d.severity === 'high' ? 'error' : 'warning'">
-                    {{ d.type }}
-                  </n-tag>
-                  <span class="deep-chunk">块 {{ d.chunk_index }}</span>
+          <p v-if="deepLoading" role="status">正在检查当前稿件，本次结果尚未返回。</p>
+          <template v-else-if="deepMeta">
+            <p v-if="deepCoverageConfirmed" class="deep-meta">
+              共 {{ deepMeta.chunks_total }} 块；可核对 {{ deepMeta.chunks_eligible }} 块；尝试 {{ deepMeta.chunks_attempted }} 块；已完成 {{ deepMeta.chunks_checked }} 块；失败 {{ deepMeta.chunks_failed }} 块；未查 {{ deepMeta.chunks_unchecked }} 块；跳过 {{ deepMeta.chunks_skipped }} 块（规则命中 {{ deepMeta.chunks_skipped_rule }} 块，无相关设定 {{ deepMeta.chunks_skipped_no_entity }} 块）。
+            </p>
+            <n-tag v-if="deepMeta.truncated" type="warning" size="tiny">部分正文未检查（上限 8 块）</n-tag>
+            <p class="story-context">语义层只核对包含人物、地点或世界观名称且未命中规则的分块；跳过及未查内容仍需人工校对。</p>
+            <p v-if="deepIncompleteHint" class="story-review-hint">{{ deepIncompleteHint }}</p>
+            <p v-for="(warning, i) in deepMeta.warnings" :key="i" class="story-review-hint" role="alert">{{ warning }}</p>
+            <n-empty v-if="!deepConflicts.length" :description="deepCheckEmptyText" />
+            <n-list v-else>
+              <n-list-item v-for="(d, i) in deepConflicts" :key="i">
+                <div class="deep-item" @click="locateExcerpt(d.excerpt)">
+                  <div class="deep-head">
+                    <n-tag size="small" :type="d.severity === 'high' ? 'error' : 'warning'">
+                      {{ d.type }}
+                    </n-tag>
+                    <span class="deep-chunk">块 {{ d.chunk_index + 1 }}</span>
+                  </div>
+                  <div class="deep-excerpt">{{ d.excerpt }}</div>
+                  <div class="deep-reason">依据：{{ d.reason }}</div>
                 </div>
-                <div class="deep-excerpt">{{ d.excerpt }}</div>
-                <div class="deep-reason">依据：{{ d.reason }}</div>
-              </div>
-            </n-list-item>
-          </n-list>
-        </div>
+              </n-list-item>
+            </n-list>
+            <div v-if="deepRuleConflicts.length" class="result-conflicts" aria-label="深度检查发现的规则冲突">
+              <div class="result-title">规则层一致性冲突</div>
+              <n-list>
+                <n-list-item v-for="(c, i) in deepRuleConflicts" :key="i">
+                  <n-tag type="error" size="small">{{ c.rule }}</n-tag>
+                  {{ c.message }}
+                </n-list-item>
+              </n-list>
+            </div>
+          </template>
+        </section>
 
         <div v-if="outlineCheckResult" class="result-col result-outline">
           <div class="result-title">

@@ -626,9 +626,19 @@ export interface DeepCheckConflict {
 
 export interface DeepCheckResult {
   conflicts: DeepCheckConflict[]
+  rule_conflicts: Conflict[]
+  status: 'complete' | 'partial' | 'failed' | 'skipped'
+  chunks_total: number
+  chunks_eligible: number
+  chunks_attempted: number
   chunks_checked: number
+  chunks_failed: number
   chunks_skipped: number
+  chunks_skipped_rule: number
+  chunks_skipped_no_entity: number
+  chunks_unchecked: number
   truncated: boolean
+  warnings: string[]
 }
 
 export interface OutlineCheckIssue {
