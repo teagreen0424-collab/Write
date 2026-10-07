@@ -36,6 +36,11 @@ def list_chapters(novel_id: str, db: Session = Depends(get_db)):
     return ChapterRepo(db).list(novel_id)
 
 
+@router.get("/metadata", response_model=list[schemas.ChapterMetadata])
+def list_chapter_metadata(novel_id: str, db: Session = Depends(get_db)):
+    return ChapterRepo(db).list_metadata(novel_id)
+
+
 @router.post("", response_model=schemas.ChapterRead, status_code=201)
 def create_chapter(novel_id: str, payload: schemas.ChapterCreate, db: Session = Depends(get_db)):
     NovelRepo(db).get(novel_id)

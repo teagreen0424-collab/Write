@@ -1,3 +1,4 @@
+import { splitChapterFixtures } from './chapter-fixtures.mjs'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
@@ -26,13 +27,13 @@ async function panel(options = {}) {
   const messages = [], checks = [], writes = [], hooks = {}
   const chapters = [chapter(), chapter({ id: 'chapter-b', seq: 2, title: '第二章', content: '第二章正文' })]
   const api = {
-    listChapters: async () => chapters,
+    listChapterMetadata: async () => chapters,
     checkChapterStory: async (...args) => { checks.push(args); return options.check ? options.check(...args) : result() },
     updateChapter: async (...args) => { writes.push(args); return chapter() },
   }
   globalThis.window = { addEventListener() {}, removeEventListener() {} }
   globalThis.__storyCheckHarness = {
-    api, streamSSE: async () => { throw new Error('检查不应生成正文') }, ChapterRevisionPanel: {},
+    api: splitChapterFixtures(api), streamSSE: async () => { throw new Error('检查不应生成正文') }, ChapterRevisionPanel: {},
     NButton: {}, NCheckbox: {}, NEmpty: {}, NInput: {}, NInputNumber: {}, NList: {}, NListItem: {}, NModal: {}, NSelect: {}, NTag: {},
     useMessage: () => Object.fromEntries(['success', 'warning', 'error', 'info'].map((type) => [type, (text) => messages.push({ type, text })])),
     onMounted: (fn) => { hooks.mount = fn }, onBeforeUnmount: (fn) => { hooks.unmount = fn },

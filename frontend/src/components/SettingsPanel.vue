@@ -18,7 +18,7 @@ import { createAsyncScope } from '../utils/asyncScope'
 import {
   ENTITY_TYPES,
   getEntityConfig,
-  type Chapter,
+  type ChapterMetadata,
   type EntityRecord,
   type EntityType,
 } from '../types'
@@ -44,6 +44,7 @@ let metaLoadSequence = 0
 let selectionRevision = 0
 let anchorRevision = 0
 let anchorSaveRevision = 0
+let anchorLoadSequence = 0
 let pendingFocus: { type: EntityType; id: string } | null = null
 const emptyEntities = (): Record<EntityType, EntityRecord[]> => ({
   character: [],
@@ -63,7 +64,8 @@ const entityDirty = computed(() => formFingerprint.value !== formBaseline.value)
 const styleAnchor = ref('')
 const anchorBaseline = ref('')
 const anchorChapterId = ref<string | null>(null)
-const chapters = ref<Chapter[]>([])
+const chapters = ref<ChapterMetadata[]>([])
+const loadingAnchor = ref(false)
 const anchorSet = computed(() => styleAnchor.value.trim().length > 0)
 const chapterOptions = computed(() =>
   chapters.value.map((c) => ({ label: chapterLabel(c), value: c.id })),
@@ -83,10 +85,29 @@ function guardUnload(event: BeforeUnloadEvent) {
 }
 
 // 从选中章节取正文前 800 字作为基准
-function pickAnchorChapter(id: string | null) {
+async function pickAnchorChapter(id: string | null) {
   anchorChapterId.value = id
-  const chapter = chapters.value.find((c) => c.id === id)
-  if (chapter) styleAnchor.value = (chapter.content || '').slice(0, 800)
+  const sequence = ++anchorLoadSequence
+  loadingAnchor.value = false
+  if (!id || !props.novelId) return
+  const scope = asyncScope.capture()
+  const revision = anchorRevision, saveRevision = anchorSaveRevision
+  const isCurrent = () => asyncScope.isCurrent(scope) && sequence === anchorLoadSequence
+    && anchorChapterId.value === id && revision === anchorRevision && saveRevision === anchorSaveRevision
+  loadingAnchor.value = true
+  try {
+    const chapter = await api.getChapter(scope.identity, id)
+    if (!isCurrent()) return
+    if (chapter.id !== id || chapter.novel_id !== scope.identity) {
+      message.warning('章节读取响应与目标不一致，当前文风基准已保留')
+      return
+    }
+    styleAnchor.value = (chapter.content || '').slice(0, 800)
+  } catch (error) {
+    if (isCurrent()) message.error(`文风章节读取失败，当前基准已保留：${(error as Error).message}`)
+  } finally {
+    if (asyncScope.isCurrent(scope) && sequence === anchorLoadSequence) loadingAnchor.value = false
+  }
 }
 
 async function saveAnchor() {
@@ -94,6 +115,8 @@ async function saveAnchor() {
   const scope = asyncScope.capture()
   const submitted = styleAnchor.value
   anchorSaveRevision += 1
+  anchorLoadSequence += 1
+  loadingAnchor.value = false
   savingAnchor.value = true
   try {
     await api.updateNovel(scope.identity, { style_anchor: submitted })
@@ -134,7 +157,7 @@ async function loadNovelMeta() {
   const expectedAnchorRevision = anchorRevision
   const expectedSaveRevision = anchorSaveRevision
   try {
-    const [novels, loadedChapters] = await Promise.all([api.listNovels(), api.listChapters(scope.identity)])
+    const [novels, loadedChapters] = await Promise.all([api.listNovels(), api.listChapterMetadata(scope.identity)])
     if (!asyncScope.isCurrent(scope) || sequence !== metaLoadSequence) return
     const novel = novels.find((n) => n.id === scope.identity)
     if (anchorSaveRevision === expectedSaveRevision && !savingAnchor.value) {
@@ -387,6 +410,8 @@ watch(
     chapters.value = []
     resetForm()
     anchorChapterId.value = null
+    anchorLoadSequence += 1
+    loadingAnchor.value = false
     if (props.novelId) {
       loadAll()
       loadNovelMeta()
@@ -411,6 +436,8 @@ watch(
 
 onMounted(() => window.addEventListener('beforeunload', guardUnload))
 onBeforeUnmount(() => {
+  anchorLoadSequence += 1
+  loadingAnchor.value = false
   asyncScope.dispose()
   window.removeEventListener('beforeunload', guardUnload)
   emit('dirty-change', false)
@@ -428,6 +455,7 @@ onBeforeUnmount(() => {
         <n-select
           :value="anchorChapterId"
           :options="chapterOptions"
+          :loading="loadingAnchor"
           placeholder="从章节取基准（取该章正文前 800 字）"
           style="width: 320px"
           clearable

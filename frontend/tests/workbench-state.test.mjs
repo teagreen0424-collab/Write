@@ -1,3 +1,4 @@
+import { splitChapterFixtures, metadataFixture } from './chapter-fixtures.mjs'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
@@ -43,7 +44,7 @@ async function panel(name, options = {}) {
   const defaults = {
     listNovels: async () => ['novel-a', 'novel-b'].map((id) => ({ id, title: id, style_anchor: `${id}文风` })),
     listEntities: async (novelId, apiPath) => apiPath === 'characters' ? [character(novelId)] : [],
-    listChapters: async (novelId) => [{ id: `${novelId}-chapter`, novel_id: novelId, seq: 1, title: novelId, content: `${novelId}章节正文`, directive: '', summary: '', status: 'draft', outline_node_id: '' }],
+    listChapterMetadata: async (novelId) => [{ id: `${novelId}-chapter`, novel_id: novelId, seq: 1, title: novelId, content: `${novelId}章节正文`, directive: '', summary: '', status: 'draft', outline_node_id: '' }],
     createEntity: async (novelId, apiPath, payload) => ({ ...payload, id: `${novelId}-created` }),
     updateEntity: async (novelId, apiPath, id, payload) => ({ ...payload, id }),
     deleteEntity: async () => {}, updateNovel: async () => {},
@@ -58,7 +59,7 @@ async function panel(name, options = {}) {
     getBookSummary: async (novelId) => book(novelId),
     preflightExport: async () => preflight(), downloadBookFile: async () => new Blob(['章节正文']),
   }
-  const implementations = { ...defaults, ...options.api }
+  const implementations = splitChapterFixtures({ ...defaults, ...options.api }, (novelId, id) => ({ id, novel_id: novelId, seq: 2, title: '第二章', content: '第二章正文', directive: '', summary: '', status: 'draft', outline_node_id: '' }))
   const api = Object.fromEntries(Object.entries(implementations).map(([method, implementation]) => [method, (...args) => {
     requests.push({ method, args: JSON.parse(JSON.stringify(args)) })
     const result = implementation(...args)
@@ -124,7 +125,7 @@ test('设定真实 SFC A→B→A 舍弃旧六类实体、文风和章节结果�
     listEntities: async (id, path) => path === 'characters'
       ? (++charactersCalls === 1 ? entityPending.promise : [character(id)]) : [],
     listNovels: async () => ++novelsCalls === 1 ? metaPending.promise : [{ id: 'novel-a', style_anchor: '当前文风' }],
-    listChapters: async (id) => ++chaptersCalls === 1 ? chapterPending.promise : [{ id: `${id}-current`, content: '当前正文' }],
+    listChapterMetadata: async (id) => ++chaptersCalls === 1 ? chapterPending.promise : [{ id: `${id}-current`, content: '当前正文' }],
   } })
   context.props.novelId = 'novel-b'; context.props.novelId = 'novel-a'; await settle()
   entityPending.resolve([character('旧人物')]); metaPending.resolve([{ id: 'novel-a', style_anchor: '旧文风' }]); chapterPending.resolve([{ id: 'old-chapter', content: '旧正文' }])
@@ -597,7 +598,7 @@ test('定稿真实 SFC 生成及目录刷新期间作者新正文不会被旧响
   const pending = wait(), refreshing = wait(); let reads = 0
   const context = await panel('WritingPanel', { props: { initialChapterId: 'novel-a-chapter' }, api: {
     settleChapter: async () => pending.promise,
-    listChapters: async () => ++reads === 1 ? [{ id: 'novel-a-chapter', novel_id: 'novel-a', seq: 1, title: '原标题', content: '原正文', directive: '', summary: '', status: 'draft', outline_node_id: '' }] : refreshing.promise,
+    listChapterMetadata: async () => ++reads === 1 ? [{ id: 'novel-a-chapter', novel_id: 'novel-a', seq: 1, title: '原标题', content: '原正文', directive: '', summary: '', status: 'draft', outline_node_id: '' }] : refreshing.promise,
   } })
   const settling = context.vm.doSettle()
   pending.resolve(settleResult()); await settle()
@@ -641,8 +642,8 @@ test('定稿真实 SFC 作品/章节/作者字段 A→B→A 使旧提炼成功�
   }
   const pending = wait()
   const context = await panel('WritingPanel', { props: { initialChapterId: 'novel-a-chapter' }, api: { settleChapter: async () => pending.promise } })
-  const original = { ...context.vm.chapters.value[0] }, next = { ...original, id: 'next-chapter', title: '第二章', content: '第二章正文', seq: 2 }
-  context.vm.chapters.value.push(next)
+  const original = { ...context.vm.selectedChapter.value }, next = { ...original, id: 'next-chapter', title: '第二章', content: '第二章正文', seq: 2 }
+  context.vm.chapters.value.push(metadataFixture(next))
   const requesting = context.vm.doSettle()
   await context.vm.selectChapter(next, true); await context.vm.selectChapter(original, true)
   pending.resolve(settleResult()); await requesting
@@ -725,7 +726,7 @@ test('定稿真实 SFC 卸载后提炼或应用迟到成功/失败均保持安�
 test('定稿真实编译模板持续显示记忆告警；列表刷新失败不妨碍已确认来源的建议落库', async () => {
   let reads = 0
   const context = await panel('WritingPanel', { props: { initialChapterId: 'novel-a-chapter' }, api: {
-    listChapters: async (id) => {
+    listChapterMetadata: async (id) => {
       if (++reads > 1) throw new Error('临时无法读取目录')
       return [{ id: 'novel-a-chapter', novel_id: id, seq: 1, title: '第一章', content: '正文', directive: '', summary: '', status: 'draft', outline_node_id: '' }]
     },

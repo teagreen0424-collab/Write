@@ -3,13 +3,13 @@ import { computed, ref, watch } from 'vue'
 import { NButton, NEmpty, NSelect, NTag, useMessage } from 'naive-ui'
 import { api } from '../api'
 import { chapterLabel } from '../utils/chapter'
-import type { Chapter, ForeshadowingTrack, ForeshadowingTracking } from '../types'
+import type { ChapterMetadata, ForeshadowingTrack, ForeshadowingTracking } from '../types'
 
 const props = defineProps<{ novelId: string }>()
 
 const message = useMessage()
 
-const chapters = ref<Chapter[]>([])
+const chapters = ref<ChapterMetadata[]>([])
 const tracking = ref<ForeshadowingTracking | null>(null)
 const currentChapterId = ref<string | null>(null)
 const loading = ref(false)
@@ -39,7 +39,7 @@ async function load() {
   if (!props.novelId) return
   loading.value = true
   try {
-    chapters.value = await api.listChapters(props.novelId)
+    chapters.value = await api.listChapterMetadata(props.novelId)
     if (
       !currentChapterId.value ||
       !chapters.value.some((c) => c.id === currentChapterId.value)

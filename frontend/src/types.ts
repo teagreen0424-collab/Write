@@ -179,6 +179,13 @@ export interface Chapter {
   updated_at: string
 }
 
+/** 章节目录投影：不携带正文、章前指令或摘要。 */
+export interface ChapterMetadata extends Pick<Chapter,
+  'id' | 'novel_id' | 'outline_node_id' | 'seq' | 'title' | 'status'
+  | 'tension_score' | 'drift_score' | 'created_at' | 'updated_at'> {
+  word_count: number
+}
+
 export interface Conflict {
   rule: string
   message: string

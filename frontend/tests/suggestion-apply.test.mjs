@@ -1,3 +1,4 @@
+import { splitChapterFixtures } from './chapter-fixtures.mjs'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
@@ -24,7 +25,7 @@ async function mount(name, props, api) {
   const messages = [], emitted = [], hooks = {}
   globalThis.window = { addEventListener() {}, removeEventListener() {} }
   globalThis.__suggestionHarness = {
-    api, streamSSE: async () => {}, ChapterRevisionPanel: {},
+    api: splitChapterFixtures(api), streamSSE: async () => {}, ChapterRevisionPanel: {},
     NButton: {}, NCheckbox: {}, NEmpty: {}, NInput: {}, NInputNumber: {}, NList: {}, NListItem: {}, NModal: {}, NSelect: {}, NSpin: {}, NTag: {},
     useMessage: () => Object.fromEntries(['success', 'warning', 'error', 'info'].map((kind) => [kind, (text) => messages.push({ kind, text })])),
     onMounted: (fn) => { hooks.mount = fn }, onBeforeUnmount: (fn) => { hooks.unmount = fn },
@@ -59,7 +60,7 @@ async function card(apply, patch = {}) {
 async function writing(apply) {
   const requests = []
   const api = {
-    listChapters: async () => [{ id: 'chapter-a', novel_id: 'novel-a', title: '第一章', content: '正文', directive: '', seq: 1,
+    listChapterMetadata: async () => [{ id: 'chapter-a', novel_id: 'novel-a', title: '第一章', content: '正文', directive: '', seq: 1,
       summary: '', outline_node_id: '', status: 'draft', tension_score: null, drift_score: null }],
     // 受控新后端契约，真实source hash的计算由后端回归覆盖。
     settleChapter: async () => ({ chapter_id: 'chapter-a', source_fingerprint: 'a'.repeat(64), summary: '摘要',

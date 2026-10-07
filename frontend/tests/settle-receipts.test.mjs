@@ -1,3 +1,4 @@
+import { splitChapterFixtures } from './chapter-fixtures.mjs'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
@@ -27,11 +28,11 @@ async function writing(options = {}) {
   const messages = [], requests = [], hooks = {}
   globalThis.window = { addEventListener() {}, removeEventListener() {} }
   const implementations = {
-    listChapters: async (id) => [chapter(id)], settleChapter: async () => preview(), settleApply: async () => response([receipt(0), receipt(1), receipt(2)]),
+    listChapterMetadata: async (id) => [chapter(id)], settleChapter: async () => preview(), settleApply: async () => response([receipt(0), receipt(1), receipt(2)]),
     ...options.api,
   }
   const harness = {
-    api: Object.fromEntries(Object.entries(implementations).map(([name, fn]) => [name, (...args) => { requests.push({ name, args: structuredClone(args) }); return fn(...args) }])),
+    api: Object.fromEntries(Object.entries(splitChapterFixtures(implementations, (id, chapterId) => chapter(id, { id: chapterId }))).map(([name, fn]) => [name, (...args) => { requests.push({ name, args: structuredClone(args) }); return fn(...args) }])),
     streamSSE: async () => { throw new Error('此流程不应生成正文') },
     useMessage: () => Object.fromEntries(['success', 'warning', 'error', 'info'].map((type) => [type, (text) => messages.push({ type, text })])),
     onMounted: (fn) => { hooks.mount = fn }, onBeforeUnmount: (fn) => { hooks.unmount = fn },
@@ -125,7 +126,7 @@ test('来源前置失败不会自动读取覆盖旧稿，作者点击可达按�
   let reads = 0
   const newer = chapter('novel-a', { title: '另一请求保存的章名', content: '另一请求保存的正文', directive: '另一请求保存的指令' })
   const context = await writing({ api: {
-    listChapters: async () => [++reads === 1 ? chapter() : newer],
+    listChapterMetadata: async () => [++reads === 1 ? chapter() : newer],
     settleChapter: async () => { throw Object.assign(new Error('来源已变化'), { status: 409, code: 'settle_source_changed' }) },
   } })
   assert.equal(reads, 1); assert.equal(context.vm.content.value, chapter().content)
@@ -141,7 +142,7 @@ test('来源前置失败不会自动读取覆盖旧稿，作者点击可达按�
 test('来源核对读取等待期间作者新正文保留，旧目录不能强制选择覆盖编辑器', async () => {
   const pending = wait(); let reads = 0
   const context = await writing({ api: {
-    listChapters: async () => ++reads === 1 ? [chapter()] : pending.promise,
+    listChapterMetadata: async () => ++reads === 1 ? [chapter()] : pending.promise,
     settleChapter: async () => { throw Object.assign(new Error('来源已变化'), { status: 409, code: 'settle_source_changed' }) },
   } })
   const refreshing = context.vm.refreshSettleChapter()
@@ -336,7 +337,7 @@ test('确认请求在途时Esc与关闭回调不能伪装取消写入，完整�
 
 test('定稿提交已成功而目录刷新失败仍保留安全来源与回执，不报告未保存', async () => {
   let reads = 0
-  const context = await writing({ api: { listChapters: async (id) => ++reads === 1 ? [chapter(id)] : Promise.reject(new Error('目录刷新失败')) } })
+  const context = await writing({ api: { listChapterMetadata: async (id) => ++reads === 1 ? [chapter(id)] : Promise.reject(new Error('目录刷新失败')) } })
   assert.equal(context.vm.showSettle.value, true)
   assert.equal(context.vm.settleContext.value.sourceFingerprint, sourceHash)
   await context.vm.confirmSettle()

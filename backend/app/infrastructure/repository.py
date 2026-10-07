@@ -9,6 +9,11 @@ from app.domain.entities import ChapterStatus, OutlineLevel
 from app.infrastructure import models
 
 
+def _chapter_word_count(content: str | None) -> int:
+    """SQLite回调：与正文/版本非空白Unicode字符计数一致，保留emoji、NUL及零宽字符。"""
+    return len("".join(content.split())) if content else 0
+
+
 class NovelRepo:
     """作品仓储。"""
 
@@ -193,6 +198,20 @@ class ChapterRepo:
             .order_by(self.model.seq)
             .all()
         )
+
+    def list_metadata(self, novel_id: str):
+        """目录只投影轻量列；正文逐行交给确定性计数函数，不加载整章ORM。"""
+        self._ensure_novel(novel_id)
+        # 注册当前实际连接，兼容已建立的池连接及隔离测试；不提交或回滚调用方事务。
+        self.db.connection().connection.driver_connection.create_function(
+            "lingmo_chapter_word_count", 1, _chapter_word_count, deterministic=True,
+        )
+        return self.db.query(
+            self.model.id, self.model.novel_id, self.model.seq, self.model.title,
+            self.model.status, self.model.outline_node_id, self.model.created_at,
+            self.model.updated_at, self.model.tension_score, self.model.drift_score,
+            func.lingmo_chapter_word_count(self.model.content).label("word_count"),
+        ).filter(self.model.novel_id == novel_id).order_by(self.model.seq).all()
 
     def get(self, novel_id: str, chapter_id: str):
         obj = (

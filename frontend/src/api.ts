@@ -4,6 +4,7 @@ import type {
   AutopilotEvent,
   AutopilotTaskSnapshot,
   Chapter,
+  ChapterMetadata,
   ChapterAuthorFields,
   ChapterRepairPreview,
   ChapterRepairRequest,
@@ -264,6 +265,10 @@ export const api = {
   // 章节
   listChapters: (novelId: string) =>
     request<Chapter[]>(`${BASE}/novels/${novelId}/chapters`),
+  listChapterMetadata: (novelId: string) =>
+    request<ChapterMetadata[]>(`${BASE}/novels/${novelId}/chapters/metadata`),
+  getChapter: (novelId: string, id: string) =>
+    request<Chapter>(`${BASE}/novels/${novelId}/chapters/${id}`),
   createChapter: (novelId: string, data: Record<string, unknown>) =>
     request<Chapter>(`${BASE}/novels/${novelId}/chapters`, {
       method: 'POST',

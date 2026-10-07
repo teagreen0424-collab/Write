@@ -1,3 +1,4 @@
+import { splitChapterFixtures } from './chapter-fixtures.mjs'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
@@ -31,7 +32,7 @@ async function panel(options = {}) {
   const chapters = [chapter(), chapter({ id: 'chapter-b', seq: 2, title: '第二章', content: '第二章正文' })]
   let listCalls = 0
   const api = {
-    listChapters: async () => { listCalls += 1; return [...chapters] },
+    listChapterMetadata: async () => { listCalls += 1; return [...chapters] },
     previewChapterRepair: async (...args) => { generations.push(args); return options.preview ? options.preview(...args) : preview() },
     applyChapterRepair: async (...args) => {
       applications.push(args)
@@ -45,7 +46,7 @@ async function panel(options = {}) {
   }
   globalThis.window = { addEventListener() {}, removeEventListener() {} }
   globalThis.__repairHarness = {
-    api, streamSSE: async () => { throw new Error('修订预览不应调用原有流式改写') }, ChapterRevisionPanel: {},
+    api: splitChapterFixtures(api), streamSSE: async () => { throw new Error('修订预览不应调用原有流式改写') }, ChapterRevisionPanel: {},
     NButton: {}, NCheckbox: {}, NEmpty: {}, NInput: {}, NInputNumber: {}, NList: {}, NListItem: {}, NModal: {}, NSelect: {}, NTag: {},
     useMessage: () => Object.fromEntries(['success', 'warning', 'error', 'info'].map((type) => [type, (text) => messages.push({ type, text })])),
     onMounted: (fn) => { hooks.mount = fn }, onBeforeUnmount: (fn) => { hooks.unmount = fn },

@@ -258,6 +258,22 @@ class ChapterRead(ORMBase):
     updated_at: str
 
 
+class ChapterMetadata(ORMBase):
+    """章节目录投影，不包含正文、摘要或章前指令。"""
+
+    id: str
+    novel_id: str
+    seq: int
+    title: str
+    status: str
+    outline_node_id: str
+    created_at: str
+    updated_at: str
+    tension_score: Optional[float]
+    drift_score: Optional[float]
+    word_count: int
+
+
 # ================= 章节版本（阶段八第一轮） =================
 class ChapterRevisionMeta(ORMBase):
     """版本列表项：不返回完整正文，避免一次拉回整章历史。"""

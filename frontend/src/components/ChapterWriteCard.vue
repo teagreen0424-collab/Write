@@ -28,7 +28,7 @@ const previewText = ref('')
 onMounted(async () => {
   try {
     const [chapters, outline] = await Promise.all([
-      api.listChapters(props.novelId), api.listOutline(props.novelId),
+      api.listChapterMetadata(props.novelId), api.listOutline(props.novelId),
     ])
     const latest = chapters[chapters.length - 1]
     previousChapterId.value = latest?.id ?? ''

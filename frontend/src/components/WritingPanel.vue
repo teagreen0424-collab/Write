@@ -19,6 +19,7 @@ import { wordLimitError, wordLimitLabel, wordLimits } from '../utils/wordLimits'
 import ChapterRevisionPanel from './ChapterRevisionPanel.vue'
 import type {
   Chapter,
+  ChapterMetadata,
   ApplicationFailure,
   ChapterRepairPreview,
   ClicheHit,
@@ -41,8 +42,10 @@ const emit = defineEmits<{ (e: 'dirty-change', dirty: boolean): void }>()
 
 const message = useMessage()
 
-const chapters = ref<Chapter[]>([])
+const chapters = ref<ChapterMetadata[]>([])
 const selectedId = ref<string | null>(null)
+const selectedDetail = ref<Chapter | null>(null)
+const chapterLoadingId = ref<string | null>(null)
 const title = ref('')
 const directive = ref('')
 const content = ref('')
@@ -54,6 +57,7 @@ let pageEpoch = 0
 let editorEpoch = 0
 let authorRevision = 0
 let chapterLoadRequestId = 0
+let chapterDetailRequestId = 0
 let saveRequestId = 0
 let qualityEpoch = 0
 const qualityRequests = { cliche: 0, consistency: 0, deep: 0, outline: 0 }
@@ -232,7 +236,8 @@ const storyCheckEmptyText = computed(() => {
   return '未发现明显剧情问题，仍需人工校对'
 })
 
-const selectedChapter = computed(() => chapters.value.find((c) => c.id === selectedId.value) ?? null)
+const selectedChapter = computed(() => selectedDetail.value?.id === selectedId.value ? selectedDetail.value : null)
+const selectedMetadata = computed(() => chapters.value.find((c) => c.id === selectedId.value) ?? null)
 const isLatestChapter = computed(
   () => !!selectedId.value && chapters.value[chapters.value.length - 1]?.id === selectedId.value,
 )
@@ -244,12 +249,9 @@ const selectedNextOutline = computed(
   () => nextOutlineNodes.value.find((node) => node.id === nextOutlineNodeId.value),
 )
 const chapterWords = computed(() => countCharacters(content.value))
-const totalWords = computed(() =>
-  chapters.value.reduce((total, chapter) => {
-    const chapterContent = chapter.id === selectedId.value ? content.value : chapter.content
-    return total + countCharacters(chapterContent)
-  }, 0),
-)
+const savedTotalWords = computed(() => chapters.value.reduce((total, chapter) => total + chapter.word_count, 0))
+const totalWords = computed(() => savedTotalWords.value
+  + (selectedMetadata.value ? chapterWords.value - selectedMetadata.value.word_count : 0))
 const isDirty = computed(
   () =>
     !!props.novelId &&
@@ -276,6 +278,7 @@ function isCurrentEditorScope(scope: EditorScope): boolean {
 
 function invalidateEditorBinding() {
   editorEpoch += 1
+  invalidateChapterDetail()
   saveRequestId += 1
   saving.value = false
   deleteRequestId += 1
@@ -294,10 +297,31 @@ function authorSnapshot() {
   return { title: title.value, directive: directive.value, content: content.value }
 }
 
+function chapterMetadata(chapter: Chapter): ChapterMetadata {
+  const { id, novel_id, outline_node_id, seq, title, status, tension_score, drift_score, created_at, updated_at } = chapter
+  return { id, novel_id, outline_node_id, seq, title, status, tension_score, drift_score, created_at, updated_at,
+    word_count: countCharacters(chapter.content) }
+}
+
+function invalidateChapterDetail() {
+  chapterDetailRequestId += 1
+  chapterLoadingId.value = null
+}
+
+function syncSelectedMetadata() {
+  const metadata = selectedMetadata.value
+  if (!metadata || !selectedChapter.value) return
+  const { word_count: _wordCount, ...fields } = metadata
+  selectedDetail.value = { ...selectedChapter.value, ...fields }
+}
+
 function upsertChapter(chapter: Chapter) {
+  invalidateChapterDetail()
+  const metadata = chapterMetadata(chapter)
   const index = chapters.value.findIndex((item) => item.id === chapter.id)
-  if (index < 0) chapters.value = [...chapters.value, chapter].sort((a, b) => a.seq - b.seq)
-  else chapters.value = chapters.value.map((item) => item.id === chapter.id ? chapter : item)
+  if (index < 0) chapters.value = [...chapters.value, metadata].sort((a, b) => a.seq - b.seq)
+  else chapters.value = chapters.value.map((item) => item.id === chapter.id ? metadata : item)
+  if (chapter.id === selectedId.value) selectedDetail.value = chapter
 }
 
 function rememberSaved() {
@@ -445,13 +469,14 @@ async function loadChapters() {
   const requestId = ++chapterLoadRequestId
   const scope = captureEditorScope()
   const revision = authorRevision
-  const loaded = await api.listChapters(novelId)
+  const loaded = await api.listChapterMetadata(novelId)
   if (unmounted || props.novelId !== novelId || epoch !== pageEpoch || requestId !== chapterLoadRequestId) return
   chapters.value = loaded
+  syncSelectedMetadata()
   if (props.initialChapterId && !selectedId.value && !streaming.value && !isDirty.value
     && isCurrentEditorScope(scope) && revision === authorRevision) {
     const initial = chapters.value.find((chapter) => chapter.id === props.initialChapterId)
-    if (initial) selectChapter(initial, true)
+    if (initial) await selectChapter(initial, true)
   }
 }
 
@@ -475,13 +500,7 @@ function invalidateStoryCheck() {
   storyCheckLoading.value = false
 }
 
-async function selectChapter(c: Chapter, force = false) {
-  if (c.novel_id !== props.novelId || unmounted) return
-  if (!force && repairApplying.value) { message.warning('正在保存修订，请等待保存回应'); return }
-  if (!force && c.id === selectedId.value) return
-  const scope = captureEditorScope()
-  if (!force && !await confirmDiscard()) return
-  if (!isCurrentEditorScope(scope)) return
+function adoptChapter(c: Chapter) {
   invalidateEditorBinding()
   abandonStreamOutput()
   if (c.id !== selectedId.value) {
@@ -489,11 +508,43 @@ async function selectChapter(c: Chapter, force = false) {
     showSummary.value = false
   }
   selectedId.value = c.id
+  selectedDetail.value = c
   title.value = c.title
   content.value = c.content
   directive.value = c.directive
   rememberSaved()
   clearMarks()
+}
+
+async function selectChapter(c: Pick<Chapter, 'id' | 'novel_id'>, force = false): Promise<boolean> {
+  if (c.novel_id !== props.novelId || unmounted) return false
+  if (!force && repairApplying.value) { message.warning('正在保存修订，请等待保存回应'); return false }
+  const requestId = ++chapterDetailRequestId
+  const targetId = c.id
+  chapterLoadingId.value = null
+  if (!force && targetId === selectedId.value) return false
+  const scope = captureEditorScope()
+  const revision = authorRevision
+  const isCurrent = () => isCurrentEditorScope(scope) && requestId === chapterDetailRequestId && revision === authorRevision
+  if (!force && !await confirmDiscard()) return false
+  if (!isCurrent()) return false
+  chapterLoadingId.value = targetId
+  try {
+    const chapter = await api.getChapter(scope.novelId, targetId)
+    if (!isCurrent()) return false
+    if (chapter.id !== targetId || chapter.novel_id !== scope.novelId) {
+      message.warning('章节读取响应与目标不一致，当前编辑稿已保留')
+      return false
+    }
+    upsertChapter(chapter)
+    adoptChapter(chapter)
+    return true
+  } catch (error) {
+    if (isCurrent()) message.error(`章节读取失败，当前编辑稿已保留：${(error as Error).message}`)
+    return false
+  } finally {
+    if (requestId === chapterDetailRequestId) chapterLoadingId.value = null
+  }
 }
 
 async function startNew(force = false) {
@@ -506,6 +557,7 @@ async function startNew(force = false) {
   showRevisions.value = false
   showSummary.value = false
   selectedId.value = null
+  selectedDetail.value = null
   title.value = ''
   directive.value = ''
   content.value = ''
@@ -516,20 +568,30 @@ async function startNew(force = false) {
 async function reloadAndReselect(chapter?: Chapter, runId?: number) {
   const scope = captureEditorScope()
   const revision = authorRevision
-  await loadChapters()
-  if (!isCurrentEditorScope(scope)) return
+  const detailRequestId = ++chapterDetailRequestId
+  const c = chapter ?? (scope.chapterId ? await api.getChapter(scope.novelId, scope.chapterId) : null)
+  if (!isCurrentEditorScope(scope) || detailRequestId !== chapterDetailRequestId) return
   if (runId !== undefined && !isCurrentStream(runId)) return
-  const c = chapter ?? chapters.value.find((x) => x.id === selectedId.value)
-  if (c && c.novel_id === scope.novelId && c.id === scope.chapterId) {
-    savedSnapshot.value = { title: c.title, directive: c.directive, content: c.content }
-    if (revision !== authorRevision) return
-    selectedId.value = c.id
+  if (!c || c.novel_id !== scope.novelId || c.id !== scope.chapterId) throw new Error('续写保存响应与原章节不一致，请核对原章')
+  chapterLoadRequestId += 1
+  upsertChapter(c)
+  savedSnapshot.value = { title: c.title, directive: c.directive, content: c.content }
+  if (revision === authorRevision) {
     content.value = c.content
     title.value = c.title
     directive.value = c.directive
-    // 恢复后清空一致性/套路标记，并把内容视为已保存
     rememberSaved()
     clearMarks()
+  }
+  try {
+    await loadChapters()
+    if (!isCurrentEditorScope(scope)) return
+    if (runId !== undefined && !isCurrentStream(runId)) return
+    upsertChapter(c)
+  } catch (error) {
+    if (isCurrentEditorScope(scope) && (runId === undefined || isCurrentStream(runId))) {
+      message.warning(`续写已保存，但章节列表刷新失败：${(error as Error).message}`)
+    }
   }
 }
 
@@ -584,15 +646,23 @@ async function generateChapter(
     },
     {
       onToken: (t) => { if (isCurrentStream(runId)) streamText.value += t },
-      onDone: async () => {
+      onDone: async (data) => {
         if (!isCurrentStream(runId)) return
-        await loadChapters()
-        if (!isCurrentStream(runId)) return
-        const last = chapters.value[chapters.value.length - 1]
-        if (last) await selectChapter(last, true)
-        clearStreamOutput()
-        streaming.value = false
+        const created = data.chapter as Chapter | undefined
+        if (!created?.id || created.novel_id !== scope.novelId) throw new Error('新章已生成，但未收到对应章节详情，请保留输出并核对目录')
+        chapterLoadRequestId += 1
+        upsertChapter(created)
+        adoptChapter(created)
+        const createdScope = captureEditorScope()
+        const completedRunId = streamRunId, completedRevision = authorRevision
+        // 完成回包已被采用；后置目录读取不能再清理另一轮生成的状态。
         message.success('已生成新章')
+        try { await loadChapters() }
+        catch (error) {
+          if (isCurrentEditorScope(createdScope) && streamRunId === completedRunId && authorRevision === completedRevision) {
+            message.warning(`新章已保存，但章节列表刷新失败：${(error as Error).message}`)
+          }
+        }
       },
       onError: (m, code) => failStream(runId, m, code),
     },
@@ -657,9 +727,9 @@ async function doContinue() {
     { directive: directive.value },
     {
       onToken: (t) => { if (isCurrentStream(runId)) streamText.value += t },
-      onDone: async () => {
+      onDone: async (data) => {
         if (!isCurrentStream(runId)) return
-        await reloadAndReselect(undefined, runId)
+        await reloadAndReselect(data.chapter, runId)
         if (!isCurrentStream(runId)) return
         clearStreamOutput()
         streaming.value = false
@@ -874,7 +944,7 @@ async function refreshRepairChapter() {
     if (!isCurrentRepair(context)) return
     const chapter = chapters.value.find((item) => item.id === context.chapterId)
     if (!chapter) { invalidateRepair(); message.warning('原章节已不存在，请核对章节列表'); return }
-    await selectChapter(chapter, true)
+    if (!await selectChapter(chapter, true)) return
     invalidateRepair()
     message.info('已刷新章节，请核对正文并重新检查、生成修订稿')
   } catch (e) {
@@ -904,7 +974,8 @@ async function applyRepair() {
     // 使用保存回应更新同一章，不调用可能跨章覆盖编辑稿的普通保存函数。
     repairInternalUpdate = true
     try {
-      chapters.value = chapters.value.map((chapter) => chapter.id === context.chapterId ? updated : chapter)
+      chapterLoadRequestId += 1
+      upsertChapter(updated)
       title.value = updated.title
       directive.value = updated.directive
       content.value = updated.content
@@ -1090,6 +1161,7 @@ async function saveContent() {
     }
     if (!scope.chapterId) {
       selectedId.value = updated.id
+      selectedDetail.value = updated
       scope = captureEditorScope()
       requestId = ++saveRequestId
       saving.value = true
@@ -1136,11 +1208,12 @@ async function saveSummary() {
     if (!isCurrent()) return
     if (updated.id !== chapterId || updated.novel_id !== novelId) { message.warning('摘要保存响应与原章节不一致，请刷新核对'); return }
     chapterLoadRequestId += 1
-    const chapter = chapters.value.find((c) => c.id === chapterId)
-    if (chapter) {
-      chapter.summary = updated.summary
-      chapter.updated_at = updated.updated_at
+    invalidateChapterDetail()
+    if (selectedChapter.value) {
+      selectedDetail.value = { ...selectedChapter.value, summary: updated.summary, updated_at: updated.updated_at }
     }
+    const metadata = chapters.value.find((c) => c.id === chapterId)
+    if (metadata) metadata.updated_at = updated.updated_at
     // 只同步摘要，保留编辑区尚未保存的正文、标题和章前指令。
     savedSummary.value = updated.summary
     if (revision === summaryRevision) summaryDraft.value = updated.summary
@@ -1169,11 +1242,13 @@ async function deleteChapter() {
     await api.deleteChapter(scope.novelId, chapterId)
     if (unmounted || novelId !== props.novelId || epoch !== pageEpoch) return
     chapterLoadRequestId += 1
+    invalidateChapterDetail()
     chapters.value = chapters.value.filter((chapter) => chapter.id !== chapterId)
     if (!isCurrent()) {
       // 同作品换章后仍移除已删记录；当前新输入不受旧选择回调影响。
       if (selectedId.value === chapterId) {
         selectedId.value = null
+        selectedDetail.value = null
         savedSnapshot.value = { title: '', directive: '', content: '' }
       }
       return
@@ -1183,10 +1258,17 @@ async function deleteChapter() {
     if (keepNewEdits) {
       // 删除确认后的新增文字不能随删除丢弃，转为尚未落库的新章草稿。
       selectedId.value = null
+      selectedDetail.value = null
       savedSnapshot.value = { title: '', directive: '', content: '' }
     } else {
       const next = chapters.value[Math.min(deletedIndex, chapters.value.length - 1)]
-      if (next) await selectChapter(next, true)
+      if (next) {
+        // 已删章的正文不能继续作为可保存的章节；邻章读取失败时保留为新草稿。
+        selectedId.value = null
+        selectedDetail.value = null
+        savedSnapshot.value = { title: '', directive: '', content: '' }
+        await selectChapter(next, true)
+      }
       else await startNew(true)
     }
     scope = captureEditorScope()
@@ -1258,10 +1340,18 @@ async function doSettle() {
     settleWarnings.value = (res.warnings ?? []).filter((warning) => typeof warning === 'string' && warning.trim())
     if (!sourceFingerprint) settleWarnings.value.push('未取得可核对的章节来源，不能确认建议；请更新后端并重新定稿。')
     showSettle.value = true
+    if (selectedChapter.value) {
+      upsertChapter({ ...selectedChapter.value, summary: res.summary, status: 'finalized',
+        drift_score: typeof res.drift === 'number' && Number.isFinite(res.drift) ? res.drift : null })
+    }
+    const metadataRequestId = ++chapterLoadRequestId
     // 定稿只改变摘要/状态等派生字段；重读目录不能覆盖等待期间的作者正文。
     try {
-      const loaded = await api.listChapters(context.novelId)
-      if (isCurrent()) chapters.value = loaded
+      const loaded = await api.listChapterMetadata(context.novelId)
+      if (isCurrent() && metadataRequestId === chapterLoadRequestId) {
+        chapters.value = loaded
+        syncSelectedMetadata()
+      }
     } catch (error) {
       if (isCurrent()) {
         const warning = `定稿沉淀已完成，但章节列表刷新失败：${(error as Error).message}`
@@ -1371,7 +1461,7 @@ async function refreshSettleChapter() {
     if (!isCurrent()) return
     const chapter = chapters.value.find((row) => row.id === context.chapterId)
     if (!chapter) { message.warning('原章节已不存在，请保留文本并核对目录'); return }
-    await selectChapter(chapter, true)
+    if (!await selectChapter(chapter, true)) return
     invalidateSettle()
     message.info('已读取章节，请核对正文后重新定稿')
   } catch (error) {
@@ -1527,6 +1617,7 @@ watch(
 )
 watch(() => [title.value, content.value, directive.value], () => {
   authorRevision += 1
+  invalidateChapterDetail()
   invalidatePreview(false)
   nextChapterRequestId += 1
   nextChapterContext.value = null
@@ -1576,6 +1667,7 @@ onBeforeUnmount(() => {
   saveRequestId += 1
   saving.value = false
   chapterLoadRequestId += 1
+  invalidateChapterDetail()
   clearMarks()
   deleteRequestId += 1
   deleting.value = false
@@ -1614,6 +1706,7 @@ onBeforeUnmount(() => {
         >
           <div class="chapter-item">
             <span>{{ chapterLabel(c) }}</span>
+            <span v-if="chapterLoadingId === c.id" class="cost-hint">读取中</span>
             <n-tag size="tiny" :type="c.status === 'finalized' ? 'success' : 'default'">
               {{ c.status === 'finalized' ? '已定稿' : '草稿' }}
             </n-tag>

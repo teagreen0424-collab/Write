@@ -74,7 +74,7 @@ async function mounted(options = {}) {
   const defaults = {
     listNovels: async () => ['novel-a', 'novel-b'].map((id) => ({ id, title: id, style_anchor: '' })),
     listEntities: async (id, path) => path === 'characters' ? [{ id: `${id}-character`, novel_id: id, name: `${id}人物`, extras: {} }] : [],
-    listChapters: async () => [],
+    listChapterMetadata: async () => [],
   }
   const harness = {
     components,

@@ -1,3 +1,4 @@
+import { splitChapterFixtures } from './chapter-fixtures.mjs'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
@@ -25,7 +26,7 @@ async function writing(options = {}) {
   const messages = [], requests = [], emitted = [], hooks = {}, listeners = new Map()
   globalThis.window = { addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: (name) => listeners.delete(name) }
   const implementations = {
-    listChapters: async (id) => [chapter(id)],
+    listChapterMetadata: async (id) => [chapter(id)],
     createChapter: async (id, data) => chapter(id, { ...data, id: 'created-chapter', status: 'draft', summary: '', tension_score: null, drift_score: null }),
     updateChapter: async (id, chapterId, data) => chapter(id, { ...data, id: chapterId,
       ...(['title', 'content', 'directive'].some((field) => field in data) ? { status: 'draft', summary: '', tension_score: null, drift_score: null } : {}),
@@ -38,7 +39,7 @@ async function writing(options = {}) {
     ...options.api,
   }
   const harness = {
-    api: Object.fromEntries(Object.entries(implementations).map(([name, fn]) => [name, (...args) => {
+    api: Object.fromEntries(Object.entries(splitChapterFixtures(implementations, (id, chapterId) => chapter(id, { id: chapterId }))).map(([name, fn]) => [name, (...args) => {
       requests.push({ name, args: structuredClone(args) }); return fn(...args)
     }])),
     streamSSE: options.streamSSE ?? (async () => { throw new Error('手写流程不得调用模型') }),
@@ -78,7 +79,7 @@ function descendants(node, predicate, found = []) {
 }
 
 test('空作品真实模板可手写保存草稿，不调用模型且新文本受离开与刷新保护', async () => {
-  const context = await writing({ api: { listChapters: async () => [] } })
+  const context = await writing({ api: { listChapterMetadata: async () => [] } })
   const { vm } = context
   assert.equal(descendants(context.render(), (node) => node.type === 'textarea' && node.props?.class === 'content-editor').length, 1)
   vm.title.value = '离线手写章'; vm.directive.value = '作者自己的方向'; vm.content.value = '断网也能写的新正文'
@@ -103,7 +104,7 @@ test('空作品真实模板可手写保存草稿，不调用模型且新文本�
 test('新章保存挂起保留新输入并防双击，刷新失败后下一次保存更新已创建身份', async () => {
   const pending = wait(); let reads = 0
   const context = await writing({ api: {
-    listChapters: async () => { if (++reads > 1) throw new Error('刷新失败'); return [] },
+    listChapterMetadata: async () => { if (++reads > 1) throw new Error('刷新失败'); return [] },
     createChapter: async () => pending.promise,
   } })
   const { vm } = context
@@ -178,7 +179,7 @@ test('保存旧来源在作品A→B→A、章节离开返回及卸载后均不�
 test('新章同为null身份时放弃并另建也使旧POST失效，不把新稿绑定旧创建结果', async () => {
   for (const outcome of ['success', 'failure']) {
     const pending = wait()
-    const context = await writing({ api: { listChapters: async () => [], createChapter: async () => pending.promise } })
+    const context = await writing({ api: { listChapterMetadata: async () => [], createChapter: async () => pending.promise } })
     context.vm.content.value = '旧草稿'; const saving = context.vm.saveContent()
     await context.vm.startNew(true); context.vm.content.value = '作者明确另开的新草稿'
     if (outcome === 'success') pending.resolve(chapter('novel-a', { id: 'old-created', content: '旧草稿' }))
@@ -192,7 +193,7 @@ test('新章同为null身份时放弃并另建也使旧POST失效，不把新稿
 
 test('旧保存完成不会停止另一来源正在保存的新稿', async () => {
   const first = wait(), second = wait(); let calls = 0
-  const context = await writing({ api: { listChapters: async () => [], createChapter: async () => ++calls === 1 ? first.promise : second.promise } })
+  const context = await writing({ api: { listChapterMetadata: async () => [], createChapter: async () => ++calls === 1 ? first.promise : second.promise } })
   context.vm.content.value = '旧草稿'; const oldSaving = context.vm.saveContent()
   await context.vm.startNew(true); context.vm.content.value = '新草稿'; const newSaving = context.vm.saveContent()
   first.resolve(chapter('novel-a', { id: 'old-created', content: '旧草稿' })); await oldSaving
@@ -265,7 +266,7 @@ test('旧深度与大纲检查完成不会停止新正文正在进行的检查',
 
 test('新章等待目录初始读取时手写不被迟到的初始章节选择覆盖', async () => {
   const pending = wait()
-  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapters: async () => pending.promise } })
+  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapterMetadata: async () => pending.promise } })
   context.vm.content.value = '先手写的新章'; pending.resolve([chapter()]); await settle()
   assert.equal(context.vm.selectedId.value, null)
   assert.equal(context.vm.content.value, '先手写的新章')
@@ -275,13 +276,13 @@ test('新章等待目录初始读取时手写不被迟到的初始章节选择�
 
 test('目录ABA与同作品乱序读取不倒退，空作品来源清空旧目录和编辑器', async () => {
   const pending = wait(); let reads = 0
-  const context = await writing({ api: { listChapters: async (id) => ++reads === 1 ? pending.promise : [chapter(id, { title: '当前目录' })] } })
+  const context = await writing({ api: { listChapterMetadata: async (id) => ++reads === 1 ? pending.promise : [chapter(id, { title: '当前目录' })] } })
   context.props.novelId = 'novel-b'; context.props.novelId = 'novel-a'; await settle()
   pending.resolve([chapter('novel-a', { title: '旧目录' })]); await settle()
   assert.equal(context.vm.chapters.value[0].title, '当前目录')
   const old = wait(), newest = wait(); reads = 0
   // 独立实例保持同作品的旧读取不会覆盖最近响应。
-  const ordered = await writing({ api: { listChapters: async () => ++reads === 1 ? [chapter()] : reads === 2 ? old.promise : newest.promise } })
+  const ordered = await writing({ api: { listChapterMetadata: async () => ++reads === 1 ? [chapter()] : reads === 2 ? old.promise : newest.promise } })
   const readingOld = ordered.vm.loadChapters(), readingNew = ordered.vm.loadChapters()
   newest.resolve([chapter('novel-a', { title: '新目录' })]); await readingNew
   old.resolve([chapter('novel-a', { title: '过时目录' })]); await readingOld
@@ -333,7 +334,7 @@ test('旧摘要请求完成不会停止关闭重开后新摘要的保存', async
 })
 
 test('已有手写正文未保存时AI生成入口提示保存，不调用模型覆盖新稿', async () => {
-  const context = await writing({ api: { listChapters: async () => [] } })
+  const context = await writing({ api: { listChapterMetadata: async () => [] } })
   context.vm.content.value = '必须保留的手写正文'; await context.vm.doWrite()
   assert.equal(context.vm.content.value, '必须保留的手写正文'); assert.equal(context.vm.streaming.value, false)
   assert.match(context.messages[0].text, /请先保存/)
@@ -360,7 +361,7 @@ test('删除迟到不重选或丢弃新作品正文，ABA与卸载不提示旧�
 test('删除成功刷新失败先移除真实已删章，挂起旧目录不能复活记录', async () => {
   const old = wait(); let reads = 0
   const remaining = chapter('novel-a', { id: 'remaining', seq: 2 })
-  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapters: async () => ++reads === 1 ? [chapter(), remaining] : reads === 2 ? old.promise : Promise.reject(new Error('刷新失败')) } })
+  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapterMetadata: async () => ++reads === 1 ? [chapter(), remaining] : reads === 2 ? old.promise : Promise.reject(new Error('刷新失败')) } })
   const oldReading = context.vm.loadChapters(); await context.vm.deleteChapter()
   assert.deepEqual(context.vm.chapters.value.map((item) => item.id), ['remaining'])
   assert.equal(context.vm.selectedId.value, 'remaining')
@@ -372,7 +373,7 @@ test('删除成功刷新失败先移除真实已删章，挂起旧目录不能�
 
 test('删除过程中新的作者输入保留为新章草稿，不被下一章强制覆盖', async () => {
   const pending = wait()
-  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { deleteChapter: async () => pending.promise, listChapters: async () => [chapter()] } })
+  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { deleteChapter: async () => pending.promise, listChapterMetadata: async () => [chapter()] } })
   const deleting = context.vm.deleteChapter(); context.vm.content.value = '等待删除时新写的文字'
   pending.resolve(); await deleting
   assert.equal(context.vm.selectedId.value, null)
@@ -407,7 +408,7 @@ test('改写预览绑定生成章与作者源文本，切章或正文ABA后不�
 
 test('改写确认等待新输入保留，双击不重复且刷新失败保留真实保存基线', async () => {
   const pending = wait(); let reads = 0
-  const context = await rewriteContext({ updateChapter: async () => pending.promise, listChapters: async () => ++reads === 1 ? [chapter()] : Promise.reject(new Error('刷新失败')) })
+  const context = await rewriteContext({ updateChapter: async () => pending.promise, listChapterMetadata: async () => ++reads === 1 ? [chapter()] : Promise.reject(new Error('刷新失败')) })
   const applying = context.vm.applyPreview(); await context.vm.applyPreview()
   context.vm.title.value = '新作者标题'; context.vm.content.value = '确认过程中继续手写'
   pending.resolve(chapter('novel-a', { content: '已确认候选全文', status: 'draft', summary: '', tension_score: null, drift_score: null })); await applying
@@ -435,7 +436,7 @@ test('改写确认旧来源成功/失败以及卸载不得回写当前正文或�
 
 test('恢复回调只接受本次版本面板来源，晚到刷新保留恢复期间的新编辑', async () => {
   const pending = wait(); let reads = 0
-  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapters: async () => ++reads === 1 ? [chapter()] : pending.promise } })
+  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapterMetadata: async () => ++reads === 1 ? [chapter()] : pending.promise } })
   context.vm.openRevisionHistory()
   const restored = chapter('novel-a', { content: '恢复版本正文', status: 'draft' })
   const restoring = context.vm.onRestored(restored)
@@ -470,7 +471,7 @@ test('下一章大纲迟到的成功/失败不打开其他来源对话框，旧�
 
 test('同作品删除等待换到另一章后仍移除已删记录，并保持当前作者新稿', async () => {
   const pending = wait(), second = chapter('novel-a', { id: 'second', seq: 2, content: '第二章正文' })
-  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapters: async () => [chapter(), second], deleteChapter: async () => pending.promise } })
+  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapterMetadata: async () => [chapter(), second], deleteChapter: async () => pending.promise } })
   const deleting = context.vm.deleteChapter(); await context.vm.selectChapter(second, true)
   context.vm.content.value = '第二章新增稿'; pending.resolve(); await deleting
   assert.equal(context.vm.selectedId.value, 'second'); assert.equal(context.vm.content.value, '第二章新增稿')
@@ -482,7 +483,7 @@ test('同作品删除等待换到另一章后仍移除已删记录，并保持�
 
 test('摘要保存成功使保存前的目录读取失效，不把已保存摘要倒退', async () => {
   const pending = wait(); let reads = 0
-  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapters: async () => ++reads === 1 ? [chapter()] : pending.promise } })
+  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapterMetadata: async () => ++reads === 1 ? [chapter()] : pending.promise } })
   const oldReading = context.vm.loadChapters()
   context.vm.openSummary(); context.vm.summaryDraft.value = '已保存新摘要'; await context.vm.saveSummary()
   pending.resolve([chapter()]); await oldReading
@@ -492,7 +493,7 @@ test('摘要保存成功使保存前的目录读取失效，不把已保存摘�
 
 test('恢复后目录刷新挂起期间显式保存，旧恢复回调不能把已保存正文再覆盖', async () => {
   const pending = wait(); let reads = 0
-  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapters: async () => ++reads === 2 ? pending.promise : [chapter()] } })
+  const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api: { listChapterMetadata: async () => ++reads === 2 ? pending.promise : [chapter()] } })
   context.vm.openRevisionHistory()
   const restored = chapter('novel-a', { content: '恢复版本正文' })
   const restoring = context.vm.onRestored(restored)

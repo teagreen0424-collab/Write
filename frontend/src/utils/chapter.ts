@@ -6,7 +6,7 @@ export function countCharacters(text: string): number {
   return Array.from(text.replace(/[\p{White_Space}\u001c-\u001f]/gu, '')).length
 }
 
-export function chapterLabel(chapter: Chapter): string {
+export function chapterLabel(chapter: Pick<Chapter, 'seq' | 'title'>): string {
   const sequenceLabel = `第${chapter.seq}章`
   const title = chapter.title
     .trim()
