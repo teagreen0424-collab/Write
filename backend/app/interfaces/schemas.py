@@ -221,6 +221,13 @@ class RelationshipRead(ORMBase):
 
 
 # ================= Chapter =================
+class SettleAuthorFields(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(..., strict=True)
+    content: str = Field(..., strict=True)
+    directive: str = Field(..., strict=True)
+
+
 class ChapterCreate(BaseModel):
     request_id: Optional[UUID] = None
     title: str = ""
@@ -241,6 +248,13 @@ class ChapterUpdate(BaseModel):
     # 仅用于接口编排：决定覆盖前快照的来源，不落库到 chapter 表。
     # 旧调用不传时保持兼容，默认按手工保存留档；只接受 manual_save / rewrite_apply。
     revision_source: RevisionSource = RevisionSource.MANUAL_SAVE
+    expected_author_fields: Optional[SettleAuthorFields] = None
+
+    @model_validator(mode="after")
+    def guarded_rewrite_application(self):
+        if self.revision_source == RevisionSource.REWRITE_APPLY and self.expected_author_fields is None:
+            raise ValueError("应用改写必须提供原稿完整标题、正文和章前指令")
+        return self
 
 
 class ChapterRead(ORMBase):
@@ -437,13 +451,20 @@ class RewritePassageRequest(BaseModel):
     passage: str = Field(..., min_length=1)
     intent: str = ""
     preview: bool = False
+    expected_author_fields: Optional[SettleAuthorFields] = None
+    selection_start: Optional[int] = Field(default=None, ge=0, strict=True)
+    selection_end: Optional[int] = Field(default=None, gt=0, strict=True)
 
-
-class SettleAuthorFields(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    title: str = Field(..., strict=True)
-    content: str = Field(..., strict=True)
-    directive: str = Field(..., strict=True)
+    @model_validator(mode="after")
+    def precise_selection(self):
+        if (self.selection_start is None) != (self.selection_end is None):
+            raise ValueError("选区起止位置必须成对提供")
+        if self.selection_start is not None:
+            if self.selection_start >= self.selection_end:
+                raise ValueError("选区必须包含至少一个字符")
+            if self.expected_author_fields is not None and self.selection_end > len(self.expected_author_fields.content):
+                raise ValueError("选区不能超出原稿")
+        return self
 
 
 class SettleRequest(BaseModel):

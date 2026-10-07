@@ -210,6 +210,15 @@ export type RevisionSource =
 /** PUT 更新章节时允许前端指定的来源，其余来源由后端写作用例决定 */
 export type RevisionSourceInput = 'manual_save' | 'rewrite_apply'
 
+export interface ParagraphRewriteRequest extends Record<string, unknown> {
+  passage: string
+  intent: string
+  preview: true
+  expected_author_fields: ChapterAuthorFields
+  selection_start: number
+  selection_end: number
+}
+
 /** 版本列表项：不包含正文 */
 export interface ChapterRevisionMeta {
   id: string

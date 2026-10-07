@@ -387,7 +387,14 @@ test('删除过程中新的作者输入保留为新章草稿，不被下一章�
 
 async function rewriteContext(api = {}) {
   const context = await writing({ props: { initialChapterId: 'novel-a-chapter' }, api,
-    streamSSE: async (_url, _payload, callbacks) => { callbacks.onToken('候选段落'); await callbacks.onDone({ content: '已确认候选全文' }) },
+    streamSSE: async (_url, payload, callbacks) => {
+      callbacks.onToken('候选段落')
+      const source = payload.expected_author_fields, points = Array.from(source.content)
+      await callbacks.onDone({ type: 'done', preview: true,
+        content: points.slice(0, payload.selection_start).join('') + '候选段落' + points.slice(payload.selection_end).join(''),
+        chapter: chapter('novel-a', source), expected_author_fields: { ...source },
+        selection_start: payload.selection_start, selection_end: payload.selection_end })
+    },
   })
   context.vm.contentRef.value = { selectionStart: 0, selectionEnd: 2 }
   await context.vm.doRewrite()
@@ -412,12 +419,13 @@ test('改写预览绑定生成章与作者源文本，切章或正文ABA后不�
 test('改写确认等待新输入保留，双击不重复且刷新失败保留真实保存基线', async () => {
   const pending = wait(); let reads = 0
   const context = await rewriteContext({ updateChapter: async () => pending.promise, listChapterMetadata: async () => ++reads === 1 ? [chapter()] : Promise.reject(new Error('刷新失败')) })
+  const candidate = context.vm.previewFullContent.value
   const applying = context.vm.applyPreview(); await context.vm.applyPreview()
   context.vm.title.value = '新作者标题'; context.vm.content.value = '确认过程中继续手写'
-  pending.resolve(chapter('novel-a', { content: '已确认候选全文', status: 'draft', summary: '', tension_score: null, drift_score: null })); await applying
+  pending.resolve(chapter('novel-a', { content: candidate, status: 'draft', summary: '', tension_score: null, drift_score: null })); await applying
   assert.equal(context.requests.filter((entry) => entry.name === 'updateChapter').length, 1)
   assert.equal(context.vm.content.value, '确认过程中继续手写'); assert.equal(context.vm.title.value, '新作者标题')
-  assert.equal(context.vm.savedSnapshot.value.content, '已确认候选全文'); assert.equal(context.vm.isDirty.value, true)
+  assert.equal(context.vm.savedSnapshot.value.content, candidate); assert.equal(context.vm.isDirty.value, true)
   assert.equal(context.vm.selectedChapter.value.status, 'draft'); assert.match(context.messages[0].text, /已.*改写.*刷新失败/)
   context.dispose()
 })
@@ -425,12 +433,13 @@ test('改写确认等待新输入保留，双击不重复且刷新失败保留�
 test('改写确认旧来源成功/失败以及卸载不得回写当前正文或提示', async () => {
   for (const switching of ['chapter', 'novel', 'unmount']) for (const outcome of ['success', 'failure']) {
     const pending = wait(); const context = await rewriteContext({ updateChapter: async () => pending.promise })
+    const candidate = context.vm.previewFullContent.value
     const applying = context.vm.applyPreview()
     if (switching === 'chapter') { await context.vm.startNew(true); await context.vm.selectChapter(chapter(), true) }
     if (switching === 'novel') { context.props.novelId = 'novel-b'; context.props.novelId = 'novel-a'; await settle() }
     if (switching === 'unmount') context.dispose()
     context.vm.content.value = '新的当前稿'
-    if (outcome === 'success') pending.resolve(chapter('novel-a', { content: '已确认候选全文' })); else pending.reject(new Error('旧改写失败'))
+    if (outcome === 'success') pending.resolve(chapter('novel-a', { content: candidate })); else pending.reject(new Error('旧改写失败'))
     await applying
     assert.equal(context.vm.content.value, '新的当前稿'); assert.equal(context.messages.length, 0); assert.equal(context.vm.previewApplying.value, false)
     if (switching !== 'unmount') context.dispose()

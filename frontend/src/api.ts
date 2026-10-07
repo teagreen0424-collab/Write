@@ -45,6 +45,7 @@ const BASE = '/api/v1'
 /** 章节更新载荷：revision_source 决定覆盖前快照的来源，不落库到 chapter 表 */
 export interface ChapterUpdatePayload extends Record<string, unknown> {
   revision_source?: RevisionSourceInput
+  expected_author_fields?: ChapterAuthorFields
 }
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {

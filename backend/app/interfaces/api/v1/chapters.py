@@ -1,5 +1,5 @@
 """章节 CRUD + 写作/续写/改写/定稿/版本 路由。"""
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -57,12 +57,23 @@ def update_chapter(
 ):
     """更新章节：作者字段实际变化时先保存覆盖前快照，与更新同一事务提交。"""
     changes = payload.model_dump(exclude_unset=True, mode="json")
+    expected = changes.pop("expected_author_fields", None)
+    source = changes.pop("revision_source", None) or revisions_uc.SOURCE_MANUAL_SAVE
+    if source == revisions_uc.SOURCE_REWRITE_APPLY:
+        # 校验调用方事务在任何ORM读取/可能autoflush之前，不能触碰其它未提交作者修改。
+        revisions_uc._require_clean_session(db)
     ChapterRepo(db).get(novel_id, chapter_id)
     if "outline_node_id" in changes:
         _validate_outline_binding(db, novel_id, changes["outline_node_id"])
     # revision_source 只用于编排快照来源，必须从章节更新字段中剔除，禁止传给 ORM。
-    source = changes.pop("revision_source", None) or revisions_uc.SOURCE_MANUAL_SAVE
-    return revisions_uc.update_chapter_with_revision(db, novel_id, chapter_id, changes, source)
+    try:
+        return revisions_uc.update_chapter_with_revision(
+            db, novel_id, chapter_id, changes, source, expected_author_fields=expected,
+        )
+    except HTTPException as error:
+        if source == revisions_uc.SOURCE_REWRITE_APPLY and error.status_code == 409:
+            return JSONResponse(status_code=409, content={"detail": error.detail, "code": "chapter_write_conflict"})
+        raise
 
 
 @router.delete("/{chapter_id}", status_code=204)
@@ -196,7 +207,9 @@ def rewrite_passage(
 ):
     return _streaming(
         lambda db: writing_uc.rewrite_passage(
-            db, novel_id, chapter_id, payload.passage, payload.intent, payload.preview
+            db, novel_id, chapter_id, payload.passage, payload.intent, payload.preview,
+            expected_author_fields=payload.expected_author_fields.model_dump() if payload.expected_author_fields is not None else None,
+            selection_start=payload.selection_start, selection_end=payload.selection_end,
         )
     )
 

@@ -321,7 +321,8 @@ class WritePathRevisionTest(RevisionTestBase):
 
         resp = client.put(
             f"/api/v1/novels/{self.novel_id}/chapters/{chapter.id}",
-            json={"content": "改写应用后的正文", "revision_source": "rewrite_apply"},
+            json={"content": "改写应用后的正文", "revision_source": "rewrite_apply",
+                  "expected_author_fields": {field: getattr(chapter, field) for field in ("title", "content", "directive")}},
         )
 
         self.assertEqual(resp.status_code, 200, resp.text)
@@ -371,7 +372,8 @@ class WritePathRevisionTest(RevisionTestBase):
 
         resp = client.put(
             f"/api/v1/novels/{self.novel_id}/chapters/{chapter.id}",
-            json={"content": "新的正文", "revision_source": "rewrite_apply"},
+            json={"content": "新的正文", "revision_source": "rewrite_apply",
+                  "expected_author_fields": {field: getattr(chapter, field) for field in ("title", "content", "directive")}},
         )
 
         self.assertEqual(resp.status_code, 200, resp.text)

@@ -1,6 +1,8 @@
 """写作用例：write_chapter / continue_chapter / rewrite_passage（均 SSE 流式）。"""
 import json
 
+from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -28,6 +30,10 @@ from app.infrastructure import models
 from app.interfaces import schemas
 
 llm = LLMProvider()
+
+
+class RewriteSelectionError(ValueError):
+    code = "chapter_rewrite_selection_invalid"
 
 
 def sse(data: dict) -> str:
@@ -238,6 +244,9 @@ def rewrite_passage(
     passage: str,
     intent: str = "",
     preview: bool = False,
+    *, expected_author_fields: dict | None = None,
+    selection_start: int | None = None,
+    selection_end: int | None = None,
 ):
     """改写指定段落：流式输出改写结果。
 
@@ -245,16 +254,32 @@ def rewrite_passage(
     默认 False 保持原行为，直接替换原文对应段落并落库。
     """
     try:
-        repo = ChapterRepo(db)
-        chapter = repo.get(novel_id, chapter_id)
-        source_fields = {field: getattr(chapter, field) for field in AUTHOR_FIELDS}
-        if passage not in chapter.content:
-            raise ValueError("未在正文中找到待改写段落，请确认已选中原文")
-
-        position = f"第 {chapter.seq} 章《{chapter.title}》改写"
-        context = build_context(db, novel_id, "", position,
-                                chapter_seq=chapter.seq, outline_node_id=chapter.outline_node_id)
-        previous_context = prior_chapter_context(db, novel_id, chapter.seq, chapter.outline_node_id).text
+        # 真正数据库列投影绕过旧ORM缓存，也不刷新/flush调用方的未提交作者字段。
+        with db.no_autoflush:
+            table = models.Chapter.__table__
+            row = db.execute(select(table).where(table.c.id == chapter_id, table.c.novel_id == novel_id)).mappings().first()
+            if row is None:
+                raise HTTPException(status_code=404, detail="章节不存在")
+            chapter = dict(row)
+            source_fields = {field: chapter[field] for field in AUTHOR_FIELDS}
+            if expected_author_fields is not None and any(
+                source_fields[field] != expected_author_fields[field] for field in AUTHOR_FIELDS
+            ):
+                raise HTTPException(status_code=409, detail="原稿已变化，请重新读取核对后生成改写；当前稿未被覆盖")
+            original = source_fields["content"]
+            if selection_start is None and selection_end is None:
+                selection_start = original.find(passage)
+                if preview and selection_start >= 0 and original.find(passage, selection_start + 1) >= 0:
+                    raise RewriteSelectionError("原文有多处相同段落，请重新选择精确范围，不能猜测第一处")
+                selection_end = selection_start + len(passage)
+            if (type(selection_start) is not int or type(selection_end) is not int
+                    or not 0 <= selection_start < selection_end <= len(original)
+                    or original[selection_start:selection_end] != passage):
+                raise RewriteSelectionError("选区与原稿不一致，请重新选择完整原文；原稿未改动")
+            position = f"第 {chapter['seq']} 章《{chapter['title']}》改写"
+            context = build_context(db, novel_id, "", position,
+                                    chapter_seq=chapter["seq"], outline_node_id=chapter["outline_node_id"])
+            previous_context = prior_chapter_context(db, novel_id, chapter["seq"], chapter["outline_node_id"]).text
         intent_text = REWRITE_INTENTS.get(intent, REWRITE_INTENTS[""])
         messages = [
             {"role": "system", "content": REWRITE_SYSTEM},
@@ -272,7 +297,7 @@ def rewrite_passage(
         if not full.strip():
             raise ValueError("未生成有效改写内容，请重试")
 
-        new_content = source_fields["content"].replace(passage, full, 1)
+        new_content = original[:selection_start] + full + original[selection_end:]
         if preview:
             yield sse(
                 {
@@ -280,6 +305,9 @@ def rewrite_passage(
                     "preview": True,
                     "content": new_content,
                     "chapter": _chapter_dict(chapter),
+                    "expected_author_fields": source_fields,
+                    "selection_start": selection_start,
+                    "selection_end": selection_end,
                 }
             )
             return
@@ -291,5 +319,6 @@ def rewrite_passage(
         )
         yield sse({"type": "done", "chapter": _chapter_dict(updated)})
     except Exception as exc:  # noqa: BLE001
-        db.rollback()
+        if not preview:
+            db.rollback()
         yield _stream_error(exc)

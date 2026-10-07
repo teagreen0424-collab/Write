@@ -21,6 +21,7 @@ import { isChapterCreationResult, listChapterCreations, newChapterCreation, remo
 import ChapterRevisionPanel from './ChapterRevisionPanel.vue'
 import type {
   Chapter,
+  ChapterAuthorFields,
   ChapterMetadata,
   ApplicationFailure,
   ChapterRepairPreview,
@@ -31,6 +32,7 @@ import type {
   DeepCheckResult,
   OutlineCheckResult,
   OutlineNode,
+  ParagraphRewriteRequest,
   Segment,
   StoryCheckResult,
   StoryCheckIssue,
@@ -142,7 +144,18 @@ const previewPassage = ref('')
 const previewNew = ref('')
 const previewFullContent = ref('')
 const previewApplying = ref(false)
-const previewContext = ref<(EditorScope & { authorRevision: number }) | null>(null)
+interface ParagraphRewriteContext extends EditorScope {
+  authorRevision: number
+  source: ChapterAuthorFields
+  selectionStart: number
+  selectionEnd: number
+}
+const previewContext = ref<ParagraphRewriteContext | null>(null)
+const previewGuarded = ref(false)
+const previewError = ref('')
+const previewRefreshNeeded = ref(false)
+const previewRefreshing = ref(false)
+let previewRefreshRequestId = 0
 let previewApplyRequestId = 0
 let deleteRequestId = 0
 let summaryRequestId = 0
@@ -874,22 +887,46 @@ async function doContinue() {
   )
 }
 
-function getSelection(): string {
+function getSelection() {
   const el = contentRef.value
-  if (!el) return ''
+  if (!el) return null
   const start = el.selectionStart ?? 0
   const end = el.selectionEnd ?? 0
-  return end > start ? content.value.slice(start, end) : ''
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > content.value.length) return null
+  return { passage: content.value.slice(start, end),
+    start: Array.from(content.value.slice(0, start)).length, end: Array.from(content.value.slice(0, end)).length }
+}
+
+function sameRewriteSource(value: unknown, source: ChapterAuthorFields): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const row = value as Record<string, unknown>
+  return row.title === source.title && row.content === source.content && row.directive === source.directive
+}
+
+function rewriteCandidate(context: ParagraphRewriteContext, replacement: string): string {
+  const original = Array.from(context.source.content)
+  return original.slice(0, context.selectionStart).join('') + replacement + original.slice(context.selectionEnd).join('')
+}
+
+function isGuardedRewrite(value: unknown, context: ParagraphRewriteContext, replacement: string): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !replacement.trim()) return false
+  const row = value as Record<string, unknown>, chapter = row.chapter as Record<string, unknown> | undefined
+  return row.type === 'done' && row.preview === true && row.selection_start === context.selectionStart
+    && row.selection_end === context.selectionEnd && sameRewriteSource(row.expected_author_fields, context.source)
+    && !!chapter && chapter.id === context.chapterId && chapter.novel_id === context.novelId
+    && sameRewriteSource(chapter, context.source) && row.content === rewriteCandidate(context, replacement)
 }
 
 async function doRewrite() {
   if (!selectedId.value || streaming.value || !requireSaved('改写选中内容')) return
-  const context = { ...captureEditorScope(), authorRevision }
-  const passage = getSelection().trim()
-  if (!passage) {
+  const selection = getSelection()
+  if (!selection?.passage.trim()) {
     message.error('请先在正文中选中要改写的段落')
     return
   }
+  const context: ParagraphRewriteContext = { ...captureEditorScope(), authorRevision, source: authorSnapshot(),
+    selectionStart: selection.start, selectionEnd: selection.end }
+  const passage = selection.passage
   const runId = await beginStream()
   if (runId === null || !isCurrentEditorScope(context) || context.authorRevision !== authorRevision || !isCurrentStream(runId)) return
   previewContext.value = context
@@ -897,22 +934,45 @@ async function doRewrite() {
   previewPassage.value = passage
   previewNew.value = ''
   previewFullContent.value = ''
+  previewGuarded.value = false
+  previewError.value = ''
+  previewRefreshNeeded.value = false
+  const payload: ParagraphRewriteRequest = { passage, intent: rewriteIntent.value, preview: true,
+    expected_author_fields: { ...context.source }, selection_start: context.selectionStart, selection_end: context.selectionEnd }
   await streamSSE(
     `/api/v1/novels/${context.novelId}/chapters/${context.chapterId}/rewrite`,
-    { passage, intent: rewriteIntent.value, preview: true },
+    payload,
     {
       onToken: (t) => { if (isCurrentStream(runId)) streamText.value += t },
       onDone: (obj) => {
         if (!isCurrentStream(runId)) return
         if (!isCurrent()) { failStream(runId, '生成期间作者输入已改变，请保留候选输出并重新核对'); return }
         streaming.value = false
-        // 流式内容即改写后的段落；done 事件带拼好的整章内容，供「应用」落库
         previewNew.value = streamText.value
-        previewFullContent.value = obj.content ?? ''
+        previewFullContent.value = typeof obj?.content === 'string' ? obj.content : rewriteCandidate(context, previewNew.value)
+        previewGuarded.value = isGuardedRewrite(obj, context, previewNew.value)
+        if (!previewGuarded.value) {
+          previewError.value = '改写回应的原稿、选区或候选全文未得到完整核对；正文未保存。请复制候选并核对服务版本与原稿。'
+          previewRefreshNeeded.value = true
+          message.warning(previewError.value)
+        }
         clearStreamOutput()
         showPreview.value = true
       },
-      onError: (m, code) => failStream(runId, m, code),
+      onError: (m, code) => {
+        if (!isCurrentStream(runId)) return
+        failStream(runId, m, code)
+        if (isCurrentEditorScope(context) && code === 'chapter_write_conflict') {
+          previewContext.value = context
+          previewPassage.value = passage
+          previewNew.value = streamText.value
+          previewFullContent.value = rewriteCandidate(context, previewNew.value)
+          previewGuarded.value = false
+          previewError.value = '已保存原稿已变化，本次未生成可应用预览；当前输入仍保留，请重新读取章节核对。'
+          previewRefreshNeeded.value = true
+          showPreview.value = true
+        }
+      },
     },
   )
 }
@@ -921,16 +981,19 @@ async function doRewrite() {
 async function applyPreview() {
   const context = previewContext.value
   if (!context || !showPreview.value || !isCurrentEditorScope(context) || context.authorRevision !== authorRevision
+    || !previewGuarded.value || previewRefreshNeeded.value || previewRefreshing.value
     || previewApplying.value || saving.value || streaming.value || hasIncompleteOutput.value || !previewFullContent.value.trim()) return
   const requestId = ++previewApplyRequestId
   restoreRequestId += 1
   const submittedContent = previewFullContent.value
+  const evidence = { passage: previewPassage.value, replacement: previewNew.value, content: submittedContent }
   const isCurrent = () => isCurrentEditorScope(context) && requestId === previewApplyRequestId
   previewApplying.value = true
   try {
     const updated = await api.updateChapter(context.novelId, context.chapterId!, {
       content: submittedContent,
       revision_source: 'rewrite_apply',
+      expected_author_fields: { ...context.source },
     })
     if (!isCurrent()) return
     if (updated.id !== context.chapterId || updated.novel_id !== context.novelId) {
@@ -949,13 +1012,25 @@ async function applyPreview() {
     try {
       await loadChapters()
       if (!isCurrent()) return
-      upsertChapter(updated)
       message.success('已应用改写')
     } catch (error) {
       if (isCurrent()) message.warning(`已应用改写，但章节列表刷新失败：${(error as Error).message}`)
     }
   } catch (e) {
-    if (isCurrent()) message.error((e as Error).message)
+    if (isCurrent()) {
+      const error = e as Error & { status?: number; code?: string }
+      if (error.status === 409 && error.code === 'chapter_write_conflict') {
+        previewContext.value = context
+        previewPassage.value = evidence.passage
+        previewNew.value = evidence.replacement
+        previewFullContent.value = evidence.content
+        previewGuarded.value = false
+        previewRefreshNeeded.value = true
+        previewError.value = '已保存原稿已变化，本次未应用改写。候选、原文和当前输入仍保留，请先复制，再重新读取章节核对并重新生成。'
+        showPreview.value = true
+        message.warning(previewError.value)
+      } else message.error(error.message)
+    }
   } finally {
     if (isCurrent()) previewApplying.value = false
   }
@@ -967,6 +1042,11 @@ function invalidatePreview(invalidateApply = true) {
     previewApplying.value = false
   }
   previewContext.value = null
+  previewRefreshRequestId += 1
+  previewRefreshing.value = false
+  previewGuarded.value = false
+  previewError.value = ''
+  previewRefreshNeeded.value = false
   showPreview.value = false
   previewPassage.value = ''
   previewNew.value = ''
@@ -974,13 +1054,41 @@ function invalidatePreview(invalidateApply = true) {
 }
 
 function handlePreviewVisibility(visible: boolean) {
-  if (!visible && !previewApplying.value) invalidatePreview()
+  if (!visible && !previewApplying.value && !previewRefreshing.value) invalidatePreview()
 }
 
 function discardPreview() {
-  if (previewApplying.value) return
+  if (previewApplying.value || previewRefreshing.value) return
   invalidatePreview()
   message.info('已放弃本次改写')
+}
+
+async function copyRewritePreview(text: string) {
+  const scope = captureEditorScope(), context = previewContext.value
+  try { await navigator.clipboard.writeText(text); if (isCurrentEditorScope(scope) && context === previewContext.value) message.success('已复制改写稿件') }
+  catch { if (isCurrentEditorScope(scope) && context === previewContext.value) message.warning('自动复制失败，请在只读原文或候选输入框中手动选中复制。') }
+}
+
+async function refreshPreviewChapter() {
+  const context = previewContext.value
+  if (!context || !isCurrentEditorScope(context) || previewApplying.value || previewRefreshing.value || saving.value || streaming.value) return
+  const revision = authorRevision, requestId = ++previewRefreshRequestId
+  const isCurrent = () => isCurrentEditorScope(context) && revision === authorRevision && requestId === previewRefreshRequestId
+  previewRefreshing.value = true
+  try {
+    if (!await askDiscard('重新读取会替换当前编辑稿并关闭本次候选。请先复制需要保留的原文、候选和新输入，确定读取已保存章节吗？', '读取已保存章节') || !isCurrent()) return
+    const fresh = await api.getChapter(context.novelId, context.chapterId!)
+    if (!isCurrent()) return
+    if (fresh.id !== context.chapterId || fresh.novel_id !== context.novelId
+      || !['title', 'content', 'directive'].every(field => typeof fresh[field as keyof Chapter] === 'string')) {
+      previewError.value = '章节读取回应与原来源不一致，当前输入与候选仍保留'; return
+    }
+    adoptChapter(fresh)
+    upsertChapter(fresh)
+    message.info('已读取章节，请核对正文，重新选择段落并生成改写')
+  } catch (error) {
+    if (isCurrent()) previewError.value = `章节读取未完成，当前输入与候选仍保留：${(error as Error).message}`
+  } finally { if (isCurrent()) previewRefreshing.value = false }
 }
 
 function invalidateRepair() {
@@ -2304,21 +2412,32 @@ onBeforeUnmount(() => {
       </template>
     </n-modal>
 
-    <n-modal :show="showPreview" @update:show="handlePreviewVisibility" :closable="!previewApplying" :mask-closable="!previewApplying" :close-on-esc="!previewApplying" preset="card" title="改写预览（尚未落库）" style="width: 760px">
-      <div class="preview-cols">
+    <n-modal :show="showPreview" @update:show="handlePreviewVisibility" :closable="!previewApplying && !previewRefreshing" :mask-closable="!previewApplying && !previewRefreshing" :close-on-esc="!previewApplying && !previewRefreshing" preset="card" title="改写预览（尚未落库）" style="width: 760px">
+      <p v-if="previewError" role="alert" aria-label="改写来源核对提示" class="delete-warning">{{ previewError }}</p>
+      <div class="preview-cols" aria-label="段落改写候选">
         <div class="preview-col">
           <div class="preview-col-title">原文</div>
-          <div class="preview-col-text">{{ previewPassage }}</div>
+          <textarea class="preview-col-text rewrite-copy-text" aria-label="改写选中原文" readonly :value="previewPassage" />
         </div>
         <div class="preview-col">
           <div class="preview-col-title">改写</div>
-          <div class="preview-col-text">{{ previewNew }}</div>
+          <textarea class="preview-col-text rewrite-copy-text" aria-label="改写候选段落" readonly :value="previewNew" />
         </div>
       </div>
+      <template v-if="previewRefreshNeeded">
+        <p class="summary-hint">当前输入与候选未被保存。复制后可明确重新读取已保存章节，再选择段落生成改写。</p>
+        <label>原稿全文<textarea class="preview-col-text rewrite-copy-text" aria-label="改写原稿全文" readonly :value="previewContext?.source.content ?? ''" /></label>
+        <label>候选全文<textarea class="preview-col-text rewrite-copy-text" aria-label="改写候选全文" readonly :value="previewFullContent" /></label>
+      </template>
       <template #footer>
-        <div class="modal-actions">
-          <n-button :disabled="previewApplying" @click="discardPreview">放弃</n-button>
-          <n-button type="primary" :loading="previewApplying" :disabled="saving || hasIncompleteOutput || streaming || !previewFullContent.trim()" @click="applyPreview">应用</n-button>
+        <div class="modal-actions repair-actions">
+          <n-button :disabled="previewApplying || previewRefreshing" @click="discardPreview">放弃</n-button>
+          <n-button :disabled="!previewNew" @click="copyRewritePreview(previewNew)">复制候选段落</n-button>
+          <n-button v-if="previewRefreshNeeded" @click="copyRewritePreview(previewContext?.source.content ?? '')">复制原稿</n-button>
+          <n-button v-if="previewRefreshNeeded" @click="copyRewritePreview(previewFullContent)">复制候选全文</n-button>
+          <n-button v-if="previewRefreshNeeded" :loading="previewRefreshing" :disabled="previewApplying || saving || streaming" @click="refreshPreviewChapter">重新读取章节核对</n-button>
+          <n-button :disabled="previewApplying || previewRefreshing || previewRefreshNeeded || saving || streaming" @click="doRewrite">重新生成改写</n-button>
+          <n-button type="primary" :loading="previewApplying" :disabled="!previewGuarded || previewRefreshNeeded || previewRefreshing || saving || hasIncompleteOutput || streaming || !previewFullContent.trim()" @click="applyPreview">应用</n-button>
         </div>
       </template>
     </n-modal>
@@ -2844,6 +2963,15 @@ onBeforeUnmount(() => {
   padding: 8px;
   max-height: 360px;
   overflow: auto;
+}
+.rewrite-copy-text {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  height: 150px;
+  resize: vertical;
+  background: #fafafa;
+  font: inherit;
 }
 .repair-dialog-body {
   max-height: calc(100dvh - 230px);
