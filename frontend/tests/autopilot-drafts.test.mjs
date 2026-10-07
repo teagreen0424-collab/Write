@@ -11,6 +11,7 @@ const transpile = (source) => ts.transpileModule(source, {
 const dataUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 const writerUrl = dataUrl(transpile(await readFile(new URL('../src/autopilotDrafts.ts', import.meta.url), 'utf8')))
 const wordLimitsUrl = dataUrl(transpile(await readFile(new URL('../src/utils/wordLimits.ts', import.meta.url), 'utf8')))
+const injectionUrl = dataUrl(transpile(await readFile(new URL('../src/utils/autopilotInjection.ts', import.meta.url), 'utf8')))
 const { AutopilotDraftWriter } = await import(writerUrl)
 const componentSource = await readFile(new URL('../src/components/AutopilotPanel.vue', import.meta.url), 'utf8')
 const { descriptor } = parse(componentSource)
@@ -72,6 +73,7 @@ async function panel(overrides = {}) {
     .replace(/import \{ api, streamEvents \} from ['"]\.\.\/api['"]/g, 'const { api, streamEvents } = globalThis.__autoHarness')
     .replace(/from ['"]\.\.\/autopilotDrafts['"]/g, `from '${writerUrl}'`)
     .replace(/from ['"]\.\.\/utils\/wordLimits['"]/g, `from '${wordLimitsUrl}'`)
+    .replace(/from ['"]\.\.\/utils\/autopilotInjection['"]/g, `from '${injectionUrl}'`)
     .replace(/\bonMounted\(/g, 'globalThis.__autoHarness.onMounted(')
     .replace(/\bonBeforeUnmount\(/g, 'globalThis.__autoHarness.onBeforeUnmount(')
   const component = (await import(dataUrl(transpile(source) + `\n// ${instanceId}`))).default

@@ -474,6 +474,22 @@ export interface AutopilotEvent {
   [key: string]: any
 }
 
+export interface AutopilotInjectionReceipt extends AutopilotEvent {
+  type: 'control'
+  action: 'inject'
+  novel_id: string
+  task_id: string
+  request_id: string
+  directive: string
+  directive_hash: string
+  accepted: true
+  receipt_replayed: boolean
+  event_id: number
+  paused: boolean
+  pause_requested: boolean
+  message: string
+}
+
 export type AutopilotTaskStatus = 'starting' | 'running' | 'paused' | 'completed' | 'incomplete' | 'stopped' | 'interrupted'
 
 export interface AutopilotActiveDraft {

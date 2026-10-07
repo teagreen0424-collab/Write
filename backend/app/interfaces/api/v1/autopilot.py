@@ -85,7 +85,12 @@ def resume_task(novel_id: str, task_id: UUID):
 
 @router.post("/tasks/{task_id}/inject")
 def inject_task(novel_id: str, task_id: UUID, payload: schemas.AutopilotInjectRequest):
-    return autopilot_tasks.manager.inject(novel_id, str(task_id), payload.directive)
+    return autopilot_tasks.manager.inject(novel_id, str(task_id), payload.directive, payload.request_id)
+
+
+@router.get("/tasks/{task_id}/injections/{request_id}")
+def injection_receipt(novel_id: str, task_id: UUID, request_id: UUID):
+    return autopilot_tasks.manager.injection_receipt(novel_id, str(task_id), str(request_id))
 
 
 @router.post("/pause")

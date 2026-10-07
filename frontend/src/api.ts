@@ -2,6 +2,7 @@ import type {
   AutopilotDraft,
   AutopilotDraftInput,
   AutopilotEvent,
+  AutopilotInjectionReceipt,
   AutopilotTaskSnapshot,
   Chapter,
   ChapterMetadata,
@@ -428,11 +429,13 @@ export const api = {
     request<AutopilotEvent>(`${BASE}/novels/${novelId}/autopilot/tasks/${taskId}/pause`, { method: 'POST' }),
   resumeAutopilot: (novelId: string, taskId: string) =>
     request<AutopilotEvent>(`${BASE}/novels/${novelId}/autopilot/tasks/${taskId}/resume`, { method: 'POST' }),
-  injectAutopilot: (novelId: string, taskId: string, directive: string) =>
-    request<AutopilotEvent>(`${BASE}/novels/${novelId}/autopilot/tasks/${taskId}/inject`, {
+  injectAutopilot: (novelId: string, taskId: string, directive: string, requestId?: string) =>
+    request<AutopilotInjectionReceipt>(`${BASE}/novels/${novelId}/autopilot/tasks/${taskId}/inject`, {
       method: 'POST',
-      body: JSON.stringify({ directive }),
+      body: JSON.stringify({ directive, ...(requestId === undefined ? {} : { request_id: requestId }) }),
     }),
+  getAutopilotInjection: (novelId: string, taskId: string, requestId: string) =>
+    request<AutopilotInjectionReceipt>(`${BASE}/novels/${novelId}/autopilot/tasks/${taskId}/injections/${requestId}`),
 
   // 对话式构思
   ideaChat: (novelId: string, text: string) =>

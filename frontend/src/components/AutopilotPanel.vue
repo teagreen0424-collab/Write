@@ -1,15 +1,17 @@
 <script lang="ts">
 import { ref as sharedRef } from 'vue'
+import type { AutopilotInjectionIntent } from '../utils/autopilotInjection'
 
 interface DirectiveInput { text: string; revision: number }
 interface DirectiveSubmission {
   token: number; state: 'pending' | 'confirmed' | 'unknown'
-  novelId: string; taskId: string; text: string; revision: number; notice?: string
+  intent: AutopilotInjectionIntent; revision: number; notice?: string; canRetry?: boolean; retainedDraft?: boolean; trackingDraft?: boolean
 }
 // 离开页签只卸载监控；同一页面内保留作者构思与原任务的在途提交。
 const autopilotAuthor = {
   inputs: sharedRef(new Map<string, DirectiveInput>()),
   submissions: sharedRef(new Map<string, DirectiveSubmission>()),
+  notices: sharedRef(new Map<string, string>()),
   sequence: 0,
 }
 </script>
@@ -24,6 +26,7 @@ import { NButton, NInput, NInputNumber, NModal, NProgress, NTag, useMessage } fr
 import { api, streamEvents } from '../api'
 import { getAutopilotDraftWriter } from '../autopilotDrafts'
 import { wordLimitError, wordLimitLabel, wordLimits } from '../utils/wordLimits'
+import { hashAutopilotDirective, isAutopilotInjectionReceipt, listAutopilotInjections, removeAutopilotInjection, storeAutopilotInjection } from '../utils/autopilotInjection'
 import type { AutopilotDraftWriter, DraftSaveState } from '../autopilotDrafts'
 import type { AutopilotDraftInput, AutopilotEvent, AutopilotTaskSnapshot, AutopilotTaskStatus, WordLimits } from '../types'
 
@@ -58,14 +61,29 @@ const directive = computed({
     if (!props.novelId) return
     const previous = autopilotAuthor.inputs.value.get(props.novelId)
     autopilotAuthor.inputs.value.set(props.novelId, { text, revision: (previous?.revision ?? 0) + 1 })
+    for (const submission of autopilotAuthor.submissions.value.values()) {
+      if (submission.intent.novelId !== props.novelId || submission.intent.taskId !== currentTaskId.value
+        || submission.state === 'confirmed' || !submission.trackingDraft) continue
+      submission.intent.currentDraft = text
+      submission.intent.currentDraftEdited = true
+      if (submission.intent.hash) persistInjection(submission.intent)
+    }
   },
 })
-const submissionKey = (novelId: string, taskId: string) => JSON.stringify([novelId, taskId])
-const directiveSubmission = computed(() => autopilotAuthor.submissions.value.get(submissionKey(props.novelId, currentTaskId.value)))
-const injecting = computed(() => directiveSubmission.value?.state === 'pending')
-const injectionUnknown = computed(() => directiveSubmission.value?.state === 'unknown')
+const submissionKey = (intent: AutopilotInjectionIntent) => JSON.stringify([intent.novelId, intent.taskId, intent.requestId])
+const taskSubmissions = computed(() => [...autopilotAuthor.submissions.value.values()].filter(submission =>
+  submission.intent.novelId === props.novelId && submission.intent.taskId === currentTaskId.value))
+const directiveSubmission = computed(() => taskSubmissions.value.find(row => row.state === 'pending')
+  ?? taskSubmissions.value.find(row => row.state === 'unknown') ?? taskSubmissions.value[taskSubmissions.value.length - 1])
+const injecting = computed(() => taskSubmissions.value.some(row => row.state === 'pending'))
+const injectionUnknown = computed(() => taskSubmissions.value.some(row => row.state === 'unknown'))
 const pendingDirective = computed(() => [...autopilotAuthor.submissions.value.values()]
-  .some((submission) => submission.novelId === props.novelId && submission.state === 'pending'))
+  .some((submission) => submission.intent.novelId === props.novelId && submission.state === 'pending'))
+const injectionRecoveries = computed(() => [...autopilotAuthor.submissions.value.values()].filter(submission =>
+  submission.intent.novelId === props.novelId && (submission.state !== 'confirmed' || submission.retainedDraft)))
+const injectionStorageNotice = computed(() => autopilotAuthor.notices.value.get(props.novelId) ?? '')
+const restoreInjectionCandidate = ref<{ requestId: string; novelId: string; revision: number; scope: number; taskScope: number; draft: string } | null>(null)
+const showRestoreInjection = computed(() => !!restoreInjectionCandidate.value)
 const minWords = ref<number | null>(null)
 const maxWords = ref<number | null>(null)
 const taskWordLimits = ref<WordLimits | null>(null)
@@ -904,52 +922,132 @@ async function resume() {
   }
 }
 
-async function inject() {
-  if (!props.novelId || !serverRunning.value || !currentTaskId.value || injecting.value || injectionUnknown.value) return
-  if (!directive.value.trim()) {
-    message.error('请输入构思')
+function persistInjection(intent: AutopilotInjectionIntent) {
+  if (!storeAutopilotInjection(intent)) autopilotAuthor.notices.value.set(intent.novelId,
+    '浏览器未能保存最新待核对构思；刷新后可能只能找回早前稿或无法找回。请复制当前构思和本次提交原文。')
+}
+
+function loadInjectionRecoveries() {
+  if (!props.novelId) return
+  const result = listAutopilotInjections(props.novelId)
+  for (const intent of result.records) {
+    const key = submissionKey(intent)
+    if (!autopilotAuthor.submissions.value.has(key)) autopilotAuthor.submissions.value.set(key, {
+      intent, token: ++autopilotAuthor.sequence, state: 'unknown', revision: -1,
+      notice: '找到原任务的待核对记录；恢复和核对都需要明确点击。',
+    })
+  }
+  if (result.unavailable || result.invalid) autopilotAuthor.notices.value.set(props.novelId,
+    result.unavailable ? '浏览器待核对缓存不可读取，请复制构思保留；本页面不会自动重发。'
+      : `发现 ${result.invalid} 条损坏的待核对缓存，未恢复或删除。请保留可用原文并核对实际章节。`)
+}
+
+function restoreInjection(submission: DirectiveSubmission) {
+  if (submission.intent.novelId !== props.novelId || (submission.state === 'confirmed' && !submission.retainedDraft)) return
+  if (directive.value.length && directive.value !== submission.intent.currentDraft) {
+    restoreInjectionCandidate.value = { requestId: submission.intent.requestId, novelId: props.novelId,
+      revision: autopilotAuthor.inputs.value.get(props.novelId)?.revision ?? 0, scope: runId, taskScope: directiveScopeRevision,
+      draft: submission.intent.currentDraft }
     return
   }
-  const currentRunId = runId
-  const novelId = props.novelId
-  const taskId = currentTaskId.value
-  const submittedDirective = directive.value
-  const revision = autopilotAuthor.inputs.value.get(novelId)?.revision ?? 0
-  const key = submissionKey(novelId, taskId), token = ++autopilotAuthor.sequence, cursor = eventCursor
-  const scopeRevision = directiveScopeRevision
-  const submission: DirectiveSubmission = { novelId, taskId, token, state: 'pending', text: submittedDirective, revision }
-  autopilotAuthor.submissions.value.set(key, submission)
-  const ownSubmission = () => autopilotAuthor.submissions.value.get(key)?.token === token
-  const current = () => ownSubmission() && isCurrentRun(currentRunId, novelId)
-    && currentTaskId.value === taskId && directiveScopeRevision === scopeRevision
+  directive.value = submission.intent.currentDraft
+  submission.trackingDraft = true
+  finishInjectionRestore(submission)
+}
+
+function finishInjectionRestore(submission: DirectiveSubmission) {
+  if (submission.state !== 'confirmed') return
+  submission.retainedDraft = false
+  if (!removeAutopilotInjection(submission.intent.novelId, submission.intent.requestId)) autopilotAuthor.notices.value.set(submission.intent.novelId,
+    '稿件已恢复，但浏览器未能清理旧缓存；请复制当前构思，后续核对不会重新注入。')
+}
+
+function confirmRestoreInjection() {
+  const candidate = restoreInjectionCandidate.value
+  if (!candidate) return
+  if (!isCurrentRun(candidate.scope, candidate.novelId)
+    || candidate.taskScope !== directiveScopeRevision
+    || (autopilotAuthor.inputs.value.get(candidate.novelId)?.revision ?? 0) !== candidate.revision) {
+    restoreInjectionCandidate.value = null
+    message.warning('当前构思已变化，请保留新输入后重新选择恢复。')
+    return
+  }
+  const submission = injectionRecoveries.value.find(row => row.intent.requestId === candidate.requestId)
+  restoreInjectionCandidate.value = null
+  if (submission) { directive.value = candidate.draft; submission.trackingDraft = true; finishInjectionRestore(submission) }
+}
+
+async function performInjection(submission: DirectiveSubmission, mode: 'inject' | 'check' | 'retry') {
+  const { intent } = submission
+  const key = submissionKey(intent), token = ++autopilotAuthor.sequence
+  const currentRunId = runId, taskAtClick = currentTaskId.value, scopeRevision = directiveScopeRevision
+  const active = { ...submission, token, state: 'pending' as const, canRetry: false }
+  autopilotAuthor.submissions.value.set(key, active)
+  const own = () => autopilotAuthor.submissions.value.get(key)?.token === token
+  const current = () => own() && isCurrentRun(currentRunId, intent.novelId)
+    && currentTaskId.value === taskAtClick && directiveScopeRevision === scopeRevision
+  let sent = false
   try {
-    const result = await api.injectAutopilot(novelId, taskId, submittedDirective)
-    if (!ownSubmission()) return
-    if (!result || result.type !== 'control' || result.action !== 'inject' || result.task_id !== taskId
-      || (result.novel_id != null && result.novel_id !== novelId)
-      || !Number.isSafeInteger(result.event_id) || (result.event_id ?? 0) <= cursor
-      || typeof result.paused !== 'boolean' || typeof result.pause_requested !== 'boolean'
-      || typeof result.message !== 'string' || !result.message.trim()) {
-      autopilotAuthor.submissions.value.set(key, { ...submission, state: 'unknown', notice: '未收到与原任务一致的完整确认。' })
-      if (current()) message.warning('构思注入结果尚未确认，可能已经被后台接收；请保留原文并核对章节，本任务不会重复提交。')
-      return
-    }
-    autopilotAuthor.submissions.value.set(key, { ...submission, state: 'confirmed' })
-    if (!current() || !serverRunning.value) return
-    message.success('已注入构思')
-    if (autopilotAuthor.inputs.value.get(novelId)?.revision === revision && directive.value === submittedDirective) directive.value = ''
+    const hash = await hashAutopilotDirective(intent.text)
+    if (!own()) return
+    if (intent.hash && intent.hash !== hash) throw new Error('缓存原文与校验信息不一致，请复制保留并人工核对；未发送请求')
+    intent.hash = hash
+    persistInjection(intent)
+    sent = true
+    const result = mode === 'check'
+      ? await api.getAutopilotInjection(intent.novelId, intent.taskId, intent.requestId)
+      : await api.injectAutopilot(intent.novelId, intent.taskId, intent.text, intent.requestId)
+    if (!own()) return
+    if (!isAutopilotInjectionReceipt(result, intent) || (mode === 'check' && !result.receipt_replayed)) throw new Error('未收到与原请求原文一致的完整确认')
+    const retainedDraft = intent.currentDraft.length > 0 && (intent.currentDraftEdited || !current() || mode !== 'inject')
+    autopilotAuthor.submissions.value.set(key, { ...active, state: 'confirmed', retainedDraft,
+      notice: retainedDraft ? '原构思已记录；待恢复稿仍保留，请明确恢复或复制。' : undefined })
+    if (!retainedDraft && !removeAutopilotInjection(intent.novelId, intent.requestId)) autopilotAuthor.notices.value.set(intent.novelId,
+      '构思已记录，但浏览器未能清理待核对缓存；再次核对只读取原记录，请勿当作尚未提交。')
+    if (!current() || (mode === 'inject' && !serverRunning.value)) return
+    message.success('构思已记录，请核对实际章节执行结果')
+    if (mode === 'inject' && serverRunning.value && currentTaskId.value === intent.taskId && !intent.currentDraftEdited
+      && autopilotAuthor.inputs.value.get(intent.novelId)?.revision === submission.revision && directive.value === intent.text) directive.value = ''
   } catch (e) {
-    if (!ownSubmission()) return
-    const error = e as Error & { status?: number }
-    const rejected = typeof error.status === 'number' && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429
+    if (!own()) return
+    const error = e as Error & { status?: number; code?: string }
+    const rejected = mode === 'inject' && sent && typeof error.status === 'number'
+      && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429
+      && error.code !== 'autopilot_injection_request_conflict'
     if (rejected) {
-      if (current()) message.error(error.message)
-      if (ownSubmission()) autopilotAuthor.submissions.value.delete(key)
+      autopilotAuthor.submissions.value.delete(key)
+      if (!removeAutopilotInjection(intent.novelId, intent.requestId)) autopilotAuthor.notices.value.set(intent.novelId,
+        '本次注入已被拒绝，但浏览器缓存未清理；请复制保留并核对原记录。')
+      if (isCurrentRun(currentRunId, intent.novelId) && currentTaskId.value === taskAtClick && directiveScopeRevision === scopeRevision) message.error(error.message)
     } else {
-      autopilotAuthor.submissions.value.set(key, { ...submission, state: 'unknown', notice: error.message })
-      if (current()) message.warning(`构思注入结果尚未确认：${error.message}。可能已被后台接收，请保留原文并核对章节，本任务不会重复提交。`)
+      autopilotAuthor.submissions.value.set(key, { ...active, state: 'unknown', notice: error.message,
+        canRetry: mode === 'check' && error.status === 404 && error.code === 'autopilot_injection_not_found' })
+      if (current()) message.warning(`构思记录尚未确认：${error.message}。请核对原注入，不会自动重发。`)
     }
   }
+}
+
+async function inject() {
+  if (!props.novelId || !serverRunning.value || !currentTaskId.value || injecting.value || injectionUnknown.value) return
+  if (!directive.value.trim()) { message.error('请输入构思'); return }
+  const text = directive.value
+  let requestId: string
+  try { requestId = crypto.randomUUID() } catch { message.error('无法生成本次请求身份，请复制构思保留'); return }
+  await performInjection({ token: 0, state: 'pending', trackingDraft: true, revision: autopilotAuthor.inputs.value.get(props.novelId)?.revision ?? 0,
+    intent: { version: 1, novelId: props.novelId, taskId: currentTaskId.value, requestId, text, hash: '',
+      currentDraft: text, currentDraftEdited: false, createdAt: Date.now() } }, 'inject')
+}
+
+async function checkInjection(submission: DirectiveSubmission) {
+  if (submission.intent.novelId !== props.novelId || submission.state !== 'unknown'
+    || autopilotAuthor.submissions.value.get(submissionKey(submission.intent))?.token !== submission.token) return
+  await performInjection(submission, 'check')
+}
+
+async function retryInjection(submission: DirectiveSubmission) {
+  if (!submission.canRetry || submission.state !== 'unknown' || submission.intent.novelId !== props.novelId
+    || autopilotAuthor.submissions.value.get(submissionKey(submission.intent))?.token !== submission.token) return
+  await performInjection(submission, 'retry')
 }
 
 async function copyDirectiveText(text: string) {
@@ -964,6 +1062,7 @@ async function copyDirectiveText(text: string) {
 
 onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
+  loadInjectionRecoveries()
   if (chartRef.value) chart = echarts.init(chartRef.value)
   bindDraftWriter(props.novelId)
   loadCurve()
@@ -985,6 +1084,8 @@ onBeforeUnmount(() => {
 watch(
   () => props.novelId,
   () => {
+    restoreInjectionCandidate.value = null
+    loadInjectionRecoveries()
     preserveLocalActiveDrafts('切换作品时未收到章节保存确认')
     void draftWriter?.flush()
     disconnect()
@@ -1057,13 +1158,32 @@ watch(authorDirty, (dirty) => emit('dirty-change', dirty), { immediate: true, fl
       <n-button v-if="directive.length" size="small" @click="copyDirectiveText(directive)">复制当前构思</n-button>
     </div>
     <p v-if="directive.length || pendingDirective" class="output-hint">未提交构思在当前页面内按作品保留，切换页签后可以找回；完整刷新或关闭页面前请复制保留，不会自动注入后台。</p>
-    <p v-if="directiveSubmission?.state === 'confirmed' && directive.length" class="output-hint">上一次构思已接收，当前输入已保留；只有再次点击“注入”才会提交。</p>
+    <p v-if="directiveSubmission?.state === 'confirmed' && directive.length" class="output-hint">上一次构思已记录，当前输入已保留；只有再次点击“注入”才会提交。记录不代表已经应用到章节，请核对实际执行结果。</p>
+    <p v-if="injectionStorageNotice" class="output-hint" role="alert">{{ injectionStorageNotice }}</p>
     <section v-if="injectionUnknown && directiveSubmission" class="quality-warnings" aria-label="构思注入结果待核对">
       <div class="draft-heading">本次构思注入结果尚未确认</div>
-      <p class="output-hint">{{ directiveSubmission.notice }} 指令可能已经被后台接收。公开任务状态不能核对具体构思，请先核对章节；本任务不重复注入，暂停、恢复和后台运行仍可继续。任务结束后可在新任务中明确注入。</p>
-      <textarea :value="directiveSubmission.text" readonly class="draft-text" aria-label="本次提交的构思原文"></textarea>
-      <n-button size="small" @click="copyDirectiveText(directiveSubmission.text)">复制本次构思</n-button>
+      <p class="output-hint">{{ directiveSubmission.notice }} 请在下方核对原注入。公开任务状态不能替代原请求确认；暂停、恢复和后台运行仍可继续。</p>
+      <textarea :value="directiveSubmission.intent.text" readonly class="draft-text" aria-label="本次提交的构思原文"></textarea>
+      <n-button size="small" @click="copyDirectiveText(directiveSubmission.intent.text)">复制本次构思</n-button>
     </section>
+    <section v-if="injectionRecoveries.length" class="quality-warnings" aria-label="待核对构思记录">
+      <div class="draft-heading">待核对构思</div>
+      <p class="output-hint">当前浏览器、同一访问地址保存原提交和等待期间稿件。不会自动恢复输入或发送；清理浏览器数据或缓存失败时，请复制保留。核对只确认已记录，不代表已应用或已写入章节。</p>
+      <article v-for="submission in injectionRecoveries" :key="submission.intent.requestId">
+        <p class="output-hint">{{ submission.intent.taskId === currentTaskId ? '当前任务的原提交' : '此前任务的原提交（不会改绑当前任务）' }}：{{ submission.notice }}</p>
+        <textarea :value="submission.intent.currentDraft" readonly class="draft-text" aria-label="待恢复构思稿"></textarea>
+        <textarea :value="submission.intent.text" readonly class="draft-text" aria-label="待核对原构思"></textarea>
+        <n-button size="small" @click="restoreInjection(submission)">恢复待核对构思</n-button>
+        <n-button v-if="submission.state !== 'confirmed'" size="small" :loading="submission.state === 'pending'" :disabled="submission.state === 'pending'" @click="checkInjection(submission)">核对原注入</n-button>
+        <n-button v-if="submission.canRetry" size="small" :disabled="submission.state === 'pending'" @click="retryInjection(submission)">原请求重试</n-button>
+        <n-button size="small" @click="copyDirectiveText(submission.intent.text)">复制原提交</n-button>
+      </article>
+    </section>
+    <n-modal :show="showRestoreInjection" preset="card" title="恢复待核对构思" style="width: 520px" @update:show="restoreInjectionCandidate = null">
+      <p>恢复会替换当前构思输入。请先复制需要保留的新稿；不会自动发送原构思。</p>
+      <n-button @click="restoreInjectionCandidate = null">取消</n-button>
+      <n-button type="primary" @click="confirmRestoreInjection">确认恢复</n-button>
+    </n-modal>
 
     <p class="output-hint">每章保存后会逐项核对构思、前章承接和设定，并核对已设置的字数目标；发现问题、字数越界或检查未完成时暂停后续生成，正文保留。</p>
 

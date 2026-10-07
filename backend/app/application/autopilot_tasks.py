@@ -268,8 +268,36 @@ class AutopilotTaskManager:
     def resume(self, novel_id, task_id):
         return self._control(novel_id, task_id, "resume")
 
-    def inject(self, novel_id, task_id, directive):
-        return self._control(novel_id, task_id, "inject", directive)
+    def inject(self, novel_id, task_id, directive, request_id=None):
+        if request_id is None:
+            return self._control(novel_id, task_id, "inject", directive)
+        task_id = task_uuid(task_id)
+        with self._condition, draft_write_lock:
+            # 历史回执优先关闭/终态/registry判断；重放永远不再次安装构思。
+            previous = self._read("find_injection", novel_id, task_id, request_id, directive)
+            if previous is not None:
+                return previous
+            if self._closing:
+                raise TaskStorageError(503, "后台服务正在关闭", "task_service_stopping", task_id)
+            snapshot = self.get(novel_id, task_id)
+            state = self.registry.get(novel_id)
+            if snapshot["status"] not in ACTIVE_STATUSES or state is None or state.owner_id != task_id:
+                raise TaskStorageError(409, "该任务已经结束或不再拥有当前执行", "task_not_active", task_id)
+            public, created = self._read("accept_injection", novel_id, task_id, request_id, directive, {
+                "paused": snapshot["paused"], "pause_requested": snapshot["pause_requested"],
+            })
+            if created:
+                # durable accepted仅证明已记录。落库后内存派发失败不能否认原回执；
+                # 崩溃/结束后的历史查重也绝不重新派发。实际结果由作者核对章节。
+                try:
+                    self.registry.inject(novel_id, directive, owner_id=task_id)
+                except Exception:
+                    pass
+                self._condition.notify_all()
+            return public
+
+    def injection_receipt(self, novel_id, task_id, request_id):
+        return self._read("injection_receipt", novel_id, task_id, request_id)
 
     def recover_interrupted(self):
         with self._condition, draft_write_lock:

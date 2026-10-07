@@ -1,8 +1,10 @@
 """后台任务与公开事件仓储；快照和游标在同一 SQLite 事务提交。"""
 from copy import deepcopy
+import hashlib
 import json
 from uuid import UUID
 
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.application.word_count import normalize_word_limits
@@ -30,6 +32,18 @@ def task_uuid(value) -> str:
         return str(UUID(str(value)))
     except (ValueError, TypeError, AttributeError):
         raise TaskStorageError(422, "任务 ID 必须是 UUID", "task_invalid") from None
+
+
+def injection_identity(request_id, directive):
+    """原文就是实际执行载荷，不按去空白或相同文字合并作者操作。"""
+    try:
+        request_id = str(UUID(str(request_id)))
+        if not isinstance(directive, str) or not directive.strip():
+            raise ValueError
+        digest = hashlib.sha256(directive.encode("utf-8")).hexdigest()
+    except (ValueError, TypeError, AttributeError, UnicodeError):
+        raise TaskStorageError(422, "构思请求身份或原文不合法", "autopilot_injection_invalid") from None
+    return request_id, digest
 
 
 def initial_snapshot(novel_id: str, task_id: str, word_limits=None):
@@ -184,6 +198,23 @@ class AutopilotTaskRepo:
                 self.db.rollback()
                 raise
 
+    def _append_to_task(self, task, novel_id, event):
+        if task.status in TERMINAL_STATUSES:
+            raise TaskStorageError(409, "任务已经结束", "task_finished", task.id)
+        public = {**deepcopy(event), "task_id": task.id, "event_id": task.last_event_id + 1}
+        json.dumps(public, ensure_ascii=False, allow_nan=False)
+        snapshot = project_event(task.snapshot_json, public)
+        task.status = snapshot["status"]
+        task.last_event_id = public["event_id"]
+        task.snapshot_json = snapshot
+        if task.status in TERMINAL_STATUSES:
+            task.finished_at = models._now()
+        self.db.add(models.AutopilotTaskEvent(
+            task_id=task.id, novel_id=novel_id,
+            event_id=public["event_id"], data_json=public,
+        ))
+        return public
+
     def append(self, novel_id, task_id, event):
         if (not isinstance(event, dict) or not isinstance(event.get("type"), str)
                 or event["type"] not in EVENT_TYPES):
@@ -191,23 +222,74 @@ class AutopilotTaskRepo:
         with draft_write_lock:
             try:
                 task = self._task(novel_id, task_id)
-                if task.status in TERMINAL_STATUSES:
-                    raise TaskStorageError(409, "任务已经结束", "task_finished", task.id)
-                public = {**deepcopy(event), "task_id": task.id, "event_id": task.last_event_id + 1}
-                # 不允许 JSON 中的 NaN 等非法数值传给浏览器。
-                json.dumps(public, ensure_ascii=False, allow_nan=False)
-                snapshot = project_event(task.snapshot_json, public)
-                task.status = snapshot["status"]
-                task.last_event_id = public["event_id"]
-                task.snapshot_json = snapshot
-                if task.status in TERMINAL_STATUSES:
-                    task.finished_at = models._now()
-                self.db.add(models.AutopilotTaskEvent(
-                    task_id=task.id, novel_id=novel_id,
-                    event_id=public["event_id"], data_json=public,
-                ))
+                public = self._append_to_task(task, novel_id, event)
                 self.db.commit()
                 return deepcopy(public)
+            except Exception:
+                self.db.rollback()
+                raise
+
+    def _injection_event(self, request_id):
+        table = models.AutopilotTaskEvent.__table__
+        return self.db.execute(select(table.c.novel_id, table.c.task_id, table.c.data_json).where(
+            table.c.data_json["type"].as_string() == "control",
+            table.c.data_json["action"].as_string() == "inject",
+            table.c.data_json["request_id"].as_string() == request_id,
+        )).mappings().first()
+
+    @staticmethod
+    def _injection_replay(row, novel_id, task_id, directive, digest):
+        public = row["data_json"]
+        if (row["novel_id"] != novel_id or row["task_id"] != task_id
+                or public.get("directive_hash") != digest or public.get("directive") != directive):
+            raise TaskStorageError(409, "该构思请求已用于不同任务或内容，请核对原请求",
+                                   "autopilot_injection_request_conflict", task_id)
+        return {**deepcopy(public), "receipt_replayed": True}
+
+    def find_injection(self, novel_id, task_id, request_id, directive):
+        request_id, digest = injection_identity(request_id, directive)
+        task_id = self._task(novel_id, task_id).id  # 先验证作品和任务，不能泄露另一作品原文。
+        row = self._injection_event(request_id)
+        return self._injection_replay(row, novel_id, task_id, directive, digest) if row else None
+
+    def injection_receipt(self, novel_id, task_id, request_id):
+        task_id = self._task(novel_id, task_id).id
+        request_id = task_uuid(request_id)
+        row = self._injection_event(request_id)
+        if row is None or row["novel_id"] != novel_id or row["task_id"] != task_id:
+            raise TaskStorageError(404, "该任务尚无此构思请求记录", "autopilot_injection_not_found", task_id)
+        return {**deepcopy(row["data_json"]), "receipt_replayed": True}
+
+    def accept_injection(self, novel_id, task_id, request_id, directive, event):
+        """任务专用会话内短写事务查重和记账；不触碰章节或内存执行状态。"""
+        request_id, digest = injection_identity(request_id, directive)
+        # 拒绝调用方DML在try外，不能rollback已flush/Core事务或其未保存作者稿。
+        if self.db.new or self.db.dirty or self.db.deleted:
+            raise RuntimeError("构思回执写入必须使用无待提交修改的任务专用会话")
+        if self.db.in_transaction() and self.db.get_bind().dialect.name == "sqlite":
+            if self.db.connection().connection.driver_connection.in_transaction:
+                raise RuntimeError("构思回执写入不能提交调用方已有写事务")
+        with draft_write_lock:
+            try:
+                self.db.rollback()  # 只释放只读autobegin；调用方DML已经在上方拒绝。
+                if self.db.get_bind().dialect.name == "sqlite":
+                    self.db.execute(text("BEGIN IMMEDIATE"))
+                task = self._task(novel_id, task_id)
+                previous = self._injection_event(request_id)
+                if previous is not None:
+                    result = self._injection_replay(previous, novel_id, task.id, directive, digest)
+                    self.db.rollback()  # 并发原请求已提交，本次未写入，只释放写锁。
+                    return result, False
+                public = self._append_to_task(task, novel_id, {
+                    **event, "novel_id": novel_id, "type": "control", "action": "inject",
+                    "request_id": request_id, "directive": directive, "directive_hash": digest,
+                    "accepted": True, "receipt_replayed": False,
+                    "message": "构思已记录，请核对实际章节执行结果",
+                })
+                # public在commit前冻结，提交成功后无refresh或其它SQL读取。
+                result = deepcopy(public)
+                self.db.commit()
+                return result, True
             except Exception:
                 self.db.rollback()
                 raise

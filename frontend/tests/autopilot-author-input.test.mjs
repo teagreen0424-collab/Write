@@ -4,14 +4,16 @@ import test from 'node:test'
 import { compileScript, compileTemplate, parse } from '@vue/compiler-sfc'
 import { effectScope, nextTick, proxyRefs, reactive } from 'vue'
 import ts from 'typescript'
+import { createHash } from 'node:crypto'
 
 const compile = source => ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
 const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 const dependencies = Object.fromEntries(await Promise.all([
   ['../autopilotDrafts', '../src/autopilotDrafts.ts'], ['../utils/wordLimits', '../src/utils/wordLimits.ts'],
   ['../types', '../src/types.ts'], ['../utils/asyncScope', '../src/utils/asyncScope.ts'],
+  ['../utils/autopilotInjection', '../src/utils/autopilotInjection.ts'],
 ].map(async ([name, path]) => [name, moduleUrl(compile(await readFile(new URL(path, import.meta.url), 'utf8')))])))
-const flush = async () => { for (let index = 0; index < 20; index++) { await Promise.resolve(); await nextTick() } }
+const flush = async () => { for (let index = 0; index < 20; index++) { await new Promise(resolve => setImmediate(resolve)); await nextTick() } }
 const deferred = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail }); return { promise, resolve, reject } }
 const snapshot = (novelId, patch = {}) => ({ type: 'snapshot', novel_id: novelId, task_id: `${novelId}-task`, event_id: 1,
   status: 'running', running: true, paused: false, pause_requested: false, generated: 0, skipped: 0, failed: 0, done: 0, total: 3,
@@ -19,14 +21,25 @@ const snapshot = (novelId, patch = {}) => ({ type: 'snapshot', novel_id: novelId
   quality_warnings: [], drift_warnings: [], word_limits: null, ...patch })
 const control = (taskId = 'novel-a-task', patch = {}) => ({ type: 'control', action: 'inject', task_id: taskId,
   event_id: 2, paused: false, pause_requested: false, message: '已接收章前指令，将在下一章应用', ...patch })
+const receipt = (novelId, taskId, text, requestId, patch = {}) => control(taskId, {
+  novel_id: novelId, request_id: requestId, directive: text, directive_hash: createHash('sha256').update(text).digest('hex'),
+  accepted: true, receipt_replayed: false, ...patch,
+})
+function storage() {
+  const rows = new Map()
+  return { rows, get length() { return rows.size }, key: index => [...rows.keys()][index] ?? null,
+    getItem: key => rows.get(key) ?? null, setItem: (key, value) => rows.set(key, value), removeItem: key => rows.delete(key) }
+}
 let sequence = 0
 async function panel(options = {}) {
+  globalThis.localStorage = options.storage ?? storage()
   const requests = [], connections = [], copied = [], timer = { setTimeout: () => 1, clearTimeout() {} }
   let activeHooks, activeMessages
   const api = {
     autopilotStatus: async id => snapshot(id), listAutopilotDrafts: async () => [],
     getQualityCurve: async () => ({ chapters: [], drift_threshold: 0.6, anchor_set: false }),
-    injectAutopilot: async (_id, taskId) => control(taskId),
+    injectAutopilot: async (...args) => receipt(...args),
+    getAutopilotInjection: async () => { throw Object.assign(new Error('尚未查到原记录'), { status: 404, code: 'autopilot_injection_not_found' }) },
     pauseAutopilot: async (_id, taskId) => control(taskId, { action: 'pause', pause_requested: true }),
     resumeAutopilot: async (_id, taskId) => control(taskId, { action: 'resume' }),
     ...options.api,
@@ -89,14 +102,15 @@ function textOf(node) {
 
 test('同task注入在途禁双击和新构思提交，真实模板busy，200保留作者新输入供下一次明确提交', async (t) => {
   const response = deferred(); let calls = 0
-  const context = await panel({ api: { injectAutopilot: async () => ++calls === 1 ? response.promise : control('novel-a-task', { event_id: 3 }) } })
+  const context = await panel({ api: { injectAutopilot: async (...args) => ++calls === 1 ? response.promise : receipt(...args, { event_id: 3 }) } })
   t.after(() => { response.resolve(control()); context.dispose() })
   context.vm.directive.value = '首次构思'; const first = context.vm.inject()
   context.vm.directive.value = '等待期间的新构思'; const duplicate = context.vm.inject()
+  await flush()
   assert.equal(injectionRequests(context).length, 1)
   const button = nodes(context.render(), node => node.type === 'nbutton' && textOf(node) === '注入')[0]
   assert.equal(button.props.disabled, true); assert.equal(button.props.loading, true)
-  response.resolve(control()); await Promise.all([first, duplicate])
+  response.resolve(receipt(...injectionRequests(context)[0].args)); await Promise.all([first, duplicate])
   assert.equal(context.vm.directive.value, '等待期间的新构思')
   await context.vm.inject(); assert.equal(injectionRequests(context).length, 2)
   assert.equal(injectionRequests(context)[1].args[2], '等待期间的新构思'); assert.equal(context.vm.directive.value, '')
@@ -120,22 +134,22 @@ test('注入等待期间构思A改B又改回A，author revision仍保留新输�
   const response = deferred(), context = await panel({ api: { injectAutopilot: async () => response.promise } })
   context.vm.directive.value = '作者构思A'; const saving = context.vm.inject()
   context.vm.directive.value = '作者构思B'; context.vm.directive.value = '作者构思A'
-  response.resolve(control()); await saving
+  await flush(); response.resolve(receipt(...injectionRequests(context)[0].args)); await saving
   assert.equal(context.vm.directive.value, '作者构思A'); assert.equal(context.vm.authorDirty.value, true)
   assert.equal(context.vm.injecting.value, false); assert.equal(context.vm.directiveSubmission.value.state, 'confirmed')
-  assert.match(textOf(context.render()), /上一次构思已接收，当前输入已保留/); context.dispose()
+  assert.match(textOf(context.render()), /上一次构思已记录，当前输入已保留/); context.dispose()
 })
 
 test('同编译module卸载重挂共享pending锁，旧200只记录确认不清新setup的作者稿或toast', async () => {
   const response = deferred(); let calls = 0
-  const old = await panel({ api: { injectAutopilot: async () => ++calls === 1 ? response.promise : control('novel-a-task', { event_id: 3 }) } })
+  const old = await panel({ api: { injectAutopilot: async (...args) => ++calls === 1 ? response.promise : receipt(...args, { event_id: 3 }) } })
   old.vm.directive.value = '原次提交'; const saving = old.vm.inject(); old.dispose()
   const fresh = await old.mountAgain()
   assert.equal(fresh.vm.injecting.value, true); assert.equal(fresh.vm.directive.value, '原次提交')
   fresh.vm.directive.value = '重挂后的新构思'; await fresh.vm.inject(); assert.equal(injectionRequests(fresh).length, 1)
   const button = nodes(fresh.render(), node => node.type === 'nbutton' && textOf(node) === '注入')[0]
   assert.equal(button.props.disabled, true)
-  response.resolve(control()); await saving
+  response.resolve(receipt(...injectionRequests(old)[0].args)); await saving
   assert.equal(fresh.vm.injecting.value, false); assert.equal(fresh.vm.directive.value, '重挂后的新构思')
   assert.equal(old.messages.length, 0); assert.equal(fresh.messages.length, 0)
   await fresh.vm.inject(); assert.equal(injectionRequests(fresh).length, 2); assert.equal(fresh.vm.directive.value, '')
@@ -144,13 +158,13 @@ test('同编译module卸载重挂共享pending锁，旧200只记录确认不清�
 
 test('novel ABA保留原task锁与各自构思，B可独立注入，旧A200不清返回A的新输入', async () => {
   const response = deferred()
-  const context = await panel({ api: { injectAutopilot: async (id, taskId) => id === 'novel-a' ? response.promise : control(taskId) } })
+  const context = await panel({ api: { injectAutopilot: async (...args) => args[0] === 'novel-a' ? response.promise : receipt(...args) } })
   context.vm.directive.value = 'A原构思'; const saving = context.vm.inject()
   context.props.novelId = 'novel-b'; await flush(); context.vm.directive.value = 'B构思'; await context.vm.inject()
   assert.equal(context.vm.directive.value, ''); context.messages.length = 0
   context.props.novelId = 'novel-a'; await flush(); context.vm.directive.value = '返回A的新构思'
   await context.vm.inject(); assert.equal(injectionRequests(context).length, 2)
-  response.resolve(control()); await saving
+  response.resolve(receipt(...injectionRequests(context)[0].args)); await saving
   assert.equal(context.vm.directive.value, '返回A的新构思'); assert.equal(context.messages.length, 0)
   assert.equal(context.vm.injecting.value, false); context.dispose()
 })
@@ -161,16 +175,17 @@ test('新task允许独立提交且旧task晚200不清新锁输入，task身份AB
   context.vm.directive.value = '旧task构思'; const oldSaving = context.vm.inject()
   context.vm.applySnapshot(snapshot('novel-a', { task_id: 'new-task', event_id: 1 }))
   context.vm.directive.value = '新task构思'; const newSaving = context.vm.inject()
+  await flush()
   assert.equal(injectionRequests(context).length, 2); assert.equal(context.vm.injecting.value, true)
-  oldResponse.resolve(control()); await oldSaving
+  oldResponse.resolve(receipt(...injectionRequests(context)[0].args)); await oldSaving
   assert.equal(context.vm.injecting.value, true); assert.equal(context.vm.directive.value, '新task构思'); assert.equal(context.messages.length, 0)
-  newResponse.resolve(control('new-task')); await newSaving
+  newResponse.resolve(receipt(...injectionRequests(context)[1].args)); await newSaving
   assert.equal(context.vm.directive.value, ''); context.dispose()
   const response = deferred(), aba = await panel({ api: { injectAutopilot: async () => response.promise } })
   aba.vm.directive.value = '作者保留的构思'; const saving = aba.vm.inject()
   aba.vm.applySnapshot(snapshot('novel-a', { task_id: 'intermediate-task', event_id: 1 }))
   aba.vm.applySnapshot(snapshot('novel-a', { event_id: 1 }))
-  response.resolve(control()); await saving
+  await flush(); response.resolve(receipt(...injectionRequests(aba)[0].args)); await saving
   assert.equal(aba.vm.directive.value, '作者保留的构思'); assert.equal(aba.messages.length, 0); aba.dispose()
 })
 
@@ -178,25 +193,25 @@ test('未知网络5xx408及429保留原提交和新稿，状态GET与重挂都�
   for (const status of [undefined, 500, 502, 408, 429]) {
     const context = await panel({ api: { injectAutopilot: async () => { throw Object.assign(new Error('回应未知'), status ? { status } : {}) } } })
     context.vm.directive.value = '本次原提交'; await context.vm.inject(); context.vm.directive.value = '未知后作者的新稿'
-    assert.equal(context.vm.injectionUnknown.value, true); assert.equal(context.vm.directiveSubmission.value.text, '本次原提交')
+    assert.equal(context.vm.injectionUnknown.value, true); assert.equal(context.vm.directiveSubmission.value.intent.text, '本次原提交')
     await context.vm.inject(); await context.vm.refreshTaskStatus(); await context.vm.inject(); assert.equal(injectionRequests(context).length, 1)
     assert.equal(context.messages.some(message => message.type === 'success'), false)
     const section = nodes(context.render(), node => node.props?.['aria-label'] === '构思注入结果待核对')[0]
-    assert.match(textOf(section), /可能已经被后台接收/); assert.match(textOf(section), /公开任务状态不能核对具体构思/)
+    assert.match(textOf(section), /公开任务状态不能替代原请求确认/)
     const original = nodes(section, node => node.type === 'textarea' && node.props?.['aria-label'] === '本次提交的构思原文')[0]
     assert.equal(original.props.value, '本次原提交'); assert.equal(original.props.readonly, '')
     const oldCalls = context.requests.length; context.dispose(); const fresh = await context.mountAgain()
     assert.equal(fresh.vm.injectionUnknown.value, true); assert.equal(fresh.vm.directive.value, '未知后作者的新稿')
     await fresh.vm.inject(); assert.equal(injectionRequests(fresh).length, 1)
     assert.equal(fresh.requests.slice(oldCalls).some(request => request.name === 'injectAutopilot'), false)
-    await fresh.vm.copyDirectiveText(fresh.vm.directiveSubmission.value.text); await fresh.vm.copyDirectiveText(fresh.vm.directive.value)
+    await fresh.vm.copyDirectiveText(fresh.vm.directiveSubmission.value.intent.text); await fresh.vm.copyDirectiveText(fresh.vm.directive.value)
     assert.deepEqual(fresh.copied, ['本次原提交', '未知后作者的新稿']); fresh.dispose()
   }
 })
 
 test('未知注入只封原task，pause resume和实时稿监控仍可用，新task须作者明确点击才注入', async () => {
   let calls = 0
-  const context = await panel({ api: { injectAutopilot: async (_id, taskId) => { if (++calls === 1) throw new Error('原回应丢失'); return control(taskId) } } })
+  const context = await panel({ api: { injectAutopilot: async (...args) => { if (++calls === 1) throw new Error('原回应丢失'); return receipt(...args) } } })
   context.vm.directive.value = '未知原构思'; await context.vm.inject()
   await context.vm.pause(); assert.equal(context.vm.pauseRequested.value, true)
   await context.vm.resume(); assert.equal(context.vm.pauseRequested.value, false)
@@ -211,7 +226,7 @@ test('未知注入只封原task，pause resume和实时稿监控仍可用，新t
 test('明确4xx拒绝释放自己的task锁且保留输入，只在作者再次点击时重试', async () => {
   for (const status of [400, 401, 403, 404, 409, 422]) {
     let calls = 0
-    const context = await panel({ api: { injectAutopilot: async (_id, taskId) => { if (++calls === 1) throw Object.assign(new Error('明确拒绝'), { status }); return control(taskId) } } })
+    const context = await panel({ api: { injectAutopilot: async (...args) => { if (++calls === 1) throw Object.assign(new Error('明确拒绝'), { status }); return receipt(...args) } } })
     context.vm.directive.value = '保留以便修正'; await context.vm.inject()
     assert.equal(context.vm.directive.value, '保留以便修正'); assert.equal(context.vm.injecting.value, false); assert.equal(context.vm.injectionUnknown.value, false)
     assert.equal(context.messages[0].type, 'error'); assert.equal(injectionRequests(context).length, 1)
@@ -220,7 +235,7 @@ test('明确4xx拒绝释放自己的task锁且保留输入，只在作者再次�
   }
 })
 
-test('200确认须完整匹配type action task novel与合法新event，缺失或错来源一律未知且输入不清', async () => {
+test('200确认须完整匹配原nonce原文hash及task novel字段，缺失或错来源一律未知且输入不清', async () => {
   const bad = [null, [], {}, control('wrong-task'), control('novel-a-task', { type: 'done' }), control('novel-a-task', { action: 'pause' }),
     control('novel-a-task', { novel_id: 'novel-b' }), control('novel-a-task', { event_id: 1 }), control('novel-a-task', { event_id: 1.5 }),
     control('novel-a-task', { event_id: NaN }), control('novel-a-task', { paused: undefined }), control('novel-a-task', { pause_requested: 'false' }),
@@ -252,7 +267,7 @@ test('任务结束后的晚200不清构思或冒称本页继续注入，空scope
   const response = deferred(), context = await panel({ api: { injectAutopilot: async () => response.promise } })
   context.vm.directive.value = '任务结束仍保留的构思'; const saving = context.vm.inject()
   context.vm.applySnapshot(snapshot('novel-a', { status: 'completed', running: false, event_id: 3 }))
-  response.resolve(control()); await saving
+  await flush(); response.resolve(receipt(...injectionRequests(context)[0].args)); await saving
   assert.equal(context.vm.directive.value, '任务结束仍保留的构思'); assert.equal(context.messages.length, 0)
   context.props.novelId = ''; await flush(); await context.vm.inject(); assert.equal(injectionRequests(context).length, 1)
   context.props.novelId = 'novel-b'; await flush(); context.vm.directive.value = '   '; await context.vm.inject()

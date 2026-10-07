@@ -592,6 +592,7 @@ class OutlineApplyRequest(BaseModel):
 
 class AutopilotInjectRequest(BaseModel):
     directive: str = Field(..., min_length=1)
+    request_id: Optional[UUID] = None
 
 
 class AutopilotTaskStartRequest(BaseModel):

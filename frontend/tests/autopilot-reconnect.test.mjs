@@ -4,6 +4,7 @@ import test from 'node:test'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import { nextTick, reactive } from 'vue'
 import ts from 'typescript'
+import { createHash } from 'node:crypto'
 
 const compile = (source) => ts.transpileModule(source, { compilerOptions: {
   target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022,
@@ -11,6 +12,10 @@ const compile = (source) => ts.transpileModule(source, { compilerOptions: {
 const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 const writerUrl = moduleUrl(compile(await readFile(new URL('../src/autopilotDrafts.ts', import.meta.url), 'utf8')))
 const wordLimitsUrl = moduleUrl(compile(await readFile(new URL('../src/utils/wordLimits.ts', import.meta.url), 'utf8')))
+const injectionUrl = moduleUrl(compile(await readFile(new URL('../src/utils/autopilotInjection.ts', import.meta.url), 'utf8')))
+const receipt = args => ({ type: 'control', action: 'inject', novel_id: args[0], task_id: args[1],
+  request_id: args[3], directive: args[2], directive_hash: createHash('sha256').update(args[2]).digest('hex'),
+  accepted: true, receipt_replayed: false, event_id: 4, paused: false, pause_requested: false, message: '构思已记录，请核对实际章节执行结果' })
 const script = compileScript(parse(await readFile(new URL('../src/components/AutopilotPanel.vue', import.meta.url), 'utf8')).descriptor, { id: 'reconnect-test' }).content
 let sequence = 0
 const wait = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
@@ -51,7 +56,7 @@ async function panel(options = {}) {
     deleteAutopilotDraft: async () => ({ deleted: true }),
     pauseAutopilot: async (...args) => { controls.push(['pause', ...args]); return { status: 'paused' } },
     resumeAutopilot: async (...args) => { controls.push(['resume', ...args]); return { status: 'running' } },
-    injectAutopilot: async (...args) => { controls.push(['inject', ...args]); return { type: 'control', action: 'inject', task_id: args[1], event_id: 4, paused: false, pause_requested: false, message: '已接收章前指令' } },
+    injectAutopilot: async (...args) => { controls.push(['inject', ...args]); return receipt(args) },
     ...options.api,
   }
   globalThis.window = { addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: (name) => listeners.delete(name) }
@@ -77,6 +82,7 @@ async function panel(options = {}) {
     .replace(/import \{ api, streamEvents \} from ['"]\.\.\/api['"]/g, 'const { api, streamEvents } = __harness')
     .replace(/from ['"]\.\.\/autopilotDrafts['"]/g, `from '${writerUrl}'`)
     .replace(/from ['"]\.\.\/utils\/wordLimits['"]/g, `from '${wordLimitsUrl}'`)
+    .replace(/from ['"]\.\.\/utils\/autopilotInjection['"]/g, `from '${injectionUrl}'`)
     .replace(/\bonMounted\(/g, '__harness.onMounted(')
     .replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')
     .replace(/\bsetTimeout\(/g, '__harness.timer.setTimeout(')
@@ -305,7 +311,7 @@ test('真实 SFC 确认删除后迟到草稿列表与错误不能复活该 UUID'
 
 test('真实 SFC 监控断开仍可按 task ID 暂停、恢复和注入，作者新输入不被迟到响应清掉', async () => {
   const injected = wait(), controls = []
-  const context = await panel({ api: { injectAutopilot: async (...args) => { controls.push(args); await injected.promise; return { type: 'control', action: 'inject', task_id: args[1], event_id: 4, paused: false, pause_requested: false, message: '已接收章前指令' } } } })
+  const context = await panel({ api: { injectAutopilot: async (...args) => { controls.push(args); await injected.promise; return receipt(args) } } })
   context.vm.handleConnectionError('网络断开')
   await context.vm.pause()
   assert.equal(context.vm.pauseRequested.value, true)
@@ -318,7 +324,8 @@ test('真实 SFC 监控断开仍可按 task ID 暂停、恢复和注入，作者
   assert.deepEqual(context.controls.map((args) => args.slice(0, 3)), [
     ['pause', context.props.novelId, 'task-a'], ['resume', context.props.novelId, 'task-a'],
   ])
-  assert.deepEqual(controls[0], [context.props.novelId, 'task-a', '下一章的构思'])
+  assert.deepEqual(controls[0].slice(0, 3), [context.props.novelId, 'task-a', '下一章的构思'])
+  assert.match(controls[0][3], /^[0-9a-f-]{36}$/)
   assert.equal(context.vm.directive.value, '作者正在写的新构思')
   assert.equal(context.starts.length, 0)
   context.hooks.unmount()
