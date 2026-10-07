@@ -21,6 +21,7 @@ import {
   type ChapterMetadata,
   type EntityRecord,
   type EntityType,
+  type FieldConfig,
 } from '../types'
 
 const props = defineProps<{
@@ -58,7 +59,12 @@ const allEntities = ref<Record<EntityType, EntityRecord[]>>(emptyEntities())
 const form = ref<Record<string, any>>({})
 const formBaseline = ref('{}')
 const formFingerprint = computed(() => JSON.stringify(form.value))
-const entityDirty = computed(() => formFingerprint.value !== formBaseline.value)
+let formRevision = 0
+watch(form, () => { formRevision += 1 }, { deep: true, flush: 'sync' })
+const entityDirty = computed(() => {
+  const baseline = JSON.parse(formBaseline.value)
+  return getEntityConfig(selectedType.value).fields.some((field) => !sameFieldValue(field, form.value[field.key], baseline[field.key]))
+})
 
 // 文风基准：决定定稿时是否计算文风漂移分
 const styleAnchor = ref('')
@@ -259,18 +265,42 @@ function startEdit(item: EntityRecord) {
   populateForm(item)
 }
 
+function entityForm(item: EntityRecord): Record<string, any> {
+  const next: Record<string, any> = {}
+  for (const f of config.value.fields) {
+    const v = item[f.key]
+    next[f.key] = f.type === 'json' ? (v == null ? '' : JSON.stringify(v, null, 2)) : (v ?? '')
+  }
+  return next
+}
+
 function populateForm(item: EntityRecord) {
   selectionRevision += 1
   pendingFocus = null
   editingId.value = item.id
-  const cfg = config.value
-  const next: Record<string, any> = {}
-  for (const f of cfg.fields) {
-    const v = item[f.key]
-    next[f.key] = f.type === 'json' ? (v == null ? '' : JSON.stringify(v, null, 2)) : (v ?? '')
-  }
+  const next = entityForm(item)
   form.value = next
   formBaseline.value = JSON.stringify(next)
+}
+
+function fieldValue(field: FieldConfig, raw: unknown): unknown {
+  if (field.type !== 'json') return raw ?? ''
+  if (raw == null || String(raw).trim() === '') return field.key === 'extras' ? {} : []
+  return JSON.parse(String(raw))
+}
+
+function semanticJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(semanticJson).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${semanticJson(record[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'undefined'
+}
+
+function sameFieldValue(field: FieldConfig, current: unknown, baseline: unknown): boolean {
+  try { return semanticJson(fieldValue(field, current)) === semanticJson(fieldValue(field, baseline)) }
+  catch { return false }
 }
 
 function validate(): string | null {
@@ -285,7 +315,10 @@ function validate(): string | null {
     const raw = form.value[f.key]
     if (raw == null || String(raw).trim() === '') continue
     try {
-      JSON.parse(raw)
+      const value = JSON.parse(raw)
+      if (f.key === 'extras' ? value === null || typeof value !== 'object' || Array.isArray(value) : !Array.isArray(value)) {
+        return `${f.label} 必须是${f.key === 'extras' ? 'JSON 对象' : 'JSON 数组'}；清空输入可清除该字段`
+      }
     } catch {
       return `${f.label} 不是合法 JSON`
     }
@@ -297,17 +330,7 @@ function buildPayload(): Record<string, unknown> {
   const cfg = config.value
   const payload: Record<string, unknown> = {}
   for (const f of cfg.fields) {
-    const raw = form.value[f.key]
-    if (f.type === 'json') {
-      if (raw == null || String(raw).trim() === '') {
-        // 清空输入表示清空已存数据；省略字段会让旧标签/关联继续保留。
-        payload[f.key] = f.key === 'extras' ? {} : []
-        continue
-      }
-      payload[f.key] = JSON.parse(raw)
-    } else {
-      payload[f.key] = raw
-    }
+    payload[f.key] = fieldValue(f, form.value[f.key])
   }
   return payload
 }
@@ -332,20 +355,58 @@ async function save() {
   const itemId = editingId.value
   const selection = selectionRevision
   const submittedForm = formFingerprint.value
+  const revision = formRevision
+  const submitted = JSON.parse(submittedForm)
+  const baseline = JSON.parse(formBaseline.value)
+  if (itemId) {
+    payload = Object.fromEntries(config.value.fields
+      .filter((field) => !sameFieldValue(field, submitted[field.key], baseline[field.key]))
+      .map((field) => [field.key, payload[field.key]]))
+    if (!Object.keys(payload).length) {
+      message.info('当前设定没有新的修改，未提交保存')
+      return
+    }
+  }
+  const fields = config.value.fields
+  const currentEditor = () => asyncScope.isCurrent(scope) && selection === selectionRevision
+    && selectedType.value === entityType && editingId.value === itemId
   saving.value = true
   try {
     const saved = itemId
       ? await api.updateEntity(scope.identity, apiPath, itemId, payload)
       : await api.createEntity(scope.identity, apiPath, payload)
-    if (!asyncScope.isCurrent(scope)) return
-    if (selection === selectionRevision && selectedType.value === entityType && editingId.value === itemId) {
-      editingId.value = saved.id
-      formBaseline.value = submittedForm
+    if (!currentEditor()) return
+    if (!saved || typeof saved.id !== 'string' || !saved.id || (itemId && saved.id !== itemId)
+      || (saved.novel_id && saved.novel_id !== scope.identity)) {
+      message.warning('未收到与当前设定一致的保存确认，请刷新核对；当前输入已保留')
+      return
     }
+    // 先使保存前的读取失效，并保留真实保存回应；刷新失败不回退已确认事实。
+    entityLoadSequence += 1
+    loading.value = false
+    const existing = allEntities.value[entityType].find((item) => item.id === saved.id)
+    const confirmed = { ...existing, ...saved }
+    allEntities.value[entityType] = [...allEntities.value[entityType].filter((item) => item.id !== saved.id), confirmed]
+    const complete = saved.novel_id === scope.identity && fields.every((field) => Object.prototype.hasOwnProperty.call(saved, field.key))
+    const untouched = formRevision === revision && formFingerprint.value === submittedForm
+    if (untouched && complete) {
+      const next = entityForm(saved)
+      form.value = next
+      formBaseline.value = JSON.stringify(next)
+    } else {
+      // 只推进本次发送字段；未发送的旧表单值不能因返回新事实而成为下次的作者修改。
+      const next = { ...baseline }
+      for (const key of Object.keys(payload)) next[key] = submitted[key]
+      formBaseline.value = JSON.stringify(next)
+    }
+    editingId.value = saved.id
     message.success(itemId ? '已保存' : '已创建')
-    await loadAll()
+    const refreshed = await loadAll(false)
+    if (!refreshed && asyncScope.isCurrent(scope) && selection === selectionRevision && editingId.value === saved.id) {
+      message.warning('设定已保存，但列表刷新失败；已确认的记录保留，请稍后刷新核对。')
+    }
   } catch (e) {
-    if (asyncScope.isCurrent(scope)) message.error((e as Error).message)
+    if (currentEditor()) message.error((e as Error).message)
   } finally {
     if (asyncScope.isCurrent(scope)) saving.value = false
   }
@@ -552,7 +613,7 @@ onBeforeUnmount(() => {
           </n-form-item>
         </n-form>
         <div class="actions">
-          <n-button type="primary" :disabled="!novelId" :loading="saving" @click="save">保存</n-button>
+          <n-button type="primary" :disabled="!novelId || (!!editingId && !entityDirty)" :loading="saving" @click="save">保存</n-button>
           <n-button v-if="editingId" type="error" :disabled="saving" @click="remove">删除</n-button>
         </div>
       </div>
