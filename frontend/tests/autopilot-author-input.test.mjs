@@ -86,6 +86,13 @@ async function panel(options = {}) {
   return mountAgain()
 }
 const injectionRequests = context => context.requests.filter(request => request.name === 'injectAutopilot')
+async function waitForInjection(context, count = 1) {
+  // SHA 是异步前置步骤；实际请求已发出后，才模拟卸载或跨作品晚回应。
+  for (let attempt = 0; injectionRequests(context).length < count && attempt < 1000; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 2))
+  }
+  assert.equal(injectionRequests(context).length, count)
+}
 function nodes(node, predicate, rows = []) {
   if (Array.isArray(node)) { for (const child of node) nodes(child, predicate, rows); return rows }
   if (!node || typeof node !== 'object') return rows
@@ -143,7 +150,7 @@ test('注入等待期间构思A改B又改回A，author revision仍保留新输�
 test('同编译module卸载重挂共享pending锁，旧200只记录确认不清新setup的作者稿或toast', async () => {
   const response = deferred(); let calls = 0
   const old = await panel({ api: { injectAutopilot: async (...args) => ++calls === 1 ? response.promise : receipt(...args, { event_id: 3 }) } })
-  old.vm.directive.value = '原次提交'; const saving = old.vm.inject(); old.dispose()
+  old.vm.directive.value = '原次提交'; const saving = old.vm.inject(); await waitForInjection(old); old.dispose()
   const fresh = await old.mountAgain()
   assert.equal(fresh.vm.injecting.value, true); assert.equal(fresh.vm.directive.value, '原次提交')
   fresh.vm.directive.value = '重挂后的新构思'; await fresh.vm.inject(); assert.equal(injectionRequests(fresh).length, 1)
@@ -160,6 +167,7 @@ test('novel ABA保留原task锁与各自构思，B可独立注入，旧A200不�
   const response = deferred()
   const context = await panel({ api: { injectAutopilot: async (...args) => args[0] === 'novel-a' ? response.promise : receipt(...args) } })
   context.vm.directive.value = 'A原构思'; const saving = context.vm.inject()
+  await waitForInjection(context)
   context.props.novelId = 'novel-b'; await flush(); context.vm.directive.value = 'B构思'; await context.vm.inject()
   assert.equal(context.vm.directive.value, ''); context.messages.length = 0
   context.props.novelId = 'novel-a'; await flush(); context.vm.directive.value = '返回A的新构思'

@@ -5,8 +5,9 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.infrastructure import repository as repos
 from app.infrastructure import models
@@ -243,8 +244,39 @@ def reply_conversation(db: Session, conversation_id: str, content: str, *, reque
 def promote_conversation(
     db: Session, conversation_id: str, title: str, genre: str = "", summary: str = ""
 ):
-    """全局会话转为作品：建 novel 并把会话归组，返回新作品。"""
-    repos.ConversationRepo(db).get(conversation_id)
-    novel = repos.NovelRepo(db).create(title=title, genre=genre, summary=summary)
-    repos.ConversationRepo(db).update(conversation_id, novel_id=novel.id)
+    """专用请求短事务内同时建作品和绑定会话；失败不能留下孤立作品。"""
+    # 在try之外拒绝调用方DML，不能autoflush、commit或rollback作者的未提交修改。
+    try:
+        _require_request_session(db)
+    except RuntimeError:
+        raise HTTPException(status_code=409, detail="转为作品需要没有未提交修改的独立会话；调用方修改保持不变") from None
+    try:
+        db.rollback()  # 仅清理干净的只读autobegin，写锁不包含模型等待。
+        if db.get_bind().dialect.name == "sqlite":
+            db.execute(text("BEGIN IMMEDIATE"))
+        db.expire_all()
+        table = models.Conversation.__table__
+        current = db.execute(select(table.c.id, table.c.novel_id).where(table.c.id == conversation_id)).first()
+        if current is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        if current.novel_id:
+            raise HTTPException(status_code=400, detail="已绑定作品的会话不能移动到其他作品")
+        novel = models.Novel(title=title, genre=genre, summary=summary)
+        db.add(novel)
+        db.flush()
+        db.execute(table.update().where(table.c.id == conversation_id).values(novel_id=novel.id))
+        frozen = {column.key: getattr(novel, column.key) for column in models.Novel.__table__.columns}
+        db.commit()
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="作品转换正在等待保存，本次未完成；请保留原稿并核对会话归属后重试") from None
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="转为作品未完成，请保留原稿并核对会话归属后重试") from None
+    except Exception:
+        db.rollback()
+        raise
+    # 保持direct caller的同一ORM身份；提交成功后响应不再读取数据库。
+    for field, value in frozen.items():
+        set_committed_value(novel, field, value)
     return novel
