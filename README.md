@@ -41,11 +41,12 @@
 | [docs/01-PRD.md](docs/01-PRD.md) | 产品需求：功能模块、交互、业务规则（基准 Spec） | 产品/开发 |
 | [docs/02-技术架构.md](docs/02-技术架构.md) | 系统架构、模块划分、技术选型、关键流程（基准 Spec） | 开发 |
 | [docs/03-数据模型.md](docs/03-数据模型.md) | Story Bible 数据库 schema 与核心数据结构（基准 Spec） | 开发 |
-| [docs/04-开发路线图.md](docs/04-开发路线图.md) | 分阶段任务清单与验收标准（**进度台账，判断做到哪了只看这份**） | 开发/项目管理 |
+| [docs/04-开发路线图.md](docs/04-开发路线图.md) | 原开发阶段与历史人工验收；本轮技术进度见 09 | 开发/项目管理 |
 | [docs/05-阶段六-全局对话系统.md](docs/05-阶段六-全局对话系统.md) | 阶段六设计与「已知偏差」（已收口） | 开发/项目管理 |
 | [docs/06-阶段七-质量治理与一致性深化.md](docs/06-阶段七-质量治理与一致性深化.md) | 阶段七设计与完整验收记录（已验收通过） | 开发/项目管理 |
 | [docs/07-阶段八-章节版本与成品交付.md](docs/07-阶段八-章节版本与成品交付.md) | 阶段八设计与验收记录（已验收通过） | 开发/项目管理 |
 | [docs/08-方向B-对话即操作中枢.md](docs/08-方向B-对话即操作中枢.md) | 方向 B 设计、实现与验收记录（已验收） | 开发/项目管理 |
+| [docs/09-初步落地持续任务.md](docs/09-初步落地持续任务.md) | 初步落地持续任务、缺口修复与当前验证 | 开发/项目管理 |
 
 ## 当前状态
 
@@ -67,11 +68,14 @@
 
 详见 [开发路线图](docs/04-开发路线图.md)。
 
+2026-10-07，按项目管理者授权完成本地初步落地技术复核：补齐作品关联校验、重复定稿记忆替换、设定/大纲/聊天/交付异步隔离与编辑保护、作品删除入口与大纲同级拖拽，并完善启动识别、统一检查和 SQLite 一致性备份。最终后端 437 项、前端 162 项、类型检查与构建通过，隔离浏览器核心流程验证完成，详见 [持续任务台账](docs/09-初步落地持续任务.md)。生成稿仍需作者审校；篇幅计数准确不代表模型一定遵守，待核或引文不匹配不显示为全面通过。
+
 ## 快速开始
 
 ### 环境要求
 
 - Python 3.11+、Node.js 18+
+- Windows PowerShell；建议 Node.js 22 或 24。测试文件 runner 无需 shell glob；本轮实际验证环境为 Node.js 24。
 
 ### 1. 后端
 
@@ -100,7 +104,7 @@ npm run dev
 
 - 默认本地 `bge-small-zh-v1.5`（fastembed，ONNX 轻量、无 PyTorch），首次运行会自动下载到项目内 `backend/fastembed_cache/`（已加入 .gitignore，之后离线可用，无需重复联网）。
 - 若网络受限，可切云端嵌入：在 `.env` 配 `EMBEDDING_SERVICE=openai`、`EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL`。
-- 嵌入/检索失败会自动降级为「仅章级摘要链」，不影响主流程。
+- 嵌入/检索失败会降级为「仅章级摘要链」。定稿面板会明确显示记忆写入或后置质量检查未完成的警告，作者可稍后重试；有来源的章切片会核对当前正文并排除过期片段。
 
 ### 4. 测试
 
@@ -108,6 +112,36 @@ npm run dev
 cd backend
 .venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py' -v
 ```
+
+推荐从仓库根执行隔离的统一检查，避免测试加载正式配置或触发真实模型/嵌入：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\check.ps1
+```
+
+只检查前端，在 `frontend` 执行 `npm.cmd run check`；其顺序是测试、类型检查和构建。单独的 `npm.cmd run build` 也会先执行类型检查。
+
+### 5. 一键启动与服务检查
+
+安装依赖后，可双击仓库根的 `start.bat`。它保留前后端日志窗口，等待后端健康身份、前端页面及 API 代理均通过检查再打开浏览器。端口被其他服务占用或代理错误会报错，不停止占用进程。`start.bat --check` 只验证依赖与运行文件，不启动服务。
+
+服务运行后的只读检查：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\check_services.ps1
+```
+
+### 6. 数据备份与恢复
+
+先确认要备份的实际 SQLite 路径：默认是 `backend\data\lingmo.db`，若已自定义 `DATABASE_URL`，应显式改为自己的工作库。工具不读取 `.env`、不猜库名。
+
+```powershell
+.\backend\.venv\Scripts\python.exe .\scripts\backup_database.py --source .\backend\data\lingmo.db --output-dir ..\lingmo-backups
+```
+
+工具以只读方式打开源库，使用 SQLite online backup，包含已提交的 WAL 数据；创建带 UTC 时间与 UUID 的新文件，验证完整性后才报告成功，不覆盖旧备份。不要用普通文件复制代替运行中的数据库一致性备份。未配置 API Key 时，已有设定、章节和本地导出仍可使用，生成会明确报缺少配置。
+
+恢复时先停止前后端服务和活动写作任务，确认目标工作库的路径与所选备份，并保留原数据库及可能存在的 `-wal`、`-shm` 文件作为同一组回退资料。将这组原文件移到独立保留目录后，把已验证备份复制到原数据库路径，重启再检查作品、章节和版本。不要在服务运行期间覆盖数据库，也不要把旧 WAL/SHM 与恢复的备份混用。当前工具只提供备份，不自动执行恢复或删除原数据。
 
 ## 关键假设（可随时推翻）
 
