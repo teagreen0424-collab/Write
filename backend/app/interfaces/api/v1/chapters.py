@@ -1,5 +1,5 @@
 """章节 CRUD + 写作/续写/改写/定稿/版本 路由。"""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -11,13 +11,25 @@ from app.application import story_review as story_review_uc
 from app.application import chapter_repair as chapter_repair_uc
 from app.application.word_count import check_word_limits
 from app.infrastructure.db import SessionLocal, get_db
-from app.infrastructure.repository import ChapterRepo, ChapterRevisionRepo
+from app.infrastructure.repository import ChapterRepo, ChapterRevisionRepo, NovelRepo, OutlineRepo
 from app.interfaces import schemas
 
 router = APIRouter(prefix="/novels/{novel_id}/chapters", tags=["chapter"])
 
 
 # ================= CRUD =================
+def _validate_outline_binding(db: Session, novel_id: str, node_id: str | None):
+    """普通章节 CRUD 只能绑定本作品的章级大纲；空字符串表示解除绑定。"""
+    if not node_id:
+        return
+    try:
+        node = OutlineRepo(db).get(novel_id, node_id)
+    except HTTPException as error:
+        raise HTTPException(status_code=400, detail="大纲节点不存在或不属于当前作品") from error
+    if node.level != "chapter":
+        raise HTTPException(status_code=400, detail="章节只能绑定章级大纲节点")
+
+
 @router.get("", response_model=list[schemas.ChapterRead])
 def list_chapters(novel_id: str, db: Session = Depends(get_db)):
     return ChapterRepo(db).list(novel_id)
@@ -25,6 +37,8 @@ def list_chapters(novel_id: str, db: Session = Depends(get_db)):
 
 @router.post("", response_model=schemas.ChapterRead, status_code=201)
 def create_chapter(novel_id: str, payload: schemas.ChapterCreate, db: Session = Depends(get_db)):
+    NovelRepo(db).get(novel_id)
+    _validate_outline_binding(db, novel_id, payload.outline_node_id)
     return ChapterRepo(db).create(novel_id, **payload.model_dump(mode="json"))
 
 
@@ -39,6 +53,9 @@ def update_chapter(
 ):
     """更新章节：作者字段实际变化时先保存覆盖前快照，与更新同一事务提交。"""
     changes = payload.model_dump(exclude_unset=True, mode="json")
+    ChapterRepo(db).get(novel_id, chapter_id)
+    if "outline_node_id" in changes:
+        _validate_outline_binding(db, novel_id, changes["outline_node_id"])
     # revision_source 只用于编排快照来源，必须从章节更新字段中剔除，禁止传给 ORM。
     source = changes.pop("revision_source", None) or revisions_uc.SOURCE_MANUAL_SAVE
     return revisions_uc.update_chapter_with_revision(db, novel_id, chapter_id, changes, source)

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NButton, NCheckbox, NEmpty, NInput, NSpin, NTag, useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { IdeaChatResult } from '../types'
@@ -22,6 +22,31 @@ const applying = ref(false)
 const result = ref<IdeaChatResult | null>(null)
 const dataTexts = ref<string[]>([])
 const selected = ref<boolean[]>([])
+const completed = ref<boolean[]>([])
+const errors = ref<Record<number, string>>({})
+const appliedSummary = ref<{ type: string; action: string; id: string }[]>([])
+type SuggestionSource = {
+  novelId: string
+  text: string
+  conversationId?: string
+  messageId?: string
+  settingsOnly?: boolean
+}
+const sourceKey = () => JSON.stringify([props.novelId, props.text, props.conversationId ?? '', props.messageId ?? '', !!props.settingsOnly])
+let generation = 0
+let disposed = false
+let parsedSource: { key: string; source: SuggestionSource } | null = null
+
+function reset() {
+  result.value = null
+  dataTexts.value = []
+  selected.value = []
+  completed.value = []
+  errors.value = {}
+  appliedSummary.value = []
+  parsedSource = null
+  applying.value = false
+}
 
 const TYPE_LABEL: Record<string, string> = {
   character: '人物',
@@ -33,27 +58,43 @@ const TYPE_LABEL: Record<string, string> = {
 }
 
 async function load() {
+  const sequence = ++generation
+  const key = sourceKey()
+  const source: SuggestionSource = { novelId: props.novelId, text: props.text,
+    conversationId: props.conversationId, messageId: props.messageId, settingsOnly: props.settingsOnly }
+  const isCurrent = () => !disposed && sequence === generation && key === sourceKey()
   loading.value = true
   try {
-    const r = props.settingsOnly && props.conversationId && props.messageId
-      ? await api.previewMessageSettings(props.conversationId, props.messageId)
-      : await api.ideaChat(props.novelId, props.text)
+    const r = source.settingsOnly && source.conversationId && source.messageId
+      ? await api.previewMessageSettings(source.conversationId, source.messageId)
+      : await api.ideaChat(source.novelId, source.text)
+    if (!isCurrent()) return
+    parsedSource = { key, source }
     result.value = r
     dataTexts.value = r.changes.map((c) => JSON.stringify(c.data, null, 2))
     selected.value = r.changes.map(() => true)
+    completed.value = r.changes.map(() => false)
+    errors.value = Object.fromEntries((r.failed ?? []).map((item) => [item.index, item.error]))
+    appliedSummary.value = []
   } catch (e) {
-    message.error((e as Error).message)
-    emit('cancel')
+    if (isCurrent()) {
+      message.error((e as Error).message)
+      emit('cancel')
+    }
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
 async function apply() {
-  if (!result.value) return
+  if (!result.value || applying.value || loading.value || disposed || parsedSource?.key !== sourceKey()) return
+  const { key, source } = parsedSource
+  const sequence = generation
+  const isCurrent = () => !disposed && sequence === generation && key === sourceKey()
   const suggestions: Record<string, unknown>[] = []
+  const sourceIndices: number[] = []
   for (let i = 0; i < result.value.changes.length; i++) {
-    if (!selected.value[i]) continue
+    if (!selected.value[i] || completed.value[i]) continue
     const c = result.value.changes[i]
     try {
       const data = JSON.parse(dataTexts.value[i])
@@ -73,30 +114,80 @@ async function apply() {
         return
       }
       suggestions.push({ type: c.type, action: c.action, data })
+      sourceIndices.push(i)
     } catch {
       message.error('变更数据 JSON 格式错误')
       return
     }
   }
   if (!suggestions.length) {
+    if (appliedSummary.value.length) {
+      emit('applied', appliedSummary.value)
+      return
+    }
     message.error('无可应用的变更')
     return
   }
   applying.value = true
   try {
-    const r = props.settingsOnly && props.conversationId && props.messageId
-      ? await api.applyMessageSettings(props.conversationId, props.messageId, suggestions)
-      : await api.ideaApply(props.novelId, suggestions, props.text, 'chat')
-    message.success(`已应用 ${r.applied.length} 条变更`)
-    emit('applied', r.applied)
+    const r = source.settingsOnly && source.conversationId && source.messageId
+      ? await api.applyMessageSettings(source.conversationId, source.messageId, suggestions)
+      : await api.ideaApply(source.novelId, suggestions, source.text, 'chat')
+    if (!isCurrent()) return
+    errors.value = {}
+    const failed = r.failed ?? []
+    for (const item of failed) {
+      const index = sourceIndices[item.index]
+      if (index !== undefined) errors.value[index] = item.error
+    }
+    const failedIndices = new Set(failed.map((item) => item.index))
+    const succeeded = r.applied.map((item, index) => item.index ??
+      sourceIndices.map((_, i) => i).filter((i) => !failedIndices.has(i))[index])
+    for (const index of succeeded) {
+      const source = sourceIndices[index]
+      if (source !== undefined) {
+        completed.value[source] = true
+        selected.value[source] = false
+      }
+    }
+    appliedSummary.value.push(...r.applied.map(({ type, action, id }) => ({ type, action, id })))
+    for (const warning of r.warnings ?? []) message.warning(warning)
+    if (failed.length) {
+      message.warning(`本次已应用 ${r.applied.length} 条，${failed.length} 条未应用；请修正标出的数据后重试`)
+      return
+    }
+    if (!r.applied.length) {
+      message.warning('本次未应用任何变更，请核对建议后重试')
+      return
+    }
+    message.success(`已应用 ${appliedSummary.value.length} 条变更`)
+    emit('applied', appliedSummary.value)
   } catch (e) {
-    message.error((e as Error).message)
+    if (isCurrent()) message.error((e as Error).message)
   } finally {
-    applying.value = false
+    if (isCurrent()) applying.value = false
   }
 }
 
+function cancelOrFinish() {
+  if (applying.value || disposed || parsedSource?.key !== sourceKey()) return
+  if (appliedSummary.value.length) {
+    const remaining = completed.value.filter((item) => !item).length
+    if (remaining) message.warning(`${remaining} 条建议未应用，已保留实际保存的 ${appliedSummary.value.length} 条变更`)
+    emit('applied', appliedSummary.value)
+  } else emit('cancel')
+}
+
+watch(sourceKey, () => {
+  if (disposed) return
+  reset()
+  void load()
+}, { flush: 'sync' })
 onMounted(load)
+onBeforeUnmount(() => {
+  disposed = true
+  generation += 1
+})
 </script>
 
 <template>
@@ -113,13 +204,15 @@ onMounted(load)
           <div v-for="(m, i) in result.matched" :key="i" class="target">
             <n-tag :type="m.matched ? 'success' : 'warning'" size="small">{{ m.name }}</n-tag>
             <span v-if="m.matched">{{ m.type }}（已匹配）</span>
+            <span v-else-if="m.ambiguous">同名目标，确认时按变更类型核对</span>
             <span v-else>未匹配（将新建）</span>
           </div>
         </div>
 
         <div v-for="(c, i) in result.changes" :key="i" class="change-card">
           <div class="change-head">
-            <n-checkbox v-model:checked="selected[i]">应用此条</n-checkbox>
+            <n-checkbox v-model:checked="selected[i]" :disabled="completed[i] || applying">应用此条</n-checkbox>
+            <n-tag v-if="completed[i]" type="success" size="small">已应用</n-tag>
             <n-tag size="small">{{ TYPE_LABEL[c.type] ?? c.type }}</n-tag>
             <n-tag :type="c.action === 'update' ? 'info' : 'success'" size="small">
               {{ c.action === 'update' ? '修改' : '新增' }}
@@ -128,13 +221,15 @@ onMounted(load)
           <n-input
             v-if="selected[i]"
             v-model:value="dataTexts[i]"
+            :disabled="applying"
             type="textarea"
             :autosize="{ minRows: 2, maxRows: 6 }"
           />
+          <p v-if="errors[i]" class="change-error">{{ errors[i] }}</p>
         </div>
 
         <div class="actions">
-          <n-button size="small" @click="emit('cancel')">取消</n-button>
+          <n-button size="small" :disabled="applying" @click="cancelOrFinish">{{ appliedSummary.length ? '完成已应用项' : '取消' }}</n-button>
           <n-button size="small" type="primary" :loading="applying" @click="apply">确认应用</n-button>
         </div>
       </template>
@@ -172,6 +267,10 @@ onMounted(load)
 }
 .change-card {
   margin-bottom: 10px;
+}
+.change-error {
+  color: #b42318;
+  white-space: pre-wrap;
 }
 .change-head {
   display: flex;

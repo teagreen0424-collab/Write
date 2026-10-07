@@ -7,6 +7,7 @@ set "FRONTEND_DIR=%ROOT%frontend"
 set "BACKEND_PY=%BACKEND_DIR%\.venv\Scripts\python.exe"
 set "APP_URL=http://127.0.0.1:5173/"
 set "API_URL=http://127.0.0.1:8000/docs"
+set "CHECK_SERVICES=%ROOT%scripts\check_services.ps1"
 
 title Lingmo Writer Launcher
 echo ============================================
@@ -18,6 +19,12 @@ if not exist "%BACKEND_PY%" (
   echo [ERROR] Backend virtual environment not found:
   echo         %BACKEND_PY%
   echo         Create it and install backend requirements first.
+  goto :failed
+)
+
+if not exist "%CHECK_SERVICES%" (
+  echo [ERROR] Service readiness checker was not found:
+  echo         %CHECK_SERVICES%
   goto :failed
 )
 
@@ -66,9 +73,7 @@ echo Waiting for services to become ready...
 set /a ATTEMPTS=0
 
 :wait_for_services
-call :url_ready "%API_URL%"
-if errorlevel 1 goto :wait_again
-call :url_ready "%APP_URL%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CHECK_SERVICES%" -Quiet
 if errorlevel 1 goto :wait_again
 goto :ready
 
@@ -91,7 +96,10 @@ exit /b 0
 
 :timeout
 echo.
-echo [WARN] Services did not both become ready within 30 seconds.
+echo [WARN] Services did not both become ready after 30 readiness checks.
+echo        Required: Lingmo health identity, frontend page and working API proxy.
+echo        If a port belongs to another app, close that app or change its port.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CHECK_SERVICES%"
 echo        Check the Backend and Frontend windows for error messages.
 echo        Backend: %API_URL%
 echo        Frontend: %APP_URL%
@@ -99,10 +107,6 @@ goto :failed
 
 :port_in_use
 powershell.exe -NoProfile -Command "if (Get-NetTCPConnection -State Listen -LocalPort %~1 -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }"
-exit /b %errorlevel%
-
-:url_ready
-powershell.exe -NoProfile -Command "try { $response = Invoke-WebRequest -UseBasicParsing -Uri '%~1' -TimeoutSec 1; if ($response.StatusCode -lt 500) { exit 0 } } catch {}; exit 1"
 exit /b %errorlevel%
 
 :failed

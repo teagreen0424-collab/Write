@@ -303,12 +303,44 @@ export interface Suggestion {
   data: Record<string, unknown>
 }
 
+export interface ApplicationFailure {
+  index: number
+  type: string
+  error: string
+}
+
+export interface AppliedChange {
+  type: string
+  action: string
+  id: string
+  index?: number
+}
+
+export interface IdeaApplyResult {
+  applied: AppliedChange[]
+  failed?: ApplicationFailure[]
+  warnings?: string[]
+  outline_updates?: unknown[]
+  consistency?: { conflicts: Conflict[]; status?: 'completed' | 'failed' }
+}
+
 export interface SettleResult {
   chapter_id: string
   summary: string
   suggestions: Suggestion[]
   drift: number | null
   conflicts: Conflict[]
+  memory?: {
+    written: number
+    total: number
+    failed: number
+    status: 'saved' | 'empty' | 'partial' | 'embedding_failed' | 'storage_failed'
+  }
+  warnings?: string[]
+  checks?: {
+    drift: 'skipped' | 'completed' | 'failed'
+    consistency: 'completed' | 'failed'
+  }
 }
 
 // ================= 大纲 / 自动驾驶 =================
@@ -472,7 +504,8 @@ export interface IdeaChatResult {
   targets: string[]
   changes: IdeaChange[]
   reason: string
-  matched: { name: string; matched: boolean; type?: string; id?: string }[]
+  matched: { name: string; matched: boolean; ambiguous?: boolean; type?: string; id?: string }[]
+  failed?: ApplicationFailure[]
 }
 
 // ================= 全局对话 =================

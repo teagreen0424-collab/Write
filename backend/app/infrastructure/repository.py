@@ -263,6 +263,14 @@ class ChapterRepo:
             item.planted_chapter_id = ""
         for item in consumed:
             item.consumed_chapter_id = ""
+        # 引用变化与章节删除同一事务失效旧设定索引，避免召回已删除章节 ID。
+        affected_ids = {item.id for item in planted + consumed}
+        if affected_ids:
+            self.db.query(models.MemoryChunk).filter(
+                models.MemoryChunk.novel_id == novel_id,
+                models.MemoryChunk.kind == "setting",
+                models.MemoryChunk.embedding_id.in_(affected_ids),
+            ).delete(synchronize_session=False)
         self.db.delete(obj)
         self.db.commit()
 

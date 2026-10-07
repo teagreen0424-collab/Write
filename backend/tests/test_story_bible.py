@@ -62,6 +62,9 @@ class StoryBibleTest(unittest.TestCase):
         novel = self._create_novel()
         nid = novel["id"]
         base = f"/api/v1/novels/{nid}/{path}"
+        if path == "timeline-events" and create_payload.get("participants"):
+            person = client.post(f"/api/v1/novels/{nid}/characters", json={"name": "林越"}).json()
+            create_payload = {**create_payload, "participants": [person["id"]]}
 
         resp = client.post(base, json=create_payload)
         self.assertEqual(resp.status_code, 201, resp.text)

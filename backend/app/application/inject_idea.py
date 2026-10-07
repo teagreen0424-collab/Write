@@ -1,11 +1,13 @@
 """对话式构思注入用例：意图识别 + 设定变更应用 + 大纲重规划。"""
 import json
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.application.consistency import consistency_check
 from app.application.memory import record_injection
 from app.application import setting_index
+from app.application.reference_resolution import resolve_references, failure
 from app.domain.entities import ForeshadowStatus, OutlineLevel
 from app.infrastructure import repository as repos
 from app.infrastructure import models
@@ -73,22 +75,29 @@ def _parse_json(raw: str) -> dict:
         raise
 
 
-def _find_by_name(db: Session, novel_id: str, name: str):
+def _find_by_name(db: Session, novel_id: str, name: str, target_kind: str | None = None):
+    matches = []
     for kind, name_field in _NAME_FIELD.items():
-        if not name_field:
+        if not name_field or (target_kind and kind != target_kind):
             continue
         repo = _REPO_MAP[kind](db)
         for entity in repo.list(novel_id):
             if getattr(entity, name_field) == name:
-                return {"type": kind, "entity": entity}
-    return None
+                matches.append({"type": kind, "entity": entity})
+    if len(matches) > 1:
+        raise HTTPException(400, detail=f"目标“{name}”有多个同名记录，请先在设定面板区分名称")
+    return matches[0] if matches else None
 
 
 def _match_targets(db: Session, novel_id: str, targets) -> list[dict]:
     result = []
     for t in targets or []:
         name = t if isinstance(t, str) else (t.get("name") or t.get("title") or "")
-        hit = _find_by_name(db, novel_id, name)
+        try:
+            hit = _find_by_name(db, novel_id, name)
+        except HTTPException:
+            result.append({"name": name, "matched": False, "ambiguous": True})
+            continue
         if hit:
             result.append({"name": name, "matched": True, "type": hit["type"], "id": hit["entity"].id})
         else:
@@ -126,16 +135,31 @@ def inject_idea(db: Session, novel_id: str, text: str) -> dict:
             target = matched[0]
             if not target["matched"] or target.get("type") == "character":
                 item["name"] = target["name"]
-        if change.get("action") == "update" and item.get("name"):
-            hit = _find_by_name(db, novel_id, item["name"])
-            if not hit or hit["type"] != "character":
-                change["action"] = "create"
+    failed = []
+    for index, change in enumerate(changes):
+        if not isinstance(change, dict):
+            failed.append(failure(index, "", ValueError("变更必须是 JSON 对象")))
+            continue
+        kind = change.get("type", "")
+        try:
+            if not isinstance(kind, str) or kind not in _REPO_MAP:
+                raise ValueError(f"不支持的设定类型：{kind}")
+            change["data"] = resolve_references(db, novel_id, kind, change.get("data", {}))
+            name_field = _NAME_FIELD.get(kind) if isinstance(kind, str) else None
+            name = change["data"].get(name_field) if name_field else None
+            if change.get("action") == "update" and name:
+                hit = _find_by_name(db, novel_id, name, target_kind=kind)
+                if not hit:
+                    change["action"] = "create"
+        except Exception as error:
+            failed.append(failure(index, str(kind or ""), error))
     return {
         "text": text,
         "targets": targets,
         "changes": changes,
         "reason": reason,
         "matched": matched,
+        "failed": failed,
     }
 
 
@@ -200,11 +224,18 @@ def _replan_outline(
     updates = data.get("outline_updates") or []
 
     applied = []
-    by_title = {n.title: n for n in unfinished}
+    by_title = {}
+    for node in unfinished:
+        by_title.setdefault(node.title, []).append(node)
     for u in updates:
+        if not isinstance(u, dict):
+            raise ValueError("大纲调整结果必须是 JSON 对象")
         title = u.get("title")
         summary = u.get("summary")
-        node = by_title.get(title) if isinstance(u, dict) else None
+        candidates = by_title.get(title, [])
+        if summary and len(candidates) > 1:
+            raise HTTPException(400, detail=f"未生成大纲有多个同名章节“{title}”，请先区分标题再调整")
+        node = candidates[0] if candidates else None
         if node and summary:
             if commit:
                 repos.OutlineRepo(db).update(novel_id, node.id, summary=summary)
@@ -241,23 +272,34 @@ def apply_injections(
         else (suggestions or {}).get("changes", [])
     )
     applied: list[dict] = []
+    failed: list[dict] = []
+    applied_changes: list[dict] = []
     updated_types: set[str] = set()
 
-    for ch in changes:
+    for index, ch in enumerate(changes):
         if not isinstance(ch, dict):
+            if atomic:
+                db.rollback()
+                raise ValueError("变更必须是 JSON 对象")
+            failed.append(failure(index, "", ValueError("变更必须是 JSON 对象")))
             continue
         kind = ch.get("type")
         action = ch.get("action", "create")
         data = _normalize_data(kind, ch.get("data") or {})
-        if kind not in _REPO_MAP:
+        if not isinstance(kind, str) or kind not in _REPO_MAP:
             if atomic:
+                db.rollback()
                 raise ValueError(f"不支持的设定类型：{kind}")
+            failed.append(failure(index, str(kind or ""), ValueError(f"不支持的设定类型：{kind}")))
             continue
         try:
+            if not isinstance(action, str) or action not in {"create", "update"}:
+                raise ValueError(f"不支持的变更动作：{action}")
+            data = resolve_references(db, novel_id, kind, data)
             if action == "update":
                 name_field = _NAME_FIELD.get(kind)
                 name = data.get(name_field) if name_field else None
-                hit = _find_by_name(db, novel_id, name) if name else None
+                hit = _find_by_name(db, novel_id, name, target_kind=kind) if name else None
                 if hit and hit["type"] == kind:
                     _update_entity(db, novel_id, kind, hit["entity"].id, data, commit=not atomic)
                     applied.append({"type": kind, "action": "update", "id": hit["entity"].id})
@@ -268,16 +310,42 @@ def apply_injections(
             else:
                 entity = _create_entity(db, novel_id, kind, data, commit=not atomic)
                 applied.append({"type": kind, "action": "create", "id": entity.id})
-        except Exception:  # noqa: BLE001  旧接口跳过无效变更；原子路径整单失败
+            applied[-1]["index"] = index
+            applied_changes.append({**ch, "data": data})
+        except Exception as error:  # noqa: BLE001  旧接口返回逐条错误；原子路径整单失败
             if atomic:
+                db.rollback()
                 raise
+            db.rollback()
+            failed.append(failure(index, kind, error))
             continue
 
-    outline_updates = _replan_outline(db, novel_id, changes, updated_types, commit=not atomic)
-    consistency = consistency_check(db, novel_id, _check_text(changes))
+    warnings = []
+    outline_updates = []
+    if applied and updated_types & {"character", "world_setting", "location"}:
+        try:
+            outline_updates = _replan_outline(db, novel_id, applied_changes, updated_types, commit=False)
+            if not atomic:
+                db.commit()
+        except Exception as error:
+            db.rollback()
+            if atomic:
+                raise
+            detail = failure(-1, "outline", error)["error"]
+            warnings.append(f"设定变更已保存，但后续大纲调整失败：{detail}。请核对大纲")
+    consistency = {"conflicts": []}
+    if applied:
+        try:
+            consistency = consistency_check(db, novel_id, _check_text(applied_changes))
+        except Exception:
+            db.rollback()
+            if atomic:
+                raise
+            consistency = {"conflicts": [], "status": "failed"}
+            warnings.append("设定变更已保存，但一致性检查失败；请稍后重新检查，请勿重复应用已保存项")
 
     # 记录构思注入（raw_text 非空时落 injection 表）
-    if raw_text:
+    if raw_text and applied:
         if atomic:
             db.add(models.Injection(
                 novel_id=novel_id, channel=channel, raw_text=raw_text,
@@ -285,9 +353,14 @@ def apply_injections(
             ))
             db.flush()
         else:
-            record_injection(
-                db, novel_id, channel, raw_text,
-                parsed_intent=changes, applied_changes=applied,
-            )
+            try:
+                record_injection(
+                    db, novel_id, channel, raw_text,
+                    parsed_intent=changes, applied_changes=applied,
+                )
+            except Exception:
+                db.rollback()
+                warnings.append("设定变更已保存，但构思留痕失败；请勿重复应用已保存项")
 
-    return {"applied": applied, "outline_updates": outline_updates, "consistency": consistency}
+    return {"applied": applied, "failed": failed, "warnings": warnings,
+            "outline_updates": outline_updates, "consistency": consistency}

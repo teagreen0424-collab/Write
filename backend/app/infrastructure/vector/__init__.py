@@ -2,6 +2,7 @@
 import numpy as np
 
 from app.infrastructure import repository as repos
+from app.infrastructure import models
 from app.infrastructure.ai.embedding import EmbeddingService
 
 
@@ -32,6 +33,18 @@ def search(db, novel_id: str, query: str, top_k: int = 3) -> list[dict]:
     if not query:
         return []
     chunks = [c for c in repos.MemoryChunkRepo(db).list_by_novel(novel_id) if c.vector]
+    # 写库故障可能保留已替换正文的旧切片。按候选章节批量核对，设定与无来源旧数据保持兼容。
+    chapter_ids = {c.source_chapter_id for c in chunks if c.kind == "chapter_slice" and c.source_chapter_id}
+    if chapter_ids:
+        current = {
+            chapter.id: "\n".join(line.strip() for line in (chapter.content or "").split("\n") if line.strip())
+            for chapter in db.query(models.Chapter.id, models.Chapter.content).filter(
+                models.Chapter.novel_id == novel_id,
+                models.Chapter.id.in_(chapter_ids),
+            ).all()
+        }
+        chunks = [c for c in chunks if c.kind != "chapter_slice" or not c.source_chapter_id
+                  or (c.text and c.text in current.get(c.source_chapter_id, ""))]
     if not chunks:
         return []  # 无记忆片段，避免无谓的嵌入
 

@@ -129,6 +129,26 @@ const nextOutlineNodeId = ref<string | null>(null)
 const settleSummary = ref('')
 const suggestions = ref<Suggestion[]>([])
 const checkedSuggestion = ref<boolean[]>([])
+const settleDataTexts = ref<string[]>([])
+const settleErrors = ref<Record<number, string>>({})
+const settleCompleted = ref<boolean[]>([])
+const settleApplying = ref(false)
+const settledCount = ref(0)
+const settleLoading = ref(false)
+const settleWarnings = ref<string[]>([])
+interface SettleContext {
+  novelId: string
+  chapterId: string
+  epoch: number
+  title: string
+  directive: string
+  content: string
+}
+const settleContext = ref<SettleContext | null>(null)
+let settleEpoch = 0
+let settleRequestId = 0
+let settleApplyRequestId = 0
+let settleEditorRevision = 0
 
 const REWRITE_INTENT_OPTIONS = [
   { label: '更细腻', value: '更细腻' },
@@ -199,7 +219,8 @@ const isDirty = computed(
 const isSummaryDirty = computed(() => showSummary.value && summaryDraft.value !== savedSummary.value)
 const hasIncompleteOutput = computed(() => !!streamError.value)
 const hasUnsavedChanges = computed(
-  () => isDirty.value || isSummaryDirty.value || streaming.value || hasIncompleteOutput.value,
+  () => isDirty.value || isSummaryDirty.value || streaming.value || hasIncompleteOutput.value
+    || settleLoading.value || settleApplying.value || showSettle.value,
 )
 
 function rememberSaved() {
@@ -943,32 +964,146 @@ async function doConsistency() {
 }
 
 async function doSettle() {
+  if (!props.novelId || settleLoading.value || settleApplying.value) return
   if (streaming.value || hasIncompleteOutput.value) {
     message.warning('请先处理未完成输出，再定稿沉淀')
     return
   }
   if (!selectedId.value || !requireSaved('定稿沉淀')) return
+  invalidateSettle()
+  const context: SettleContext = {
+    novelId: props.novelId, chapterId: selectedId.value, epoch: settleEpoch,
+    title: title.value, directive: directive.value, content: content.value,
+  }
+  const requestId = ++settleRequestId
+  const isCurrent = () => isCurrentSettle(context) && requestId === settleRequestId
+  settleLoading.value = true
   try {
-    const res = await api.settleChapter(props.novelId, selectedId.value)
+    const res = await api.settleChapter(context.novelId, context.chapterId)
+    if (!isCurrent()) return
+    settleContext.value = context
     settleSummary.value = res.summary
     suggestions.value = res.suggestions
     checkedSuggestion.value = res.suggestions.map(() => true)
+    settleDataTexts.value = res.suggestions.map((item) => JSON.stringify(item.data, null, 2))
+    settleCompleted.value = res.suggestions.map(() => false)
+    settleErrors.value = {}
+    settledCount.value = 0
+    settleWarnings.value = (res.warnings ?? []).filter((warning) => typeof warning === 'string' && warning.trim())
     showSettle.value = true
-    await reloadAndReselect()
+    // 定稿只改变摘要/状态等派生字段；重读目录不能覆盖等待期间的作者正文。
+    try {
+      const loaded = await api.listChapters(context.novelId)
+      if (isCurrent()) chapters.value = loaded
+    } catch (error) {
+      if (isCurrent()) {
+        const warning = `定稿沉淀已完成，但章节列表刷新失败：${(error as Error).message}`
+        settleWarnings.value.push(warning)
+        message.warning(warning)
+      }
+    }
   } catch (e) {
-    message.error((e as Error).message)
+    if (isCurrent()) message.error((e as Error).message)
+  } finally {
+    if (isCurrent()) settleLoading.value = false
   }
 }
 
+function isCurrentSettle(context: SettleContext): boolean {
+  return !unmounted && context.epoch === settleEpoch
+    && props.novelId === context.novelId && selectedId.value === context.chapterId
+    && title.value === context.title && directive.value === context.directive && content.value === context.content
+}
+
+function invalidateSettle(clearPreview = true) {
+  settleEpoch += 1
+  settleRequestId += 1
+  settleApplyRequestId += 1
+  settleContext.value = null
+  settleLoading.value = false
+  settleApplying.value = false
+  showSettle.value = false
+  if (clearPreview) {
+    settleSummary.value = ''
+    suggestions.value = []
+    checkedSuggestion.value = []
+    settleDataTexts.value = []
+    settleCompleted.value = []
+    settleErrors.value = {}
+    settleWarnings.value = []
+    settledCount.value = 0
+  }
+}
+
+function handleSettleVisibility(visible: boolean) {
+  if (visible) showSettle.value = true
+  else invalidateSettle(false)
+}
+
 async function confirmSettle() {
-  if (!selectedId.value) return
-  const picked = suggestions.value.filter((_, i) => checkedSuggestion.value[i])
+  const context = settleContext.value
+  if (!showSettle.value || !context || !isCurrentSettle(context) || settleApplying.value || settleLoading.value) return
+  const sourceIndices = suggestions.value.map((_, i) => i)
+    .filter((i) => checkedSuggestion.value[i] && !settleCompleted.value[i])
+  if (!sourceIndices.length) {
+    if (settledCount.value) handleSettleVisibility(false)
+    else message.warning('请选择需要落库的建议')
+    return
+  }
+  let picked: Suggestion[]
   try {
-    const res = await api.settleApply(props.novelId, selectedId.value, picked)
-    message.success(`已落库 ${res.created.length} 条设定变更`)
-    showSettle.value = false
+    picked = sourceIndices.map((index) => {
+      const data = JSON.parse(settleDataTexts.value[index] ?? JSON.stringify(suggestions.value[index].data))
+      if (!data || Array.isArray(data) || typeof data !== 'object') throw new Error('建议数据必须是 JSON 对象')
+      return { ...suggestions.value[index], data }
+    })
+  } catch (error) {
+    message.error((error as Error).message || '建议数据 JSON 格式错误')
+    return
+  }
+  const requestId = ++settleApplyRequestId
+  const editorRevision = settleEditorRevision
+  const isCurrent = () => isCurrentSettle(context) && requestId === settleApplyRequestId && showSettle.value
+  settleApplying.value = true
+  try {
+    const res = await api.settleApply(context.novelId, context.chapterId, picked)
+    if (!isCurrent()) return
+    const editedWhileApplying = settleEditorRevision !== editorRevision
+    settleErrors.value = {}
+    const failed = res.failed ?? []
+    for (const item of failed) {
+      const index = sourceIndices[item.index]
+      if (index !== undefined) settleErrors.value[index] = item.error
+    }
+    const failedIndices = new Set(failed.map((item) => item.index))
+    const succeeded = res.created.map((item, index) => item.index ??
+      sourceIndices.map((_, i) => i).filter((i) => !failedIndices.has(i))[index])
+    for (const index of succeeded) {
+      const source = sourceIndices[index]
+      if (source !== undefined) {
+        settleCompleted.value[source] = true
+        checkedSuggestion.value[source] = false
+      }
+    }
+    settledCount.value += res.created.length
+    if (failed.length) {
+      message.warning(`本次已落库 ${res.created.length} 条，${failed.length} 条未落库；请修正标出的数据后重试`)
+      return
+    }
+    if (!res.created.length) {
+      message.warning('本次未落库任何建议，请核对后重试')
+      return
+    }
+    if (editedWhileApplying) {
+      message.success(`已落库 ${settledCount.value} 条设定变更，等待期间的新编辑已保留，请核对后继续`)
+      return
+    }
+    message.success(`已落库 ${settledCount.value} 条设定变更`)
+    handleSettleVisibility(false)
   } catch (e) {
-    message.error((e as Error).message)
+    if (isCurrent()) message.error((e as Error).message)
+  } finally {
+    if (isCurrent()) settleApplying.value = false
   }
 }
 
@@ -1010,6 +1145,16 @@ watch(
 )
 
 watch(hasUnsavedChanges, (dirty) => emit('dirty-change', dirty), { immediate: true })
+watch(
+  () => [props.novelId, selectedId.value, title.value, content.value, directive.value],
+  () => invalidateSettle(),
+  { flush: 'sync' },
+)
+watch(
+  () => JSON.stringify([suggestions.value, checkedSuggestion.value, settleDataTexts.value]),
+  () => { settleEditorRevision += 1 },
+  { flush: 'sync' },
+)
 watch(content, () => { outlineCheckResult.value = null })
 watch(
   () => [props.novelId, selectedId.value, content.value, directive.value, storyMinWords.value, storyMaxWords.value],
@@ -1033,6 +1178,7 @@ onBeforeUnmount(() => {
   unmounted = true
   streamRunId += 1
   invalidateRepair()
+  invalidateSettle()
   window.removeEventListener('beforeunload', handleBeforeUnload)
   finishDiscard(false)
 })
@@ -1124,7 +1270,7 @@ onBeforeUnmount(() => {
             :title="isDirty ? '请先保存当前修改，再生成修订稿' : '根据已保存正文、构思和当前检查结果生成整章修订预览'"
             @click="openRepair"
           >生成修订稿</n-button>
-          <n-button type="success" :disabled="!selectedId || streaming || hasIncompleteOutput || repairApplying" @click="doSettle">定稿沉淀</n-button>
+          <n-button type="success" :disabled="!selectedId || streaming || hasIncompleteOutput || repairApplying || settleApplying" :loading="settleLoading" @click="doSettle">定稿沉淀</n-button>
         </div>
         <div class="btn-row version-actions">
           <n-button :disabled="!selectedId || summarySaving || streaming || repairApplying" @click="openSummary">章节摘要</n-button>
@@ -1502,18 +1648,24 @@ onBeforeUnmount(() => {
       @update:show="finishDiscard(false)"
     />
 
-    <n-modal v-model:show="showSettle" preset="card" title="设定变更建议" style="width: 560px">
+    <n-modal :show="showSettle" @update:show="handleSettleVisibility" :mask-closable="!settleApplying" :closable="!settleApplying" preset="card" title="设定变更建议" style="width: 560px">
       <p class="settle-summary">摘要：{{ settleSummary }}</p>
+      <ul v-if="settleWarnings.length" class="settle-warning"><li v-for="(warning, i) in settleWarnings" :key="i">{{ warning }}</li></ul>
       <div v-if="suggestions.length">
         <div v-for="(s, i) in suggestions" :key="i" class="suggestion-row">
-          <n-checkbox v-model:checked="checkedSuggestion[i]">{{ suggestionLabel(s) }}</n-checkbox>
+          <n-checkbox v-model:checked="checkedSuggestion[i]" :disabled="settleCompleted[i] || settleApplying">{{ suggestionLabel(s) }}</n-checkbox>
+          <n-tag v-if="settleCompleted[i]" type="success" size="small">已落库</n-tag>
+          <template v-if="settleErrors[i]">
+            <p class="repair-error">{{ settleErrors[i] }}</p>
+            <n-input v-model:value="settleDataTexts[i]" type="textarea" :disabled="settleApplying" :autosize="{ minRows: 2, maxRows: 8 }" />
+          </template>
         </div>
       </div>
       <n-empty v-else description="未识别到新增设定" />
       <template #footer>
         <div class="modal-actions">
-          <n-button @click="showSettle = false">取消</n-button>
-          <n-button type="primary" @click="confirmSettle">确认落库</n-button>
+          <n-button :disabled="settleApplying" @click="handleSettleVisibility(false)">取消</n-button>
+          <n-button type="primary" :disabled="settleLoading" :loading="settleApplying" @click="confirmSettle">确认落库</n-button>
         </div>
       </template>
     </n-modal>
@@ -1953,6 +2105,10 @@ onBeforeUnmount(() => {
 }
 .settle-summary {
   color: #666;
+}
+.settle-warning {
+  color: #ad6800;
+  line-height: 1.6;
 }
 .summary-hint {
   color: #888;

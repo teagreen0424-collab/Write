@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   NButton,
   NForm,
@@ -37,12 +37,18 @@ const moveTarget = ref<Conversation | null>(null)
 const moveNovelId = ref<string | null>(null)
 const showCreate = ref(false)
 const createForm = ref({ title: '', genre: '', summary: '' })
+const chatDirty = ref(false)
+const deletingNovel = ref(false)
+let alive = true
+let loadId = 0
 
 const novelOptions = computed(() => novels.value.map((n) => ({ label: n.title, value: n.id })))
 
 async function loadAll() {
+  const requestId = ++loadId
   try {
     const [n, c] = await Promise.all([api.listNovels(), api.listConversations()])
+    if (!alive || requestId !== loadId) return
     novels.value = n
     conversations.value = c
     if (selectedId.value && !c.some((x) => x.id === selectedId.value)) {
@@ -51,7 +57,7 @@ async function loadAll() {
       selectedId.value = c[0].id
     }
   } catch (e) {
-    message.error((e as Error).message)
+    if (alive && requestId === loadId) message.error((e as Error).message)
   }
 }
 
@@ -140,7 +146,10 @@ function removeConversation(c: Conversation) {
     onPositiveClick: async () => {
       try {
         await api.deleteConversation(c.id)
-        if (selectedId.value === c.id) selectedId.value = null
+        if (!alive) return
+        loadId += 1
+        conversations.value = conversations.value.filter((item) => item.id !== c.id)
+        if (selectedId.value === c.id) selectedId.value = conversations.value[0]?.id ?? null
         await loadAll()
       } catch (e) {
         message.error((e as Error).message)
@@ -170,10 +179,45 @@ async function submitCreate() {
 }
 
 function enterWorkbench(novelId: string) {
-  emit('enter-workbench', novelId)
+  leaveChat(() => emit('enter-workbench', novelId))
+}
+
+function leaveChat(navigate: () => void) {
+  if (!chatDirty.value) return navigate()
+  dialog.warning({
+    title: '离开对话？', content: '有尚未发送的对话输入。确定放弃输入并离开吗？',
+    positiveText: '放弃并继续', negativeText: '继续编辑', onPositiveClick: navigate,
+  })
+}
+
+function removeNovel(novel: Novel) {
+  if (deletingNovel.value) return
+  dialog.warning({
+    title: '删除作品',
+    content: `确定删除作品「${novel.title}」及全部设定、大纲、章节、版本和作品会话吗？此操作不可恢复。`,
+    positiveText: '删除作品', negativeText: '取消',
+    onPositiveClick: async () => {
+      if (deletingNovel.value) return false
+      deletingNovel.value = true
+      try {
+        await api.deleteNovel(novel.id)
+        if (!alive) return
+        loadId += 1
+        novels.value = novels.value.filter((item) => item.id !== novel.id)
+        conversations.value = conversations.value.filter((item) => item.novel_id !== novel.id)
+        if (!conversations.value.some((item) => item.id === selectedId.value)) selectedId.value = conversations.value[0]?.id ?? null
+        await loadAll()
+        if (alive) message.success('作品已删除')
+      } catch (error) {
+        if (alive) message.error((error as Error).message)
+        return false
+      } finally { deletingNovel.value = false }
+    },
+  })
 }
 
 onMounted(loadAll)
+onBeforeUnmount(() => { alive = false; loadId += 1 })
 </script>
 
 <template>
@@ -191,15 +235,18 @@ onMounted(loadAll)
       @move="openMove"
       @enter-workbench="enterWorkbench"
       @create-novel="openCreate"
+      @delete-novel="removeNovel"
     />
     <ChatWindow
       :conversation="selected"
       :novels="novels"
+      :conversation-ids="conversations.map((item) => item.id)"
       @changed="loadAll"
       @promote="selected && openPromote(selected)"
       @move="selected && openMove(selected)"
-      @open-outline="emit('open-outline', $event)"
-      @open-writing="(novelId: string, chapterId: string) => emit('open-writing', novelId, chapterId)"
+      @dirty-change="chatDirty = $event"
+      @open-outline="(novelId: string) => leaveChat(() => emit('open-outline', novelId))"
+      @open-writing="(novelId: string, chapterId: string) => leaveChat(() => emit('open-writing', novelId, chapterId))"
     />
 
     <n-modal

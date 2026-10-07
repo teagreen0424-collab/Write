@@ -1,5 +1,6 @@
 import type {
   AutopilotDraft,
+  ApplicationFailure,
   AutopilotDraftInput,
   AutopilotEvent,
   AutopilotTaskSnapshot,
@@ -20,6 +21,7 @@ import type {
   EntityRecord,
   ForeshadowingTracking,
   IdeaChatResult,
+  IdeaApplyResult,
   Novel,
   OutlineCheckResult,
   OutlineNode,
@@ -292,7 +294,7 @@ export const api = {
       method: 'POST',
     }),
   settleApply: (novelId: string, chapterId: string, suggestions: Suggestion[]) =>
-    request<{ created: { type: string; id: string }[] }>(
+    request<{ created: { type: string; id: string; index?: number }[]; failed?: ApplicationFailure[] }>(
       `${BASE}/novels/${novelId}/chapters/${chapterId}/settle/apply`,
       { method: 'POST', body: JSON.stringify({ suggestions }) },
     ),
@@ -432,7 +434,7 @@ export const api = {
     rawText = '',
     channel = 'chat',
   ) =>
-    request<{ applied: { type: string; action: string; id: string }[]; outline_updates: unknown[]; consistency: { conflicts: Conflict[] } }>(
+    request<IdeaApplyResult>(
       `${BASE}/novels/${novelId}/ideas/apply`,
       { method: 'POST', body: JSON.stringify({ suggestions, raw_text: rawText, channel }) },
     ),
@@ -459,7 +461,7 @@ export const api = {
       method: 'POST',
     }),
   applyMessageSettings: (id: string, messageId: string, suggestions: Record<string, unknown>[]) =>
-    request<{ applied: { type: string; action: string; id: string }[] }>(
+    request<IdeaApplyResult>(
       `${BASE}/conversations/${id}/messages/${messageId}/settings/apply`,
       { method: 'POST', body: JSON.stringify({ suggestions }) },
     ),

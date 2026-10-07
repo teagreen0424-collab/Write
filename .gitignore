@@ -30,6 +30,8 @@ fastembed_cache/
 # Node
 node_modules/
 frontend/dist/
+.playwright-cli/
+output/playwright/
 
 # IDE
 .idea/

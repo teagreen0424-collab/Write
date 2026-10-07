@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   NButton,
   NForm,
@@ -13,6 +13,7 @@ import {
 } from 'naive-ui'
 import { api } from '../api'
 import type { EntityType, Novel } from '../types'
+import { createAsyncScope } from '../utils/asyncScope'
 import SettingsPanel from './SettingsPanel.vue'
 import KnowledgeGraph from './KnowledgeGraph.vue'
 import WritingPanel from './WritingPanel.vue'
@@ -39,6 +40,8 @@ const focusTarget = ref<{ type: EntityType; id: string } | null>(null)
 const refreshKey = ref(0)
 const writingDirty = ref(false)
 const autopilotDirty = ref(false)
+const settingsDirty = ref(false)
+const outlineDirty = ref(false)
 const showNavigationConfirm = ref(false)
 const navigationTarget = ref('')
 const navigationWarning = ref('')
@@ -46,40 +49,62 @@ const pendingNavigation = ref<(() => void) | null>(null)
 
 const showCreate = ref(false)
 const createForm = ref({ title: '', genre: '', summary: '' })
+const creating = ref(false)
+const asyncScope = createAsyncScope(() => novelId.value ?? '')
+let novelLoadSequence = 0
+let createRevision = 0
+watch(novelId, () => { asyncScope.invalidate(); creating.value = false }, { flush: 'sync' })
+watch(showCreate, () => { createRevision += 1 }, { flush: 'sync' })
 
 const novelOptions = computed(() => novels.value.map((n) => ({ label: n.title, value: n.id })))
 
 async function loadNovels() {
+  const scope = asyncScope.capture()
+  const sequence = ++novelLoadSequence
   try {
-    novels.value = await api.listNovels()
+    const result = await api.listNovels()
+    if (!asyncScope.isCurrent(scope) || sequence !== novelLoadSequence) return
+    novels.value = result
     if (!novelId.value && props.initialNovelId && novels.value.some((n) => n.id === props.initialNovelId)) {
       novelId.value = props.initialNovelId
     } else if (!novelId.value && novels.value.length) {
       novelId.value = novels.value[0].id
     }
   } catch (e) {
-    message.error((e as Error).message)
+    if (asyncScope.isCurrent(scope) && sequence === novelLoadSequence) message.error((e as Error).message)
   }
 }
 
 function openCreate() {
+  createRevision += 1
   createForm.value = { title: '', genre: '', summary: '' }
   showCreate.value = true
 }
 
 async function submitCreate() {
+  if (creating.value || !showCreate.value) return
   if (!createForm.value.title.trim()) {
     message.error('书名不能为空')
     return
   }
+  const scope = asyncScope.capture()
+  const revision = createRevision
+  const submittedForm = JSON.stringify(createForm.value)
+  creating.value = true
   try {
-    const novel = await api.createNovel(createForm.value)
-    showCreate.value = false
+    const novel = await api.createNovel(JSON.parse(submittedForm))
+    if (!asyncScope.isCurrent(scope)) return
+    const unchanged = revision === createRevision && JSON.stringify(createForm.value) === submittedForm
+    if (unchanged) showCreate.value = false
+    const completedRevision = createRevision
     await loadNovels()
-    changeNovel(novel.id)
+    if (!asyncScope.isCurrent(scope)) return
+    if (unchanged && completedRevision === createRevision && JSON.stringify(createForm.value) === submittedForm) changeNovel(novel.id)
     message.success('已创建作品')
   } catch (e) {
-    message.error((e as Error).message)
+    if (asyncScope.isCurrent(scope)) message.error((e as Error).message)
+  } finally {
+    if (asyncScope.isCurrent(scope)) creating.value = false
   }
 }
 
@@ -89,11 +114,16 @@ function onGraphEdit(payload: { type: EntityType; id: string }) {
 }
 
 function navigateSafely(target: string, navigate: () => void) {
-  if ((activeTab.value === 'writing' && writingDirty.value) || (activeTab.value === 'autopilot' && autopilotDirty.value)) {
+  if (settingsDirty.value || outlineDirty.value || (activeTab.value === 'writing' && writingDirty.value) || (activeTab.value === 'autopilot' && autopilotDirty.value)) {
     navigationTarget.value = target
-    navigationWarning.value = activeTab.value === 'autopilot'
-      ? '自动驾驶继续在后台运行，离开只断开本页监控。未得到暂存确认的本页片段离开后可能丢失，请先复制保留；已暂存片段可以重新找回。'
-      : '当前章节有未保存修改或未完成输出。'
+    navigationWarning.value = [
+      settingsDirty.value ? '设定或文风基准有未保存修改，或正在保存。' : '',
+      outlineDirty.value ? '大纲有未保存编辑、生成预览，或正在保存。' : '',
+      activeTab.value === 'writing' && writingDirty.value ? '当前章节有未保存修改或未完成输出。' : '',
+      activeTab.value === 'autopilot' && autopilotDirty.value
+        ? '自动驾驶继续在后台运行，离开只断开本页监控。未得到暂存确认的本页片段离开后可能丢失，请先复制保留；已暂存片段可以重新找回。'
+        : '',
+    ].filter(Boolean).join('')
     pendingNavigation.value = navigate
     showNavigationConfirm.value = true
   } else {
@@ -114,7 +144,7 @@ function confirmNavigation() {
 
 function changeNovel(value: string | null) {
   if (value === novelId.value) return
-  navigateSafely('切换作品', () => { novelId.value = value })
+  navigateSafely('切换作品', () => { focusTarget.value = null; novelId.value = value })
 }
 
 function returnToChat() {
@@ -124,10 +154,11 @@ function returnToChat() {
 function changeTab(value: string) {
   const next = value as typeof activeTab.value
   if (next === activeTab.value) return
-  navigateSafely(activeTab.value === 'autopilot' ? '离开自动驾驶页' : '离开写作页', () => { activeTab.value = next })
+  navigateSafely('切换页面', () => { activeTab.value = next })
 }
 
 onMounted(loadNovels)
+onBeforeUnmount(() => asyncScope.dispose())
 </script>
 
 <template>
@@ -166,6 +197,7 @@ onMounted(loadNovels)
         :novel-id="novelId ?? ''"
         :focus-target="focusTarget"
         :refresh-key="refreshKey"
+        @dirty-change="settingsDirty = $event"
       />
       <WritingPanel
         v-if="activeTab === 'writing'"
@@ -177,6 +209,7 @@ onMounted(loadNovels)
         v-if="activeTab === 'outline'"
         :novel-id="novelId ?? ''"
         :refresh-key="refreshKey"
+        @dirty-change="outlineDirty = $event"
       />
       <AutopilotPanel v-if="activeTab === 'autopilot'" :novel-id="novelId ?? ''" @dirty-change="autopilotDirty = $event" />
       <ForeshadowingTracking v-if="activeTab === 'foreshadowing'" :novel-id="novelId ?? ''" />
@@ -223,7 +256,7 @@ onMounted(loadNovels)
       <template #footer>
         <div class="modal-actions">
           <n-button @click="showCreate = false">取消</n-button>
-          <n-button type="primary" @click="submitCreate">创建</n-button>
+          <n-button type="primary" :loading="creating" @click="submitCreate">创建</n-button>
         </div>
       </template>
     </n-modal>

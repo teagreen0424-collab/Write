@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { NButton, NInput, NSpin, useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { OutlineApplyResult, OutlineVolumeDraft } from '../types'
+import { createAsyncScope } from '../utils/asyncScope'
 
 const props = defineProps<{
   novelId: string
@@ -19,26 +20,56 @@ const sourceText = ref('')
 const plan = ref<OutlineVolumeDraft | null>(null)
 const loading = ref(false)
 const applying = ref(false)
+const asyncScope = createAsyncScope(() => JSON.stringify([props.novelId, props.conversationId ?? '', props.messageId ?? '']))
+let previewSequence = 0
+let applySequence = 0
+let sourceRevision = 0
+let planRevision = 0
+watch(sourceText, () => {
+  sourceRevision += 1
+  previewSequence += 1
+  loading.value = false
+}, { flush: 'sync' })
+watch(() => JSON.stringify(plan.value), () => { planRevision += 1 }, { flush: 'sync' })
+watch(() => [props.novelId, props.conversationId, props.messageId], () => {
+  asyncScope.invalidate()
+  previewSequence += 1
+  applySequence += 1
+  sourceText.value = ''
+  plan.value = null
+  loading.value = false
+  applying.value = false
+}, { flush: 'sync' })
 
 async function preview() {
+  if (!props.novelId || loading.value || applying.value) return
   if (!props.messageId && !sourceText.value.trim()) {
     toast.warning('请先写下这卷的构思')
     return
   }
+  const scope = asyncScope.capture()
+  const sequence = ++previewSequence
+  const novelId = props.novelId, conversationId = props.conversationId, messageId = props.messageId
+  const submittedSource = sourceText.value.trim()
+  const expectedSourceRevision = sourceRevision
+  const expectedPlanRevision = planRevision
+  const isCurrent = () => asyncScope.isCurrent(scope) && sequence === previewSequence && sourceRevision === expectedSourceRevision
   loading.value = true
   try {
-    plan.value = props.conversationId && props.messageId
-      ? await api.previewMessageOutline(props.conversationId, props.messageId)
-      : await api.previewOutline(props.novelId, sourceText.value.trim())
+    const result = conversationId && messageId
+      ? await api.previewMessageOutline(conversationId, messageId)
+      : await api.previewOutline(novelId, submittedSource)
+    if (isCurrent() && planRevision === expectedPlanRevision) plan.value = result
   } catch (error) {
-    toast.error((error as Error).message)
+    if (isCurrent()) toast.error((error as Error).message)
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
 async function apply() {
-  const draft = plan.value
+  if (!props.novelId || applying.value || loading.value) return
+  const draft: OutlineVolumeDraft | null = plan.value ? JSON.parse(JSON.stringify(plan.value)) : null
   if (!draft || !draft.title.trim()) {
     toast.warning('卷标题不能为空')
     return
@@ -47,19 +78,35 @@ async function apply() {
     toast.warning('请至少保留一个章节')
     return
   }
+  const scope = asyncScope.capture()
+  const sequence = ++applySequence
+  const novelId = props.novelId, conversationId = props.conversationId, messageId = props.messageId
+  const expectedSourceRevision = sourceRevision
+  const expectedPlanRevision = planRevision
+  const isCurrent = () => asyncScope.isCurrent(scope) && sequence === applySequence
   applying.value = true
   try {
-    const result = props.conversationId && props.messageId
-      ? await api.applyMessageOutline(props.conversationId, props.messageId, draft)
-      : await api.applyOutline(props.novelId, draft)
+    const result = conversationId && messageId
+      ? await api.applyMessageOutline(conversationId, messageId, draft)
+      : await api.applyOutline(novelId, draft)
+    if (!isCurrent()) return
+    if (sourceRevision !== expectedSourceRevision || planRevision !== expectedPlanRevision) {
+      toast.success('大纲已追加到作品，当前新增编辑已保留')
+      return
+    }
     toast.success('大纲已追加到作品')
     emit('applied', result)
   } catch (error) {
-    toast.error((error as Error).message)
+    if (isCurrent()) toast.error((error as Error).message)
   } finally {
-    applying.value = false
+    if (isCurrent()) applying.value = false
   }
 }
+onBeforeUnmount(() => {
+  asyncScope.dispose()
+  previewSequence += 1
+  applySequence += 1
+})
 </script>
 
 <template>

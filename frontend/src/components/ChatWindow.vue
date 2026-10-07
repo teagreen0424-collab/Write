@@ -1,22 +1,46 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { NButton, NEmpty, NInput, useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { ChatMessage, Conversation, Novel } from '../types'
 import MessageBubble from './MessageBubble.vue'
 
-const props = defineProps<{ conversation: Conversation | null; novels: Novel[] }>()
+const props = defineProps<{ conversation: Conversation | null; novels: Novel[]; conversationIds?: string[] }>()
 const emit = defineEmits<{
   (e: 'changed'): void; (e: 'promote'): void; (e: 'move'): void
   (e: 'open-outline', novelId: string): void
   (e: 'open-writing', novelId: string, chapterId: string): void
+  (e: 'dirty-change', dirty: boolean): void
 }>()
 
 const toast = useMessage()
-const messages = ref<ChatMessage[]>([])
-const input = ref('')
-const streaming = ref(false)
-const streamingText = ref('')
+interface ChatState {
+  messages: ChatMessage[]
+  input: string
+  streaming: boolean
+  streamingText: string
+  replyNotice: string
+  loadId: number
+}
+const states = reactive(new Map<string, ChatState>())
+let alive = true
+const conversationScope = () => props.conversation
+  ? JSON.stringify([props.conversation.id, props.conversation.novel_id]) : ''
+function stateFor(scope: string): ChatState {
+  if (!states.has(scope)) states.set(scope, reactive({ messages: [], input: '', streaming: false, streamingText: '', replyNotice: '', loadId: 0 }))
+  return states.get(scope)!
+}
+const currentState = computed(() => conversationScope() ? stateFor(conversationScope()) : null)
+const messages = computed(() => currentState.value?.messages ?? [])
+const input = computed({ get: () => currentState.value?.input ?? '', set: (text: string) => {
+  if (currentState.value) currentState.value.input = text
+} })
+const streaming = computed(() => !!props.conversation && [...states.entries()].some(([scope, state]) =>
+  JSON.parse(scope)[0] === props.conversation!.id && state.streaming,
+))
+const streamingText = computed(() => currentState.value?.streamingText ?? '')
+const replyNotice = computed(() => currentState.value?.replyNotice ?? '')
+const dirty = computed(() => [...states.values()].some((state) => !!state.input.trim()))
 const listEl = ref<HTMLElement | null>(null)
 
 const isGlobal = computed(() => !!props.conversation && !props.conversation.novel_id)
@@ -25,28 +49,36 @@ const novelLabel = computed(() => {
   return props.novels.find((n) => n.id === props.conversation!.novel_id)?.title ?? '作品'
 })
 
-async function loadMessages() {
-  if (!props.conversation) {
-    messages.value = []
-    return
-  }
+async function loadMessages(conversationId = props.conversation?.id, scope = conversationScope()) {
+  if (!conversationId || !scope || !alive) return false
+  const state = stateFor(scope)
+  const requestId = ++state.loadId
   try {
-    messages.value = await api.listMessages(props.conversation.id)
-    scrollToBottom()
+    const loaded = await api.listMessages(conversationId)
+    if (!alive || requestId !== state.loadId) return false
+    state.messages = loaded.filter((item) => item.conversation_id === conversationId)
+    if (scope === conversationScope()) scrollToBottom()
+    return true
   } catch (e) {
-    toast.error((e as Error).message)
+    if (alive && requestId === state.loadId && scope === conversationScope()) toast.error((e as Error).message)
+    return false
   }
 }
 
 async function send() {
   const text = input.value.trim()
   if (!text || streaming.value || !props.conversation) return
-  input.value = ''
-  streaming.value = true
-  streamingText.value = ''
-  messages.value.push({
+  const conversationId = props.conversation.id
+  const scope = conversationScope()
+  const state = stateFor(scope)
+  state.loadId += 1
+  state.input = ''
+  state.streaming = true
+  state.streamingText = ''
+  state.replyNotice = ''
+  state.messages.push({
     id: 'local-' + Date.now(),
-    conversation_id: props.conversation.id,
+    conversation_id: conversationId,
     role: 'user',
     content: text,
     meta: null,
@@ -54,42 +86,79 @@ async function send() {
   })
   scrollToBottom()
   try {
-    await api.sendMessage(props.conversation.id, text, {
+    await api.sendMessage(conversationId, text, {
       onToken: (t) => {
-        streamingText.value += t
-        scrollToBottom()
+        if (!alive || states.get(scope) !== state) return
+        state.streamingText += t
+        if (scope === conversationScope()) scrollToBottom()
       },
-      onDone: () => {
-        streaming.value = false
-        streamingText.value = ''
-        loadMessages()
+      onDone: async () => {
+        state.streaming = false
+        if (!alive || states.get(scope) !== state) return
+        const loaded = await loadMessages(conversationId, scope)
+        if (!alive || states.get(scope) !== state) return
+        if (loaded) state.streamingText = ''
+        else state.replyNotice = '回复已保存，但历史消息读取未完成，以下片段可复制保留：'
+        if (props.conversation?.id === conversationId && scope !== conversationScope()) await loadMessages()
+        if (!alive) return
         emit('changed')
       },
-      onError: (err) => {
-        streaming.value = false
-        streamingText.value = ''
-        toast.error(err)
-        loadMessages()
+      onError: async (err) => {
+        state.streaming = false
+        state.replyNotice = '回复未完整结束，以下片段可复制保留：'
+        if (!alive) return
+        if (scope === conversationScope()) toast.error(err)
+        await loadMessages(conversationId, scope)
       },
     })
   } catch (e) {
-    streaming.value = false
-    streamingText.value = ''
-    toast.error((e as Error).message)
+    state.streaming = false
+    state.replyNotice = '回复未完整结束，以下片段可复制保留：'
+    if (alive && scope === conversationScope()) toast.error((e as Error).message)
   }
 }
 
 function scrollToBottom() {
   nextTick(() => {
-    if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight
+    if (alive && listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight
   })
 }
 
 watch(
-  () => props.conversation?.id,
-  () => loadMessages(),
-  { immediate: true },
+  conversationScope,
+  (scope, previousScope) => {
+    if (scope && previousScope && JSON.parse(scope)[0] === JSON.parse(previousScope)[0]) {
+      const previous = states.get(previousScope)
+      const next = stateFor(scope)
+      if (previous?.input) {
+        next.input = next.input && next.input !== previous.input ? previous.input + '\n' + next.input : previous.input
+        previous.input = ''
+      }
+    }
+    if (!currentState.value?.streaming) void loadMessages()
+  },
+  { immediate: true, flush: 'sync' },
 )
+watch(dirty, (value) => emit('dirty-change', value), { immediate: true, flush: 'sync' })
+watch(() => props.conversationIds, (ids) => {
+  if (!ids) return
+  const existing = new Set(ids)
+  for (const scope of states.keys()) {
+    if (!existing.has(JSON.parse(scope)[0])) states.delete(scope)
+  }
+}, { flush: 'sync' })
+function beforeUnload(event: BeforeUnloadEvent) {
+  if (!dirty.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+window.addEventListener('beforeunload', beforeUnload)
+onBeforeUnmount(() => {
+  alive = false
+  for (const state of states.values()) state.loadId += 1
+  window.removeEventListener('beforeunload', beforeUnload)
+  emit('dirty-change', false)
+})
 </script>
 
 <template>
@@ -109,7 +178,7 @@ watch(
       <div ref="listEl" class="message-list">
         <MessageBubble
           v-for="m in messages"
-          :key="m.id"
+          :key="conversationScope() + ':' + m.id"
           :message="m"
           :novel-id="conversation.novel_id"
           @open-outline="emit('open-outline', $event)"
@@ -119,6 +188,8 @@ watch(
           <div class="streaming-bubble">{{ streamingText || '正在思考…' }}</div>
         </div>
       </div>
+
+      <p v-if="!streaming && streamingText" class="incomplete-reply">{{ replyNotice }}{{ streamingText }}</p>
 
       <div class="input-bar">
         <n-input
@@ -205,6 +276,7 @@ watch(
   border-top: 1px solid #e5e5e5;
   align-items: flex-end;
 }
+.incomplete-reply { margin: 0; padding: 8px 16px; color: #92400e; white-space: pre-wrap; max-height: 180px; overflow: auto; }
 .empty {
   margin: auto;
 }

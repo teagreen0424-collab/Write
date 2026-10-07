@@ -64,9 +64,14 @@ _SETTING_TYPES = {"character", "world_setting", "foreshadowing"}
 def preview_settings(db: Session, conversation_id: str, message_id: str) -> dict:
     conv, message = source_message(db, conversation_id, message_id)
     result = inject_idea.inject_idea(db, conv.novel_id, message.content)
+    allowed = [(index, ch) for index, ch in enumerate(result["changes"])
+               if isinstance(ch, dict) and ch.get("type") in _SETTING_TYPES]
+    positions = {original: index for index, (original, _) in enumerate(allowed)}
     return {
         **result,
-        "changes": [ch for ch in result["changes"] if ch.get("type") in _SETTING_TYPES],
+        "changes": [ch for _, ch in allowed],
+        "failed": [{**item, "index": positions[item["index"]]}
+                   for item in result.get("failed", []) if item["index"] in positions],
     }
 
 

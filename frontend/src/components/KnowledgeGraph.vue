@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import { api } from '../api'
 import {
@@ -15,11 +15,19 @@ const emit = defineEmits<{ (e: 'edit', payload: { type: EntityType; id: string }
 
 const chartRef = ref<HTMLDivElement | null>(null)
 let chart: echarts.ECharts | null = null
+let requestId = 0
+let alive = true
+const loadError = ref('')
 
 const NODE_TYPES: EntityType[] = ['character', 'location', 'world_setting', 'timeline_event', 'foreshadowing']
 
 async function loadAndRender() {
-  if (!props.novelId || !chart) return
+  const currentRequest = ++requestId
+  const novelId = props.novelId
+  const currentChart = chart
+  loadError.value = ''
+  currentChart?.clear()
+  if (!novelId || !currentChart || !alive) return
   const entities = {
     character: [] as EntityRecord[],
     location: [] as EntityRecord[],
@@ -28,8 +36,13 @@ async function loadAndRender() {
     foreshadowing: [] as EntityRecord[],
     relationship: [] as EntityRecord[],
   }
-  for (const t of ENTITY_TYPES) {
-    entities[t.type] = await api.listEntities(props.novelId, t.apiPath)
+  try {
+    const loaded = await Promise.all(ENTITY_TYPES.map((t) => api.listEntities(novelId, t.apiPath)))
+    if (!alive || currentRequest !== requestId || novelId !== props.novelId || chart !== currentChart) return
+    ENTITY_TYPES.forEach((t, index) => { entities[t.type] = loaded[index] })
+  } catch (error) {
+    if (alive && currentRequest === requestId) loadError.value = (error as Error).message
+    return
   }
   const relationships = entities.relationship as unknown as Relationship[]
 
@@ -47,13 +60,14 @@ async function loadAndRender() {
       })
     }
   }
-  const links = relationships.map((r) => ({
+  const nodeIds = new Set(nodes.map((node) => node.id))
+  const links = relationships.filter((r) => nodeIds.has(r.subject_id) && nodeIds.has(r.object_id)).map((r) => ({
     source: r.subject_id,
     target: r.object_id,
     label: { show: true, formatter: r.relation_type },
   }))
 
-  chart.setOption(
+  currentChart.setOption(
     {
       tooltip: {},
       legend: [{ data: categories.map((c) => c.name) }],
@@ -81,8 +95,8 @@ function handleResize() {
   chart?.resize()
 }
 
-onMounted(() => {
-  if (chartRef.value) {
+function initializeChart() {
+  if (chartRef.value && !chart) {
     chart = echarts.init(chartRef.value)
     chart.on('click', (params: any) => {
       if (params.dataType === 'node' && params.data?.type && params.data?.id) {
@@ -90,18 +104,22 @@ onMounted(() => {
       }
     })
     window.addEventListener('resize', handleResize)
-    loadAndRender()
   }
-})
+}
 
 watch(
-  () => props.novelId,
+  [() => props.novelId, chartRef],
   () => {
-    if (props.novelId) loadAndRender()
+    if (!chartRef.value) { chart?.dispose(); chart = null }
+    initializeChart()
+    void loadAndRender()
   },
+  { flush: 'post' },
 )
 
 onBeforeUnmount(() => {
+  alive = false
+  requestId += 1
   window.removeEventListener('resize', handleResize)
   chart?.dispose()
   chart = null
@@ -111,7 +129,8 @@ onBeforeUnmount(() => {
 <template>
   <div class="graph-wrap">
     <div v-if="!novelId" class="hint">请先选择或创建作品</div>
-    <div v-else ref="chartRef" class="chart"></div>
+    <div v-if="loadError" class="hint">图谱加载失败：{{ loadError }} <button @click="loadAndRender">重试</button></div>
+    <div v-if="novelId" ref="chartRef" class="chart"></div>
   </div>
 </template>
 

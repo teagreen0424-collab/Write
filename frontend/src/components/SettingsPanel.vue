@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   NButton,
   NEmpty,
@@ -14,6 +14,7 @@ import {
 } from 'naive-ui'
 import { api } from '../api'
 import { chapterLabel } from '../utils/chapter'
+import { createAsyncScope } from '../utils/asyncScope'
 import {
   ENTITY_TYPES,
   getEntityConfig,
@@ -27,6 +28,7 @@ const props = defineProps<{
   focusTarget?: { type: EntityType; id: string } | null
   refreshKey?: number
 }>()
+const emit = defineEmits<{ (e: 'dirty-change', dirty: boolean): void }>()
 
 const message = useMessage()
 
@@ -34,6 +36,15 @@ const selectedType = ref<EntityType>('character')
 const editingId = ref<string | null>(null)
 const loading = ref(false)
 const rebuildingIndex = ref(false)
+const saving = ref(false)
+const savingAnchor = ref(false)
+const asyncScope = createAsyncScope(() => props.novelId)
+let entityLoadSequence = 0
+let metaLoadSequence = 0
+let selectionRevision = 0
+let anchorRevision = 0
+let anchorSaveRevision = 0
+let pendingFocus: { type: EntityType; id: string } | null = null
 const emptyEntities = (): Record<EntityType, EntityRecord[]> => ({
   character: [],
   location: [],
@@ -44,15 +55,32 @@ const emptyEntities = (): Record<EntityType, EntityRecord[]> => ({
 })
 const allEntities = ref<Record<EntityType, EntityRecord[]>>(emptyEntities())
 const form = ref<Record<string, any>>({})
+const formBaseline = ref('{}')
+const formFingerprint = computed(() => JSON.stringify(form.value))
+const entityDirty = computed(() => formFingerprint.value !== formBaseline.value)
 
 // 文风基准：决定定稿时是否计算文风漂移分
 const styleAnchor = ref('')
+const anchorBaseline = ref('')
 const anchorChapterId = ref<string | null>(null)
 const chapters = ref<Chapter[]>([])
 const anchorSet = computed(() => styleAnchor.value.trim().length > 0)
 const chapterOptions = computed(() =>
   chapters.value.map((c) => ({ label: chapterLabel(c), value: c.id })),
 )
+const dirty = computed(() => entityDirty.value || styleAnchor.value !== anchorBaseline.value || saving.value || savingAnchor.value)
+watch(dirty, (value) => emit('dirty-change', value), { immediate: true, flush: 'sync' })
+watch(styleAnchor, () => { anchorRevision += 1 }, { flush: 'sync' })
+
+function confirmEntityChange(): boolean {
+  return (!entityDirty.value && !saving.value) || window.confirm('当前设定有未保存修改或正在保存，确定放弃本页编辑并继续吗？')
+}
+
+function guardUnload(event: BeforeUnloadEvent) {
+  if (!dirty.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
 
 // 从选中章节取正文前 800 字作为基准
 function pickAnchorChapter(id: string | null) {
@@ -62,39 +90,61 @@ function pickAnchorChapter(id: string | null) {
 }
 
 async function saveAnchor() {
+  if (!props.novelId || savingAnchor.value) return
+  const scope = asyncScope.capture()
+  const submitted = styleAnchor.value
+  anchorSaveRevision += 1
+  savingAnchor.value = true
   try {
-    await api.updateNovel(props.novelId, { style_anchor: styleAnchor.value })
+    await api.updateNovel(scope.identity, { style_anchor: submitted })
+    if (!asyncScope.isCurrent(scope)) return
+    anchorBaseline.value = submitted
     message.success('已保存文风基准')
   } catch (e) {
-    message.error((e as Error).message)
+    if (asyncScope.isCurrent(scope)) message.error((e as Error).message)
+  } finally {
+    if (asyncScope.isCurrent(scope)) savingAnchor.value = false
   }
 }
 
 async function rebuildIndex() {
   if (!props.novelId || !window.confirm('为本作品重建设定检索索引？不会修改设定或章节正文。')) return
+  if (rebuildingIndex.value) return
+  const scope = asyncScope.capture()
   rebuildingIndex.value = true
   try {
-    const result = await api.rebuildSettingIndex(props.novelId)
+    const result = await api.rebuildSettingIndex(scope.identity)
+    if (!asyncScope.isCurrent(scope)) return
     if (result.failed) {
       message.warning(`已索引 ${result.indexed} 条，${result.failed} 条失败；可稍后重试`)
     } else {
       message.success(`已重建 ${result.indexed} 条设定索引`)
     }
   } catch (error) {
-    message.error((error as Error).message)
+    if (asyncScope.isCurrent(scope)) message.error((error as Error).message)
   } finally {
-    rebuildingIndex.value = false
+    if (asyncScope.isCurrent(scope)) rebuildingIndex.value = false
   }
 }
 
 async function loadNovelMeta() {
+  if (!props.novelId) return
+  const scope = asyncScope.capture()
+  const sequence = ++metaLoadSequence
+  const expectedAnchorRevision = anchorRevision
+  const expectedSaveRevision = anchorSaveRevision
   try {
-    const novels = await api.listNovels()
-    const novel = novels.find((n) => n.id === props.novelId)
-    styleAnchor.value = novel?.style_anchor ?? ''
-    chapters.value = await api.listChapters(props.novelId)
+    const [novels, loadedChapters] = await Promise.all([api.listNovels(), api.listChapters(scope.identity)])
+    if (!asyncScope.isCurrent(scope) || sequence !== metaLoadSequence) return
+    const novel = novels.find((n) => n.id === scope.identity)
+    if (anchorSaveRevision === expectedSaveRevision && !savingAnchor.value) {
+      const untouched = anchorRevision === expectedAnchorRevision && styleAnchor.value === anchorBaseline.value
+      anchorBaseline.value = novel?.style_anchor ?? ''
+      if (untouched) styleAnchor.value = anchorBaseline.value
+    }
+    chapters.value = loadedChapters
   } catch (e) {
-    message.error((e as Error).message)
+    if (asyncScope.isCurrent(scope) && sequence === metaLoadSequence) message.error((e as Error).message)
   }
 }
 
@@ -132,18 +182,24 @@ function displayName(item: EntityRecord): string {
   return item[cfg.nameField] ?? ''
 }
 
-async function loadAll() {
+async function loadAll(reportError = true): Promise<boolean> {
+  if (!props.novelId) return false
+  const scope = asyncScope.capture()
+  const sequence = ++entityLoadSequence
   loading.value = true
   try {
     const result = emptyEntities()
-    for (const t of ENTITY_TYPES) {
-      result[t.type] = await api.listEntities(props.novelId, t.apiPath)
-    }
+    const lists = await Promise.all(ENTITY_TYPES.map((t) => api.listEntities(scope.identity, t.apiPath)))
+    if (!asyncScope.isCurrent(scope) || sequence !== entityLoadSequence) return false
+    ENTITY_TYPES.forEach((t, index) => { result[t.type] = lists[index] })
     allEntities.value = result
+    if (pendingFocus) applyFocus(pendingFocus)
+    return true
   } catch (e) {
-    message.error((e as Error).message)
+    if (reportError && asyncScope.isCurrent(scope) && sequence === entityLoadSequence) message.error((e as Error).message)
+    return false
   } finally {
-    loading.value = false
+    if (asyncScope.isCurrent(scope) && sequence === entityLoadSequence) loading.value = false
   }
 }
 
@@ -155,20 +211,34 @@ function resetForm() {
     else next[f.key] = ''
   }
   form.value = next
+  formBaseline.value = JSON.stringify(next)
 }
 
 function startCreate() {
+  if (!props.novelId || !confirmEntityChange()) return
+  selectionRevision += 1
+  pendingFocus = null
   editingId.value = null
   resetForm()
 }
 
 function changeType(value: string) {
+  if (value === selectedType.value || !confirmEntityChange()) return
+  selectionRevision += 1
+  pendingFocus = null
   selectedType.value = value as EntityType
   editingId.value = null
   resetForm()
 }
 
 function startEdit(item: EntityRecord) {
+  if (!allEntities.value[selectedType.value].some((entity) => entity.id === item.id) || !confirmEntityChange()) return
+  populateForm(item)
+}
+
+function populateForm(item: EntityRecord) {
+  selectionRevision += 1
+  pendingFocus = null
   editingId.value = item.id
   const cfg = config.value
   const next: Record<string, any> = {}
@@ -177,6 +247,7 @@ function startEdit(item: EntityRecord) {
     next[f.key] = f.type === 'json' ? (v == null ? '' : JSON.stringify(v, null, 2)) : (v ?? '')
   }
   form.value = next
+  formBaseline.value = JSON.stringify(next)
 }
 
 function validate(): string | null {
@@ -205,7 +276,11 @@ function buildPayload(): Record<string, unknown> {
   for (const f of cfg.fields) {
     const raw = form.value[f.key]
     if (f.type === 'json') {
-      if (raw == null || String(raw).trim() === '') continue
+      if (raw == null || String(raw).trim() === '') {
+        // 清空输入表示清空已存数据；省略字段会让旧标签/关联继续保留。
+        payload[f.key] = f.key === 'extras' ? {} : []
+        continue
+      }
       payload[f.key] = JSON.parse(raw)
     } else {
       payload[f.key] = raw
@@ -215,6 +290,7 @@ function buildPayload(): Record<string, unknown> {
 }
 
 async function save() {
+  if (!props.novelId || saving.value) return
   const err = validate()
   if (err) {
     message.error(err)
@@ -227,51 +303,96 @@ async function save() {
     message.error('JSON 字段格式错误')
     return
   }
+  const scope = asyncScope.capture()
+  const entityType = selectedType.value
+  const apiPath = config.value.apiPath
+  const itemId = editingId.value
+  const selection = selectionRevision
+  const submittedForm = formFingerprint.value
+  saving.value = true
   try {
-    if (editingId.value) {
-      await api.updateEntity(props.novelId, config.value.apiPath, editingId.value, payload)
-      message.success('已保存')
-    } else {
-      await api.createEntity(props.novelId, config.value.apiPath, payload)
-      message.success('已创建')
+    const saved = itemId
+      ? await api.updateEntity(scope.identity, apiPath, itemId, payload)
+      : await api.createEntity(scope.identity, apiPath, payload)
+    if (!asyncScope.isCurrent(scope)) return
+    if (selection === selectionRevision && selectedType.value === entityType && editingId.value === itemId) {
+      editingId.value = saved.id
+      formBaseline.value = submittedForm
     }
+    message.success(itemId ? '已保存' : '已创建')
     await loadAll()
   } catch (e) {
-    message.error((e as Error).message)
+    if (asyncScope.isCurrent(scope)) message.error((e as Error).message)
+  } finally {
+    if (asyncScope.isCurrent(scope)) saving.value = false
   }
 }
 
 async function remove() {
-  if (!editingId.value) return
+  if (!props.novelId || !editingId.value || saving.value) return
   if (!window.confirm('确认删除该记录？')) return
+  const scope = asyncScope.capture()
+  const itemId = editingId.value
+  const apiPath = config.value.apiPath
+  const entityType = selectedType.value
+  const selection = selectionRevision
+  const submittedForm = formFingerprint.value
+  saving.value = true
   try {
-    await api.deleteEntity(props.novelId, config.value.apiPath, editingId.value)
-    message.success('已删除')
-    editingId.value = null
-    resetForm()
-    await loadAll()
+    await api.deleteEntity(scope.identity, apiPath, itemId)
+    if (!asyncScope.isCurrent(scope)) return
+    entityLoadSequence += 1
+    allEntities.value[entityType] = allEntities.value[entityType].filter((item) => item.id !== itemId)
+    if (pendingFocus?.type === entityType && pendingFocus.id === itemId) pendingFocus = null
+    if (selectedType.value === entityType && editingId.value === itemId) {
+      editingId.value = null
+      if (selection === selectionRevision && formFingerprint.value === submittedForm) resetForm()
+      else formBaseline.value = '{}'
+    }
+    const refreshed = await loadAll(false)
+    if (asyncScope.isCurrent(scope)) {
+      if (refreshed) message.success('已删除')
+      else message.warning('记录已删除，但列表刷新失败；已移除本页记录，请稍后刷新。')
+    }
   } catch (e) {
-    message.error((e as Error).message)
+    if (asyncScope.isCurrent(scope)) message.error((e as Error).message)
+  } finally {
+    if (asyncScope.isCurrent(scope)) saving.value = false
   }
 }
 
 function applyFocus(target: { type: EntityType; id: string }) {
-  selectedType.value = target.type
   const item = allEntities.value[target.type]?.find((e) => e.id === target.id)
-  if (item) startEdit(item)
+  if (!item) { pendingFocus = target; return }
+  pendingFocus = null
+  if (!confirmEntityChange()) return
+  selectedType.value = target.type
+  populateForm(item)
 }
 
 watch(
   () => props.novelId,
   () => {
+    asyncScope.invalidate()
+    selectionRevision += 1
+    pendingFocus = null
+    editingId.value = null
+    allEntities.value = emptyEntities()
+    loading.value = false
+    saving.value = false
+    savingAnchor.value = false
+    rebuildingIndex.value = false
+    styleAnchor.value = ''
+    anchorBaseline.value = ''
+    chapters.value = []
+    resetForm()
+    anchorChapterId.value = null
     if (props.novelId) {
-      resetForm()
-      anchorChapterId.value = null
       loadAll()
       loadNovelMeta()
     }
   },
-  { immediate: true },
+  { immediate: true, flush: 'sync' },
 )
 
 watch(
@@ -288,7 +409,12 @@ watch(
   },
 )
 
-onMounted(resetForm)
+onMounted(() => window.addEventListener('beforeunload', guardUnload))
+onBeforeUnmount(() => {
+  asyncScope.dispose()
+  window.removeEventListener('beforeunload', guardUnload)
+  emit('dirty-change', false)
+})
 </script>
 
 <template>
@@ -296,7 +422,7 @@ onMounted(resetForm)
     <div class="style-anchor">
       <div class="anchor-header">
         <span>文风基准</span>
-        <n-button size="small" type="primary" @click="saveAnchor">保存基准</n-button>
+        <n-button size="small" type="primary" :disabled="!novelId" :loading="savingAnchor" @click="saveAnchor">保存基准</n-button>
       </div>
       <div class="anchor-row">
         <n-select
@@ -311,7 +437,7 @@ onMounted(resetForm)
           未设置文风基准：点击“定稿沉淀”时不计算文风漂移分，质量曲线无漂移线。
         </span>
         <span v-else class="anchor-hint ok">
-          已设置基准（{{ styleAnchor.length }} 字）：点击“定稿沉淀”时比对并记录漂移分。
+          {{ styleAnchor === anchorBaseline ? '已保存基准' : '基准尚未保存' }}（{{ styleAnchor.length }} 字）：保存后，点击“定稿沉淀”时比对并记录漂移分。
         </span>
       </div>
       <n-input
@@ -398,8 +524,8 @@ onMounted(resetForm)
           </n-form-item>
         </n-form>
         <div class="actions">
-          <n-button type="primary" @click="save">保存</n-button>
-          <n-button v-if="editingId" type="error" @click="remove">删除</n-button>
+          <n-button type="primary" :disabled="!novelId" :loading="saving" @click="save">保存</n-button>
+          <n-button v-if="editingId" type="error" :disabled="saving" @click="remove">删除</n-button>
         </div>
       </div>
       </div>

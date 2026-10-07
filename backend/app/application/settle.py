@@ -1,16 +1,21 @@
 """定稿沉淀用例：settle_chapter + apply_suggestions。"""
 import json
 
+from fastapi import HTTPException
+from sqlalchemy import update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.application.auto_pilot import check_drift
 from app.application.consistency import consistency_check
-from app.application.memory import write_chapter_memory
+from app.application.memory import MemoryWriteResult, _slice_content, write_chapter_memory
 from app.application import setting_index
+from app.application.reference_resolution import resolve_references, failure
 from app.domain.entities import ChapterStatus
 from app.infrastructure.ai.llm_provider import LLMProvider
 from app.infrastructure.ai.prompts import SETTLE_SYSTEM, SETTLE_USER
 from app.infrastructure import repository as repos
+from app.infrastructure import models
 from app.interfaces import schemas
 
 llm = LLMProvider()
@@ -35,6 +40,17 @@ def _parse_json(raw: str) -> dict:
 
 
 def _build_suggestions(data: dict) -> list[dict]:
+    if not isinstance(data, dict):
+        raise ValueError("抽取结果必须是 JSON 对象")
+    if data.get("summary") is not None and not isinstance(data["summary"], str):
+        raise ValueError("摘要必须是文本")
+    for field, required in (("characters", "name"), ("events", "title"), ("foreshadowings", "content")):
+        values = data.get(field, [])
+        if not isinstance(values, list):
+            raise ValueError(f"{field} 必须是 JSON 数组")
+        for value in values:
+            if not isinstance(value, dict) or not isinstance(value.get(required), str) or not value[required].strip():
+                raise ValueError(f"{field} 建议缺少有效的 {required}")
     suggestions: list[dict] = []
     for c in data.get("characters", []):
         if isinstance(c, dict) and c.get("name"):
@@ -51,38 +67,106 @@ def _build_suggestions(data: dict) -> list[dict]:
 def settle_chapter(db: Session, novel_id: str, chapter_id: str) -> dict:
     """定稿一章：LLM 抽取摘要 + 新增人物/事件/伏笔建议，并落库摘要与状态。"""
     chapter = repos.ChapterRepo(db).get(novel_id, chapter_id)
+    source = {field: getattr(chapter, field) for field in ("title", "content", "directive")}
+    content = source["content"]
+    style_anchor = repos.NovelRepo(db).get(novel_id).style_anchor or ""
     messages = [
         {"role": "system", "content": SETTLE_SYSTEM},
-        {"role": "user", "content": SETTLE_USER.format(content=chapter.content)},
+        {"role": "user", "content": SETTLE_USER.format(content=content)},
     ]
-    raw = llm.complete(messages, temperature=0.2)
-    data = _parse_json(raw)
+    try:
+        raw = llm.complete(messages, temperature=0.2)
+    except Exception:  # noqa: BLE001  抽取失败发生在主写入前
+        raise HTTPException(status_code=502, detail="定稿抽取服务暂不可用，请稍后重试；章节未改动") from None
+    try:
+        data = _parse_json(raw)
+        suggestions = _build_suggestions(data)
+        summary = (data.get("summary") or "").strip() or content[:100]
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=502, detail="模型返回的定稿抽取格式无效，请重试；章节未改动") from None
 
-    summary = (data.get("summary") or "").strip() or chapter.content[:100]
-    repos.ChapterRepo(db).update(
-        novel_id, chapter_id, status=ChapterStatus.FINALIZED.value, summary=summary
-    )
+    # 模型等待期间允许另一请求保存；用数据库条件更新核对来源，不能凭缓存给新稿定稿。
+    db.rollback()
+    try:
+        changed = db.execute(
+            update(models.Chapter).where(
+                models.Chapter.novel_id == novel_id,
+                models.Chapter.id == chapter_id,
+                *(getattr(models.Chapter, field) == value for field, value in source.items()),
+            ).values(status=ChapterStatus.FINALIZED.value, summary=summary, drift_score=None)
+            .execution_options(synchronize_session=False)
+        )
+        if changed.rowcount != 1:
+            raise HTTPException(status_code=409, detail="定稿期间章节内容、标题或指令已变化；本次定稿未应用，请核对新稿后重试")
+        db.commit()
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="章节正在保存；本次定稿未应用，请核对最新稿后重试") from None
+    except Exception:
+        db.rollback()
+        raise
 
-    # 定稿后写入记忆（正文切片嵌入，失败降级不阻塞主流程）
-    write_chapter_memory(db, novel_id, chapter_id, chapter.content)
+    # 记忆降级不会撤销已保存定稿，但必须让作者知道当前可用片段与失败原因。
+    try:
+        memory = write_chapter_memory(db, novel_id, chapter_id, content)
+    except Exception:  # noqa: BLE001  提交后读取/服务异常也不能冒充主写入失败
+        db.rollback()
+        total = len(_slice_content(content))
+        memory = MemoryWriteResult(0, total, total, "storage_failed", [
+            "章节及摘要已保存，但记忆沉淀未完成；召回会排除不匹配当前正文的旧片段，请稍后重试定稿沉淀。"
+        ])
+    warnings = list(memory.warnings)
+    checks = {"drift": "skipped", "consistency": "completed"}
 
     # 文风漂移：有基准才比对并写 drift_score，无基准则留空
-    novel = repos.NovelRepo(db).get(novel_id)
     drift = None
-    if (novel.style_anchor or "").strip():
-        drift = check_drift(db, novel_id, chapter.content)
-        if drift is not None:
-            repos.ChapterRepo(db).update(novel_id, chapter_id, drift_score=drift)
+    if style_anchor.strip():
+        try:
+            score = check_drift(db, novel_id, content)
+            if score is None:
+                raise ValueError("漂移检查未返回结果")
+            db.rollback()
+            changed = db.execute(
+                update(models.Chapter).where(
+                    models.Chapter.novel_id == novel_id,
+                    models.Chapter.id == chapter_id,
+                    *(getattr(models.Chapter, field) == value for field, value in source.items()),
+                ).values(drift_score=score).execution_options(synchronize_session=False)
+            )
+            if changed.rowcount != 1:
+                db.rollback()
+                checks["drift"] = "failed"
+                warnings.append("文风漂移检查期间章节已变化；旧稿评分未写入当前章节，请重新检查最新稿。")
+            else:
+                db.commit()
+                drift = score
+                checks["drift"] = "completed"
+        except Exception:  # noqa: BLE001  已提交主结果不因后置复核失败冒充整次失败
+            db.rollback()
+            checks["drift"] = "failed"
+            warnings.append("章节及摘要已保存，但文风漂移检查未完成；请稍后重试检查。")
 
     # 定稿主流程只跑规则层一致性检查，语义层由「深度检查」按需触发
-    conflicts = consistency_check(db, novel_id, chapter.content).get("conflicts", [])
+    conflicts = []
+    try:
+        conflicts = consistency_check(db, novel_id, content).get("conflicts", [])
+        if not isinstance(conflicts, list):
+            raise ValueError("规则检查未返回有效结果")
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        conflicts = []
+        checks["consistency"] = "failed"
+        warnings.append("章节及摘要已保存，但规则一致性检查未完成；当前不能确认没有冲突，请稍后重试检查。")
 
     return {
         "chapter_id": chapter_id,
         "summary": summary,
-        "suggestions": _build_suggestions(data),
+        "suggestions": suggestions,
         "drift": drift,
         "conflicts": conflicts,
+        "memory": memory.as_dict(),
+        "warnings": warnings,
+        "checks": checks,
     }
 
 
@@ -94,12 +178,20 @@ def apply_suggestions(
     chapter_id 为当前定稿章节，落库伏笔时写入 planted_chapter_id。
     """
     created: list[dict] = []
-    for s in suggestions:
+    failed: list[dict] = []
+    repos.NovelRepo(db).get(novel_id)
+    if chapter_id:
+        repos.ChapterRepo(db).get(novel_id, chapter_id)
+    for index, s in enumerate(suggestions):
         if not isinstance(s, dict):
+            failed.append(failure(index, "", ValueError("建议必须是 JSON 对象")))
             continue
         kind = s.get("type")
         data = s.get("data") or {}
         try:
+            if not isinstance(kind, str) or kind not in {"character", "timeline_event", "foreshadowing"}:
+                raise ValueError(f"不支持的设定类型：{kind}")
+            data = resolve_references(db, novel_id, kind, data)
             if kind == "character":
                 obj = schemas.CharacterCreate(**data)
                 entity = setting_index.create_setting(db, repos.CharacterRepo, novel_id, **obj.model_dump())
@@ -115,6 +207,11 @@ def apply_suggestions(
                     payload["planted_chapter_id"] = chapter_id
                 entity = setting_index.create_setting(db, repos.ForeshadowingRepo, novel_id, **payload)
                 created.append({"type": kind, "id": entity.id})
-        except Exception:  # noqa: BLE001  跳过校验不通过的建议
+            else:
+                raise ValueError(f"不支持的设定类型：{kind}")
+            created[-1]["index"] = index
+        except Exception as error:  # noqa: BLE001  返回失败项，保留作者修正与重试的机会
+            db.rollback()
+            failed.append(failure(index, str(kind or ""), error))
             continue
-    return {"created": created}
+    return {"created": created, "failed": failed}

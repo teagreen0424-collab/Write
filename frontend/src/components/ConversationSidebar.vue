@@ -19,6 +19,7 @@ const emit = defineEmits<{
   (e: 'move', c: Conversation): void
   (e: 'enter-workbench', novelId: string): void
   (e: 'create-novel'): void
+  (e: 'delete-novel', novel: Novel): void
 }>()
 
 const expanded = ref<Set<string>>(new Set())
@@ -98,6 +99,9 @@ function onAction(key: string, c: Conversation) {
               <n-button size="tiny" quaternary title="进入工作台" @click="emit('enter-workbench', n.id)">
                 工作台
               </n-button>
+              <n-dropdown trigger="click" :options="[{ label: '删除作品', key: 'delete' }]" @select="emit('delete-novel', n)">
+                <n-button size="tiny" quaternary :title="n.title + '的作品操作'">…</n-button>
+              </n-dropdown>
             </div>
           </div>
           <div v-if="expanded.has(n.id)" class="conv-sublist">

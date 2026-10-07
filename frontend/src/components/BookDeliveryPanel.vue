@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton, NCheckbox, NModal, NSelect, NSwitch, useMessage } from 'naive-ui'
 import { api } from '../api'
+import { createAsyncScope, type AsyncScopeToken } from '../utils/asyncScope'
 import type {
   BookSummary, DeliveryFormat, DeliveryPreflight, DeliveryRequest, DeliveryScope,
 } from '../types'
@@ -19,6 +20,13 @@ const chapterIds = ref<string[]>([])
 const includeDrafts = ref(false)
 const report = ref<DeliveryPreflight | null>(null)
 const showConfirm = ref(false)
+const asyncScope = createAsyncScope(() => props.novelId)
+let summarySequence = 0
+let requestRevision = 0
+let checkSequence = 0
+let downloadSequence = 0
+let reportScope: AsyncScopeToken | null = null
+let reportRequest = ''
 
 const request = computed<DeliveryRequest>(() => ({
   format: format.value,
@@ -31,14 +39,30 @@ const volumeOptions = computed(() =>
   (summary.value?.volumes ?? []).map((v) => ({ label: v.title, value: v.id })),
 )
 const formatLabel = computed(() => ({ docx: 'DOCX', markdown: 'Markdown', txt: 'TXT' })[format.value])
+const requestFingerprint = computed(() => JSON.stringify(request.value))
 
-watch(() => JSON.stringify(request.value), () => {
+function clearReport() {
+  requestRevision += 1
   report.value = null
+  reportScope = null
+  reportRequest = ''
   showConfirm.value = false
-})
+  checking.value = false
+  downloading.value = false
+}
+
+function currentReport(): boolean {
+  return !!reportScope && asyncScope.isCurrent(reportScope) && reportRequest === requestFingerprint.value
+}
+
+watch(requestFingerprint, clearReport, { flush: 'sync' })
 watch(() => props.novelId, async (novelId) => {
+  asyncScope.invalidate()
+  clearReport()
+  const scopeToken = asyncScope.capture()
+  const sequence = ++summarySequence
   summary.value = null
-  report.value = null
+  loading.value = false
   scope.value = 'all'
   volumeId.value = ''
   chapterIds.value = []
@@ -47,13 +71,13 @@ watch(() => props.novelId, async (novelId) => {
   loading.value = true
   try {
     const result = await api.getBookSummary(novelId)
-    if (props.novelId === novelId) summary.value = result
+    if (asyncScope.isCurrent(scopeToken) && sequence === summarySequence) summary.value = result
   } catch (e) {
-    message.error((e as Error).message)
+    if (asyncScope.isCurrent(scopeToken) && sequence === summarySequence) message.error((e as Error).message)
   } finally {
-    loading.value = false
+    if (asyncScope.isCurrent(scopeToken) && sequence === summarySequence) loading.value = false
   }
-}, { immediate: true })
+}, { immediate: true, flush: 'sync' })
 
 function toggleChapter(id: string, checked: boolean) {
   chapterIds.value = checked
@@ -74,27 +98,46 @@ function validateSelection(): boolean {
 }
 
 async function runPreflight() {
-  if (!props.novelId || !validateSelection()) return
+  if (!props.novelId || checking.value || !validateSelection()) return
+  const scopeToken = asyncScope.capture()
+  const revision = requestRevision
+  const sequence = ++checkSequence
+  const fingerprint = requestFingerprint.value
+  const submitted: DeliveryRequest = JSON.parse(fingerprint)
+  const isCurrent = () => asyncScope.isCurrent(scopeToken) && revision === requestRevision && sequence === checkSequence
   checking.value = true
   report.value = null
+  reportScope = null
+  showConfirm.value = false
   try {
-    report.value = await api.preflightExport(props.novelId, request.value)
+    const result = await api.preflightExport(scopeToken.identity, submitted)
+    if (!isCurrent()) return
+    report.value = result
+    reportScope = scopeToken
+    reportRequest = fingerprint
   } catch (e) {
-    message.error((e as Error).message)
+    if (isCurrent()) message.error((e as Error).message)
   } finally {
-    checking.value = false
+    if (isCurrent()) checking.value = false
   }
 }
 
 async function confirmDownload() {
-  if (!summary.value || !report.value?.chapter_count) return
+  if (!summary.value || !report.value?.chapter_count || !currentReport() || downloading.value) return
+  const scopeToken = asyncScope.capture()
+  const revision = requestRevision
+  const sequence = ++downloadSequence
+  const submitted: DeliveryRequest = JSON.parse(requestFingerprint.value)
+  const filename = `${summary.value.title}.${submitted.format === 'markdown' ? 'md' : submitted.format}`
+  const isCurrent = () => asyncScope.isCurrent(scopeToken) && revision === requestRevision && sequence === downloadSequence
   downloading.value = true
   try {
-    const blob = await api.downloadBookFile(props.novelId, request.value)
+    const blob = await api.downloadBookFile(scopeToken.identity, submitted)
+    if (!isCurrent()) return
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `${summary.value.title}.${format.value === 'markdown' ? 'md' : format.value}`
+    link.download = filename
     document.body.appendChild(link)
     link.click()
     link.remove()
@@ -102,11 +145,12 @@ async function confirmDownload() {
     showConfirm.value = false
     message.success('文件已开始下载')
   } catch (e) {
-    message.error((e as Error).message)
+    if (isCurrent()) message.error((e as Error).message)
   } finally {
-    downloading.value = false
+    if (isCurrent()) downloading.value = false
   }
 }
+onBeforeUnmount(() => asyncScope.dispose())
 </script>
 
 <template>
