@@ -25,7 +25,7 @@ def _volume_id(node_id: str, nodes: dict) -> str:
 
 def book_summary(db: Session, novel_id: str) -> dict:
     novel = repos.NovelRepo(db).get(novel_id)
-    chapters = repos.ChapterRepo(db).list(novel_id)
+    chapters = repos.ChapterRepo(db).list_book_metadata(novel_id)
     nodes = {node.id: node for node in repos.OutlineRepo(db).list_all(novel_id)}
     entries = []
     for chapter in chapters:
@@ -36,7 +36,7 @@ def book_summary(db: Session, novel_id: str) -> dict:
             "seq": chapter.seq,
             "title": chapter.title,
             "status": chapter.status,
-            "word_count": count_words(chapter.content),
+            "word_count": chapter.word_count,
             "outline_node_id": chapter.outline_node_id,
             "volume_id": volume_id,
             "volume_title": volume.title if volume else "",

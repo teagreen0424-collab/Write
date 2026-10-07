@@ -15,6 +15,11 @@ def _chapter_word_count(content: str | None) -> int:
     return len("".join(content.split())) if content else 0
 
 
+def _chapter_is_written(content: str | None) -> bool:
+    """伏笔已写口径保留正文strip语义；无需为布尔结果拼接整段正文。"""
+    return bool((content or "").strip())
+
+
 class NovelRepo:
     """作品仓储。"""
 
@@ -212,6 +217,37 @@ class ChapterRepo:
             self.model.id, self.model.novel_id, self.model.seq, self.model.title,
             self.model.status, self.model.outline_node_id, self.model.created_at,
             self.model.updated_at, self.model.tension_score, self.model.drift_score,
+            func.lingmo_chapter_word_count(self.model.content).label("word_count"),
+        ).filter(self.model.novel_id == novel_id).order_by(self.model.seq).all()
+
+    def list_quality_curve(self, novel_id: str):
+        """质量曲线只读五个展示字段，绕过已缓存章节，保留调用方autoflush约定。"""
+        self._ensure_novel(novel_id)
+        return self.db.query(
+            self.model.seq, self.model.title, self.model.status,
+            self.model.tension_score, self.model.drift_score,
+        ).filter(self.model.novel_id == novel_id).order_by(self.model.seq).all()
+
+    def list_tracking_chapters(self, novel_id: str):
+        """伏笔聚合只取ID、序号与已写标记，正文不作为查询结果返回。"""
+        self._ensure_novel(novel_id)
+        self.db.connection().connection.driver_connection.create_function(
+            "lingmo_chapter_is_written", 1, _chapter_is_written, deterministic=True,
+        )
+        return self.db.query(
+            self.model.id, self.model.seq,
+            func.lingmo_chapter_is_written(self.model.content).label("is_written"),
+        ).filter(self.model.novel_id == novel_id).order_by(self.model.seq).all()
+
+    def list_book_metadata(self, novel_id: str):
+        """交付统计只取八个目录字段，复用准确Unicode字数回调。"""
+        self._ensure_novel(novel_id)
+        self.db.connection().connection.driver_connection.create_function(
+            "lingmo_chapter_word_count", 1, _chapter_word_count, deterministic=True,
+        )
+        return self.db.query(
+            self.model.id, self.model.seq, self.model.title, self.model.status,
+            self.model.outline_node_id, self.model.tension_score, self.model.drift_score,
             func.lingmo_chapter_word_count(self.model.content).label("word_count"),
         ).filter(self.model.novel_id == novel_id).order_by(self.model.seq).all()
 

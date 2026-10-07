@@ -13,7 +13,7 @@ LONG_PENDING_RATIO = 0.3
 def build_curve(db: Session, novel_id: str) -> dict:
     """全书质量曲线：每章张力分与漂移分，按 seq 升序。"""
     novel = NovelRepo(db).get(novel_id)
-    chapters = ChapterRepo(db).list(novel_id)
+    chapters = ChapterRepo(db).list_quality_curve(novel_id)
     return {
         "chapters": [
             {
@@ -50,9 +50,9 @@ def _suspended_key(item: dict) -> tuple:
 def aggregate_foreshadowings(db: Session, novel_id: str) -> dict:
     """伏笔追踪聚合：按状态分组并派生埋设序号与悬置章数。"""
     NovelRepo(db).get(novel_id)
-    chapters = ChapterRepo(db).list(novel_id)
+    chapters = ChapterRepo(db).list_tracking_chapters(novel_id)
     # 「已写章节」口径：正文非空的章节
-    written = [c for c in chapters if (c.content or "").strip()]
+    written = [c for c in chapters if c.is_written]
     seq_by_chapter = {c.id: c.seq for c in written}
     latest_seq = max(seq_by_chapter.values(), default=0)
     chapter_count = len(written)
