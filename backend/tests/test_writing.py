@@ -523,9 +523,10 @@ class WritingUseCaseTest(unittest.TestCase):
                         current = repos.ChapterRepo(db).get(novel_id, chapter_id)
                         original[field] = value
                         self.assertEqual({key: getattr(current, key) for key in original}, original)
-                        self.assertEqual((current.status, current.summary), ("draft", "原摘要"))
-                        self.assertEqual([c.text for c in repos.MemoryChunkRepo(db).list_by_novel(novel_id)], ["原正文"])
+                        self.assertEqual((current.status, current.summary), ("draft", ""))
+                        self.assertEqual(repos.MemoryChunkRepo(db).list_by_novel(novel_id), [])
                         self.assertEqual(db.query(models.ChapterRevision).filter_by(chapter_id=chapter_id).count(), 1)
+                        self.assertEqual(db.query(models.ChapterRevision).filter_by(chapter_id=chapter_id).one().summary, "原摘要")
             finally:
                 local_engine.dispose()
 

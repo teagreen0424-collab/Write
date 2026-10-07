@@ -9,6 +9,7 @@ from app.application.context import (
     build_context, chapter_excerpt, prior_chapters, prior_chapter_context, recent_history,
 )
 from app.application.revisions import (
+    AUTHOR_FIELDS,
     SOURCE_CONTINUE,
     SOURCE_REWRITE,
     update_chapter_with_revision,
@@ -34,6 +35,11 @@ def sse(data: dict) -> str:
 
 
 def _stream_error(exc: Exception) -> str:
+    if getattr(exc, "status_code", None) == 409:
+        return sse({
+            "type": "error", "message": getattr(exc, "detail", str(exc)),
+            "code": "chapter_write_conflict", "status": 409,
+        })
     return sse({
         "type": "error", "message": str(exc),
         "code": getattr(exc, "code", "generation_failed"),
@@ -188,6 +194,7 @@ def continue_chapter(
     try:
         repo = ChapterRepo(db)
         chapter = repo.get(novel_id, chapter_id)
+        source_fields = {field: getattr(chapter, field) for field in AUTHOR_FIELDS}
         position = f"第 {chapter.seq} 章《{chapter.title}》续写"
         context = build_context(db, novel_id, directive, position,
                                 chapter_seq=chapter.seq, outline_node_id=chapter.outline_node_id)
@@ -214,8 +221,9 @@ def continue_chapter(
             db,
             novel_id,
             chapter_id,
-            {"content": chapter.content + full},
+            {"content": source_fields["content"] + full},
             SOURCE_CONTINUE,
+            expected_author_fields=source_fields,
         )
         yield sse({"type": "done", "chapter": _chapter_dict(updated)})
     except Exception as exc:  # noqa: BLE001
@@ -239,6 +247,7 @@ def rewrite_passage(
     try:
         repo = ChapterRepo(db)
         chapter = repo.get(novel_id, chapter_id)
+        source_fields = {field: getattr(chapter, field) for field in AUTHOR_FIELDS}
         if passage not in chapter.content:
             raise ValueError("未在正文中找到待改写段落，请确认已选中原文")
 
@@ -263,7 +272,7 @@ def rewrite_passage(
         if not full.strip():
             raise ValueError("未生成有效改写内容，请重试")
 
-        new_content = chapter.content.replace(passage, full, 1)
+        new_content = source_fields["content"].replace(passage, full, 1)
         if preview:
             yield sse(
                 {
@@ -277,7 +286,8 @@ def rewrite_passage(
 
         # 替换正文属于覆盖既有作者内容：先留旧版本，再与替换同一事务提交
         updated = update_chapter_with_revision(
-            db, novel_id, chapter_id, {"content": new_content}, SOURCE_REWRITE
+            db, novel_id, chapter_id, {"content": new_content}, SOURCE_REWRITE,
+            expected_author_fields=source_fields,
         )
         yield sse({"type": "done", "chapter": _chapter_dict(updated)})
     except Exception as exc:  # noqa: BLE001

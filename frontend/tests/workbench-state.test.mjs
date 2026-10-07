@@ -607,6 +607,7 @@ test('定稿真实 SFC 作品/章节/作者字段 A→B→A 使旧提炼成功�
     const context = await panel('WritingPanel', { props: { initialChapterId: 'novel-a-chapter' }, api: { settleChapter: async () => ++calls === 1 ? old.promise : current.promise } })
     const oldRequest = context.vm.doSettle()
     context.props.novelId = 'novel-b'; context.props.novelId = 'novel-a'
+    await settle()
     const currentRequest = context.vm.doSettle()
     if (outcome === 'success') old.resolve(settleResult({ summary: '旧摘要' }))
     else old.reject(new Error('旧提炼失败'))

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton, NEmpty, NModal, NSpin, NTag, useMessage } from 'naive-ui'
 import { api } from '../api'
 import { countCharacters } from '../utils/chapter'
@@ -28,6 +28,36 @@ const listLoading = ref(false)
 const detailLoading = ref(false)
 const restoring = ref(false)
 const showRestoreConfirm = ref(false)
+let epoch = 0
+let disposed = false
+let listRequest = 0
+let detailRequest = 0
+let restoreRequest = 0
+interface RevisionScope { novelId: string; chapterId: string | null; epoch: number }
+const restoreContext = ref<(RevisionScope & { revisionId: string }) | null>(null)
+
+function captureScope(): RevisionScope {
+  return { novelId: props.novelId, chapterId: props.chapterId, epoch }
+}
+
+function isCurrent(scope: RevisionScope): boolean {
+  return !disposed && props.show && scope.epoch === epoch
+    && scope.novelId === props.novelId && scope.chapterId === props.chapterId
+}
+
+function invalidate() {
+  epoch += 1
+  listRequest += 1
+  detailRequest += 1
+  restoreRequest += 1
+  revisions.value = []
+  detail.value = null
+  restoreContext.value = null
+  showRestoreConfirm.value = false
+  listLoading.value = false
+  detailLoading.value = false
+  restoring.value = false
+}
 
 const currentWords = computed(() => countCharacters(props.currentContent))
 
@@ -52,73 +82,108 @@ function deltaLabel(revision: ChapterRevisionMeta): string {
   return delta > 0 ? `比当前多 ${delta} 字` : `比当前少 ${-delta} 字`
 }
 
-async function loadRevisions() {
-  if (!props.novelId || !props.chapterId) {
+async function loadRevisions(reportError = true): Promise<boolean> {
+  if (!props.show || !props.novelId || !props.chapterId || disposed) {
     revisions.value = []
-    return
+    return false
   }
+  const scope = captureScope()
+  const request = ++listRequest
+  const current = () => isCurrent(scope) && request === listRequest
   listLoading.value = true
   try {
-    revisions.value = await api.listChapterRevisions(props.novelId, props.chapterId)
+    const result = await api.listChapterRevisions(scope.novelId, scope.chapterId!)
+    if (!current()) return false
+    revisions.value = result
+    return true
   } catch (e) {
-    message.error((e as Error).message)
+    if (current() && reportError) message.error((e as Error).message)
+    return false
   } finally {
-    listLoading.value = false
+    if (current()) listLoading.value = false
   }
 }
 
 async function openDetail(revision: ChapterRevisionMeta) {
-  if (!props.chapterId) return
+  if (!props.show || !props.chapterId || disposed || restoring.value
+    || !revisions.value.some((item) => item.id === revision.id)) return
+  const scope = captureScope()
+  const request = ++detailRequest
+  const current = () => isCurrent(scope) && request === detailRequest
+  detail.value = null
+  showRestoreConfirm.value = false
+  restoreContext.value = null
   detailLoading.value = true
   try {
-    detail.value = await api.getChapterRevision(props.novelId, props.chapterId, revision.id)
+    const result = await api.getChapterRevision(scope.novelId, scope.chapterId!, revision.id)
+    if (!current()) return
+    if (result.id !== revision.id) { message.warning('历史版本响应不一致，请重新读取'); return }
+    detail.value = result
   } catch (e) {
-    message.error((e as Error).message)
+    if (current()) message.error((e as Error).message)
   } finally {
-    detailLoading.value = false
+    if (current()) detailLoading.value = false
   }
 }
 
 function close() {
+  if (restoring.value) return
+  invalidate()
   emit('update:show', false)
 }
 
 function askRestore() {
-  if (!detail.value) return
+  if (!props.show || !detail.value || detailLoading.value || restoring.value) return
+  restoreContext.value = { ...captureScope(), revisionId: detail.value.id }
   showRestoreConfirm.value = true
 }
 
 async function confirmRestore() {
-  if (!props.chapterId || !detail.value || restoring.value) return
+  const scope = restoreContext.value
+  if (!scope?.chapterId || !detail.value || restoring.value || !showRestoreConfirm.value
+    || !isCurrent(scope) || scope.revisionId !== detail.value.id) return
+  const request = ++restoreRequest
+  const current = () => isCurrent(scope) && request === restoreRequest
   restoring.value = true
   try {
     const chapter = await api.restoreChapterRevision(
-      props.novelId,
-      props.chapterId,
-      detail.value.id,
+      scope.novelId,
+      scope.chapterId,
+      scope.revisionId,
     )
+    if (!current()) return
+    if (chapter.novel_id !== scope.novelId || chapter.id !== scope.chapterId) {
+      message.warning('恢复响应与原章节不一致，请刷新核对保存结果')
+      return
+    }
     showRestoreConfirm.value = false
-    // 恢复前已把当前状态存为快照，列表需要重新拉取
-    await loadRevisions()
+    restoreContext.value = null
+    detailRequest += 1
     detail.value = null
+    // 正文已经恢复，先通知原编辑器；后置目录故障不能把成功写入误报成失败。
     emit('restored', chapter)
-    message.success('已恢复到所选版本，章节已回到草稿')
+    const refreshed = await loadRevisions(false)
+    if (!current()) return
+    if (refreshed) message.success('已恢复到所选版本，章节已回到草稿')
+    else message.warning('版本已恢复，章节已回到草稿；历史目录刷新失败，请重新打开核对')
   } catch (e) {
-    message.error((e as Error).message)
+    if (current()) message.error((e as Error).message)
   } finally {
-    restoring.value = false
+    if (current()) restoring.value = false
   }
 }
 
 watch(
-  () => [props.show, props.chapterId] as const,
+  () => [props.show, props.novelId, props.chapterId] as const,
   ([show]) => {
+    invalidate()
     if (!show) return
-    detail.value = null
     // 每次打开都重新读取，避免关闭期间保存的新版本没有出现在列表中。
     void loadRevisions()
   },
+  { immediate: true, flush: 'sync' },
 )
+onBeforeUnmount(() => { disposed = true; invalidate() })
 </script>
 
 <template>
@@ -127,7 +192,10 @@ watch(
     preset="card"
     title="版本历史"
     style="width: 1040px; max-width: 94vw"
-    @update:show="emit('update:show', $event)"
+    :closable="!restoring"
+    :mask-closable="!restoring"
+    :close-on-esc="!restoring"
+    @update:show="close"
   >
     <div class="revision-head">
       <div class="current-version">
@@ -202,12 +270,12 @@ watch(
 
     <template #footer>
       <div class="modal-actions">
-        <n-button @click="close">关闭</n-button>
+        <n-button :disabled="restoring" @click="close">关闭</n-button>
       </div>
     </template>
   </n-modal>
 
-  <n-modal v-model:show="showRestoreConfirm" preset="card" title="确认恢复此版本" style="width: 520px">
+  <n-modal v-model:show="showRestoreConfirm" :closable="!restoring" :mask-closable="!restoring" :close-on-esc="!restoring" preset="card" title="确认恢复此版本" style="width: 520px">
     <p v-if="detail">
       将把本章恢复到 v{{ detail.revision_no }}（{{ revisionSourceLabel(detail.source) }} ·
       {{ detail.word_count }} 字），当前正文会先另存为一条新版本，可再次恢复回来。
@@ -219,7 +287,7 @@ watch(
     </ul>
     <template #footer>
       <div class="modal-actions">
-        <n-button @click="showRestoreConfirm = false">取消</n-button>
+        <n-button :disabled="restoring" @click="showRestoreConfirm = false">取消</n-button>
         <n-button type="warning" :loading="restoring" @click="confirmRestore">确认恢复</n-button>
       </div>
     </template>
