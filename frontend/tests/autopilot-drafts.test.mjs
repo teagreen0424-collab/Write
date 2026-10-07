@@ -66,7 +66,8 @@ async function panel(overrides = {}) {
   }
   const source = componentScript
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
-    .replace(/import \* as echarts from ['"]echarts['"]/g, 'const { echarts } = globalThis.__autoHarness')
+    .replace(/import \* as echarts from ['"]echarts(?:\/core)?['"]/g, 'const echarts = { use() {}, ...globalThis.__autoHarness.echarts }')
+    .replace(/import \{([^}]+)\} from ['"]echarts\/(?:charts|components|renderers)['"]/g, 'const {$1} = {}')
     .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1} = globalThis.__autoHarness')
     .replace(/import \{ api, streamEvents \} from ['"]\.\.\/api['"]/g, 'const { api, streamEvents } = globalThis.__autoHarness')
     .replace(/from ['"]\.\.\/autopilotDrafts['"]/g, `from '${writerUrl}'`)

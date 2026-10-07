@@ -31,7 +31,7 @@ class SettingIndexTest(unittest.TestCase):
         ).all()
 
     def test_create_update_delete_never_leaves_old_setting(self):
-        with patch.object(setting_index.embedding, "embed", return_value=[[1.0, 0.0]]):
+        with patch.object(setting_index.embedding, "embed", side_effect=lambda texts: [[1.0, 0.0] for _ in texts]):
             person = setting_index.create_setting(
                 self.db, CharacterRepo, self.novel.id, name="吴迪", personality="胆小",
             )
@@ -50,7 +50,7 @@ class SettingIndexTest(unittest.TestCase):
             self.assertEqual(self.chunks(), [])
 
     def test_embed_failure_removes_old_index_but_keeps_entity_update(self):
-        with patch.object(setting_index.embedding, "embed", return_value=[[1.0]]):
+        with patch.object(setting_index.embedding, "embed", side_effect=lambda texts: [[1.0] for _ in texts]):
             person = setting_index.create_setting(
                 self.db, CharacterRepo, self.novel.id, name="吴迪", goal="发财",
             )
@@ -68,7 +68,7 @@ class SettingIndexTest(unittest.TestCase):
             text="正文片段", vector=[1.0],
         ))
         self.db.commit()
-        with patch.object(setting_index.embedding, "embed", return_value=[[1.0]]):
+        with patch.object(setting_index.embedding, "embed", side_effect=lambda texts: [[1.0] for _ in texts]):
             first = setting_index.rebuild_settings_index(self.db, self.novel.id)
             second = setting_index.rebuild_settings_index(self.db, self.novel.id)
         self.assertEqual(first, {"indexed": 1, "failed": 0})
@@ -78,7 +78,7 @@ class SettingIndexTest(unittest.TestCase):
         self.assertEqual(len(self.chunks("chapter_slice")), 1)
 
     def test_relationship_index_uses_current_character_names(self):
-        with patch.object(setting_index.embedding, "embed", return_value=[[1.0]]):
+        with patch.object(setting_index.embedding, "embed", side_effect=lambda texts: [[1.0] for _ in texts]):
             first = setting_index.create_setting(
                 self.db, CharacterRepo, self.novel.id, name="吴迪",
             )

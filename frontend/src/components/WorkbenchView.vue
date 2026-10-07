@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   NButton,
   NForm,
@@ -14,13 +14,14 @@ import {
 import { api } from '../api'
 import type { EntityType, Novel } from '../types'
 import { createAsyncScope } from '../utils/asyncScope'
-import SettingsPanel from './SettingsPanel.vue'
-import KnowledgeGraph from './KnowledgeGraph.vue'
-import WritingPanel from './WritingPanel.vue'
-import OutlinePanel from './OutlinePanel.vue'
-import AutopilotPanel from './AutopilotPanel.vue'
-import ForeshadowingTracking from './ForeshadowingTracking.vue'
-import BookDeliveryPanel from './BookDeliveryPanel.vue'
+
+const SettingsPanel = defineAsyncComponent(() => import('./SettingsPanel.vue'))
+const KnowledgeGraph = defineAsyncComponent(() => import('./KnowledgeGraph.vue'))
+const WritingPanel = defineAsyncComponent(() => import('./WritingPanel.vue'))
+const OutlinePanel = defineAsyncComponent(() => import('./OutlinePanel.vue'))
+const AutopilotPanel = defineAsyncComponent(() => import('./AutopilotPanel.vue'))
+const ForeshadowingTracking = defineAsyncComponent(() => import('./ForeshadowingTracking.vue'))
+const BookDeliveryPanel = defineAsyncComponent(() => import('./BookDeliveryPanel.vue'))
 
 const props = defineProps<{
   initialNovelId?: string | null
@@ -37,6 +38,10 @@ const activeTab = ref<'settings' | 'writing' | 'outline' | 'autopilot' | 'foresh
   props.initialTab ?? 'settings',
 )
 const focusTarget = ref<{ type: EntityType; id: string } | null>(null)
+const pendingGraphFocus = ref<{ type: EntityType; id: string } | null>(null)
+const settingsVisited = ref(activeTab.value === 'settings')
+const settingsMounted = ref(false)
+watch(activeTab, (tab) => { if (tab === 'settings') settingsVisited.value = true }, { flush: 'sync' })
 const refreshKey = ref(0)
 const writingDirty = ref(false)
 const autopilotDirty = ref(false)
@@ -109,8 +114,18 @@ async function submitCreate() {
 }
 
 function onGraphEdit(payload: { type: EntityType; id: string }) {
-  focusTarget.value = { ...payload }
+  // 初次懒加载时先挂载设定面板，再触发它的 focusTarget watcher。
+  if (settingsMounted.value) focusTarget.value = { ...payload }
+  else pendingGraphFocus.value = { ...payload }
   activeTab.value = 'settings'
+}
+
+function onSettingsMounted() {
+  settingsMounted.value = true
+  if (pendingGraphFocus.value) {
+    focusTarget.value = { ...pendingGraphFocus.value }
+    pendingGraphFocus.value = null
+  }
 }
 
 function navigateSafely(target: string, navigate: () => void) {
@@ -144,7 +159,11 @@ function confirmNavigation() {
 
 function changeNovel(value: string | null) {
   if (value === novelId.value) return
-  navigateSafely('切换作品', () => { focusTarget.value = null; novelId.value = value })
+  navigateSafely('切换作品', () => {
+    focusTarget.value = null
+    pendingGraphFocus.value = null
+    novelId.value = value
+  })
 }
 
 function returnToChat() {
@@ -193,11 +212,13 @@ onBeforeUnmount(() => asyncScope.dispose())
 
     <main class="content">
       <SettingsPanel
+        v-if="settingsVisited"
         v-show="activeTab === 'settings'"
         :novel-id="novelId ?? ''"
         :focus-target="focusTarget"
         :refresh-key="refreshKey"
         @dirty-change="settingsDirty = $event"
+        @vue:mounted="onSettingsMounted"
       />
       <WritingPanel
         v-if="activeTab === 'writing'"

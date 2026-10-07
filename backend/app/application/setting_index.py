@@ -1,6 +1,10 @@
 """设定实体写入与当前向量索引同步；旧索引在同一事务中失效。"""
+from math import isfinite
+from numbers import Real
+
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.infrastructure import models
 from app.infrastructure.ai.embedding import EmbeddingService
@@ -18,6 +22,9 @@ _NODE_MODELS = (
     models.Character, models.Location, models.WorldSetting,
     models.TimelineEvent, models.Foreshadowing,
 )
+# 限制单次模型输入及SQLite绑定数量；100条关系可在一个向量批次内完成。
+_INDEX_BATCH_SIZE = 128
+_LOOKUP_BATCH_SIZE = 900
 
 
 def _require_references(db: Session, novel_id: str, target_models, ids, label: str):
@@ -72,16 +79,31 @@ def _validate_references(db: Session, obj, changed: dict | None = None):
                 _require_references(db, obj.novel_id, (models.Chapter,), [getattr(obj, field)], label)
 
 
-def _source_text(db: Session, obj) -> str:
-    """从已刷新实体构造索引文本；排除主键、作品 ID 与时间戳。"""
+def _display_name(obj) -> str:
+    return (getattr(obj, "name", None) or getattr(obj, "title", None)
+            or getattr(obj, "content", ""))
+
+
+def _endpoint_names(db: Session, novel_id: str, relationships: list) -> dict:
+    """同一作品的关系端点一次预取，不按每条关系重复查五类实体。"""
+    endpoint_ids = list({value for relation in relationships
+                         for value in (relation.subject_id, relation.object_id) if value})
     names = {}
-    if isinstance(obj, models.Relationship):
-        for model in _NODE_MODELS:
-            endpoints = db.query(model).filter(
-                model.novel_id == obj.novel_id, model.id.in_([obj.subject_id, obj.object_id]),
+    for model in _NODE_MODELS:
+        label = next(getattr(model, field) for field in ("name", "title", "content") if hasattr(model, field))
+        for start in range(0, len(endpoint_ids), _LOOKUP_BATCH_SIZE):
+            rows = db.query(model.id, label).filter(
+                model.novel_id == novel_id,
+                model.id.in_(endpoint_ids[start:start + _LOOKUP_BATCH_SIZE]),
             ).all()
-            names.update({item.id: getattr(item, "name", None) or getattr(item, "title", None)
-                          or getattr(item, "content", "") for item in endpoints})
+            names.update({row[0]: row[1] or "" for row in rows})
+    return names
+
+
+def _source_text(db: Session, obj, names: dict | None = None) -> str:
+    """从已刷新实体构造索引文本；排除主键、作品 ID 与时间戳。"""
+    if names is None:
+        names = _endpoint_names(db, obj.novel_id, [obj]) if isinstance(obj, models.Relationship) else {}
     fields = []
     for column in obj.__table__.columns:
         if column.name in {"id", "novel_id", "created_at", "updated_at"}:
@@ -95,26 +117,57 @@ def _source_text(db: Session, obj) -> str:
     return _LABELS.get(obj.__tablename__, obj.__tablename__) + "；" + "；".join(fields)
 
 
+def _valid_vector(value) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    if any(not isinstance(number, Real) or isinstance(number, bool) or not isfinite(number) for number in value):
+        return None
+    return [float(number) for number in value]
+
+
+def _replace_indices(db: Session, novel_id: str, objects: list) -> list[bool]:
+    """批量替换仍由调用方统一提交；嵌入失败也失效旧块，不猜错位对应。"""
+    if not objects:
+        return []
+    names = _endpoint_names(db, novel_id, [obj for obj in objects if isinstance(obj, models.Relationship)])
+    texts = [_source_text(db, obj, names) for obj in objects]
+    vectors = [None] * len(objects)
+    for start in range(0, len(texts), _INDEX_BATCH_SIZE):
+        batch = texts[start:start + _INDEX_BATCH_SIZE]
+        try:
+            result = embedding.embed(batch)
+            if not isinstance(result, (list, tuple)) or len(result) != len(batch):
+                raise ValueError("嵌入数量与输入不一致，无法可靠对应")
+            valid = [_valid_vector(value) for value in result]
+        except Exception:  # noqa: BLE001  模型故障只令本批索引缺失，作者变更仍可保存
+            continue
+        vectors[start:start + len(batch)] = valid
+
+    target_ids = [obj.id for obj in objects]
+    for start in range(0, len(target_ids), _LOOKUP_BATCH_SIZE):
+        db.query(models.MemoryChunk).filter(
+            models.MemoryChunk.novel_id == novel_id,
+            models.MemoryChunk.kind == "setting",
+            models.MemoryChunk.embedding_id.in_(target_ids[start:start + _LOOKUP_BATCH_SIZE]),
+        ).delete(synchronize_session=False)
+    db.add_all([models.MemoryChunk(
+        novel_id=novel_id, kind="setting", source_chapter_id="",
+        embedding_id=obj.id, text=text, vector=vector,
+    ) for obj, text, vector in zip(objects, texts, vectors) if vector is not None])
+    return [vector is not None for vector in vectors]
+
+
 def _replace_index(db: Session, novel_id: str, obj) -> bool:
-    """先计算新向量，失败时仍删除旧块；调用方统一提交。"""
-    text = _source_text(db, obj)
-    try:
-        vector = embedding.embed([text])[0]
-        if not vector:
-            raise ValueError("嵌入结果为空")
-    except Exception:  # noqa: BLE001  设定写入不因索引故障失败，但旧块必须失效
-        vector = None
-    db.query(models.MemoryChunk).filter(
-        models.MemoryChunk.novel_id == novel_id,
-        models.MemoryChunk.kind == "setting",
-        models.MemoryChunk.embedding_id == obj.id,
-    ).delete(synchronize_session=False)
-    if vector is not None:
-        db.add(models.MemoryChunk(
-            novel_id=novel_id, kind="setting", source_chapter_id="",
-            embedding_id=obj.id, text=text, vector=vector,
-        ))
-    return vector is not None
+    return _replace_indices(db, novel_id, [obj])[0]
+
+
+def _commit_setting(db: Session, obj):
+    """提交前冻结全列，保留ORM身份且不以提交后的读失败否认已保存事实。"""
+    db.flush()
+    frozen = {column.key: getattr(obj, column.key) for column in obj.__table__.columns}
+    db.commit()
+    for key, value in frozen.items():
+        set_committed_value(obj, key, value)
 
 
 def create_setting(db: Session, repo_class, novel_id: str, *, commit: bool = True, **data):
@@ -127,8 +180,7 @@ def create_setting(db: Session, repo_class, novel_id: str, *, commit: bool = Tru
         _validate_references(db, obj)
         _replace_index(db, novel_id, obj)
         if commit:
-            db.commit()
-            db.refresh(obj)
+            _commit_setting(db, obj)
         return obj
     except Exception:
         db.rollback()
@@ -140,6 +192,7 @@ def update_setting(
 ):
     repo = repo_class(db)
     obj = repo.get(novel_id, item_id)
+    old_display_name = _display_name(obj) if isinstance(obj, _NODE_MODELS) else None
     try:
         for key, value in data.items():
             if value is not None:
@@ -147,11 +200,10 @@ def update_setting(
         db.flush()
         _validate_references(db, obj, data)
         _replace_index(db, novel_id, obj)
-        if isinstance(obj, _NODE_MODELS):
+        if isinstance(obj, _NODE_MODELS) and _display_name(obj) != old_display_name:
             _refresh_entity_relationships(db, novel_id, obj.id)
         if commit:
-            db.commit()
-            db.refresh(obj)
+            _commit_setting(db, obj)
         return obj
     except Exception:
         db.rollback()
@@ -169,8 +221,7 @@ def delete_setting(db: Session, repo_class, novel_id: str, item_id: str):
         affected = _unlink_deleted_setting(db, novel_id, obj)
         db.delete(obj)
         db.flush()
-        for item in affected:
-            _replace_index(db, novel_id, item)
+        _replace_indices(db, novel_id, affected)
         if isinstance(obj, _NODE_MODELS):
             _refresh_entity_relationships(db, novel_id, item_id)
         db.commit()
@@ -206,8 +257,7 @@ def _refresh_entity_relationships(db: Session, novel_id: str, entity_id: str):
         (models.Relationship.subject_id == entity_id)
         | (models.Relationship.object_id == entity_id),
     ).all()
-    for relationship in relationships:
-        _replace_index(db, novel_id, relationship)
+    _replace_indices(db, novel_id, relationships)
 
 
 def rebuild_settings_index(db: Session, novel_id: str) -> dict:
@@ -222,16 +272,12 @@ def rebuild_settings_index(db: Session, novel_id: str) -> dict:
             models.MemoryChunk.novel_id == novel_id,
             models.MemoryChunk.kind == "setting",
         ).delete(synchronize_session=False)
-        indexed = 0
-        failed = 0
+        objects = []
         for repo_class in classes:
-            for obj in repo_class(db).list(novel_id):
-                if _replace_index(db, novel_id, obj):
-                    indexed += 1
-                else:
-                    failed += 1
+            objects.extend(repo_class(db).list(novel_id))
+        indexed = sum(_replace_indices(db, novel_id, objects))
         db.commit()
-        return {"indexed": indexed, "failed": failed}
+        return {"indexed": indexed, "failed": len(objects) - indexed}
     except Exception:
         db.rollback()
         raise

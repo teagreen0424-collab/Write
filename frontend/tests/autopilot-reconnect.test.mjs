@@ -71,7 +71,8 @@ async function panel(options = {}) {
   }
   const source = 'const __harness = globalThis.__reconnectHarness\n' + script
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
-    .replace(/import \* as echarts from ['"]echarts['"]/g, 'const { echarts } = __harness')
+    .replace(/import \* as echarts from ['"]echarts(?:\/core)?['"]/g, 'const echarts = { use() {}, ...__harness.echarts }')
+    .replace(/import \{([^}]+)\} from ['"]echarts\/(?:charts|components|renderers)['"]/g, 'const {$1} = {}')
     .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1} = __harness')
     .replace(/import \{ api, streamEvents \} from ['"]\.\.\/api['"]/g, 'const { api, streamEvents } = __harness')
     .replace(/from ['"]\.\.\/autopilotDrafts['"]/g, `from '${writerUrl}'`)

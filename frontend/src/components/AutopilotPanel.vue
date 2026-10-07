@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import * as echarts from 'echarts'
+import * as echarts from 'echarts/core'
+import { LineChart } from 'echarts/charts'
+import { GridComponent, LegendComponent, MarkLineComponent, TitleComponent, TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
 import { NButton, NInput, NInputNumber, NModal, NProgress, NTag, useMessage } from 'naive-ui'
 import { api, streamEvents } from '../api'
 import { getAutopilotDraftWriter } from '../autopilotDrafts'
 import { wordLimitError, wordLimitLabel, wordLimits } from '../utils/wordLimits'
 import type { AutopilotDraftWriter, DraftSaveState } from '../autopilotDrafts'
 import type { AutopilotDraftInput, AutopilotEvent, AutopilotTaskSnapshot, AutopilotTaskStatus, WordLimits } from '../types'
+
+echarts.use([LineChart, GridComponent, LegendComponent, MarkLineComponent, TitleComponent, TooltipComponent, CanvasRenderer])
 
 const props = defineProps<{ novelId: string }>()
 const emit = defineEmits<{ (e: 'dirty-change', dirty: boolean): void }>()

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { defineAsyncComponent, ref } from 'vue'
 import ChatView from './components/ChatView.vue'
-import WorkbenchView from './components/WorkbenchView.vue'
+
+const WorkbenchView = defineAsyncComponent(() => import('./components/WorkbenchView.vue'))
 
 const view = ref<'chat' | 'workbench'>('chat')
 const workbenchNovelId = ref<string | null>(null)

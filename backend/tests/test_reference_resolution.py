@@ -19,7 +19,7 @@ class ReferenceResolutionTest(unittest.TestCase):
         self.db = sessionmaker(bind=self.engine, autoflush=False)()
         self.addCleanup(self.engine.dispose)
         self.addCleanup(self.db.close)
-        mocked = patch.object(setting_index.embedding, "embed", return_value=[[1.0]])
+        mocked = patch.object(setting_index.embedding, "embed", side_effect=lambda texts: [[1.0] for _ in texts])
         mocked.start()
         self.addCleanup(mocked.stop)
         self.nid = repos.NovelRepo(self.db).create(title="本作品").id

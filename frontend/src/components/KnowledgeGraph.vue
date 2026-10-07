@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
-import * as echarts from 'echarts'
+import * as echarts from 'echarts/core'
+import { GraphChart } from 'echarts/charts'
+import { LegendComponent, TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
 import { api } from '../api'
 import {
   ENTITY_TYPES,
@@ -9,6 +12,8 @@ import {
   type EntityType,
   type Relationship,
 } from '../types'
+
+echarts.use([GraphChart, LegendComponent, TooltipComponent, CanvasRenderer])
 
 const props = defineProps<{ novelId: string }>()
 const emit = defineEmits<{ (e: 'edit', payload: { type: EntityType; id: string }): void }>()

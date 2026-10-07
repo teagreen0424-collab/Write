@@ -73,6 +73,7 @@ async function panel(name, options = {}) {
     .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1} = __harness')
     .replace(/import \{ api(?:, streamSSE)? \} from ['"]\.\.\/api['"]/g, 'const { api, streamSSE } = __harness')
     .replace(/import (\w+) from ['"]\.\/[^'"]+\.vue['"]/g, 'const $1 = {}')
+    .replace(/import\(['"]\.\/([^'"]+)\.vue['"]\)/g, 'Promise.resolve({ name: "$1", render: () => null })')
     .replace(/\bonMounted\(/g, '__harness.onMounted(')
     .replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')
   for (const [name, url] of Object.entries(dependencyUrls)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)

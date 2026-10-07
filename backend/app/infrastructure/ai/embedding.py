@@ -52,6 +52,8 @@ class EmbeddingService:
         return [list(map(float, v)) for v in vectors]
 
     def _embed_cloud(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
         resp = httpx.post(
             f"{self._base_url}/embeddings",
             headers={
@@ -63,4 +65,21 @@ class EmbeddingService:
         )
         resp.raise_for_status()
         data = resp.json()
-        return [item["embedding"] for item in data["data"]]
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list) or len(items) != len(texts):
+            raise ValueError("嵌入数量与输入不一致，无法可靠对应")
+        if any(not isinstance(item, dict) or "embedding" not in item for item in items):
+            raise ValueError("嵌入响应缺少有效的向量记录")
+
+        indexed = ["index" in item for item in items]
+        # 旧兼容服务全部省略 index 时维持位置合同；混合响应不能猜对应。
+        if not any(indexed):
+            return [item["embedding"] for item in items]
+        if not all(indexed):
+            raise ValueError("嵌入索引不完整，无法可靠对应")
+        indices = [item["index"] for item in items]
+        if any(type(index) is not int or index < 0 or index >= len(texts) for index in indices):
+            raise ValueError("嵌入索引必须是输入范围内的整数")
+        if len(set(indices)) != len(texts):
+            raise ValueError("嵌入索引重复或缺失，无法可靠对应")
+        return [item["embedding"] for item in sorted(items, key=lambda item: item["index"])]

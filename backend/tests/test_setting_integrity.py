@@ -31,7 +31,8 @@ class SettingIntegrityTest(unittest.TestCase):
 
         app.dependency_overrides[get_db] = override_db
         self.client = TestClient(app)
-        self.embedding_patch = patch.object(setting_index.embedding, "embed", return_value=[[1.0, 0.0]])
+        self.embedding_patch = patch.object(setting_index.embedding, "embed",
+                                            side_effect=lambda texts: [[1.0, 0.0] for _ in texts])
         self.embedding = self.embedding_patch.start()
 
     def tearDown(self):
