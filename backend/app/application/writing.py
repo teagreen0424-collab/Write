@@ -4,7 +4,7 @@ import json
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
 from app.application.context import (
@@ -16,6 +16,7 @@ from app.application.revisions import (
     SOURCE_REWRITE,
     update_chapter_with_revision,
 )
+from app.application import generated_chapter
 from app.infrastructure.ai.llm_provider import LLMProvider
 from app.infrastructure.ai.prompts import (
     CONTINUE_SYSTEM,
@@ -42,14 +43,23 @@ def sse(data: dict) -> str:
 
 def _stream_error(exc: Exception) -> str:
     if getattr(exc, "status_code", None) == 409:
-        return sse({
+        value = {
             "type": "error", "message": getattr(exc, "detail", str(exc)),
             "code": "chapter_write_conflict", "status": 409,
-        })
+        }
+        if isinstance(exc, generated_chapter.GeneratedChapterConflict):
+            value.update(hint=exc.hint, saved=exc.saved)
+        return sse(value)
     return sse({
         "type": "error", "message": str(exc),
         "code": getattr(exc, "code", "generation_failed"),
     })
+
+
+def _generation_storage_error() -> str:
+    return sse({"type": "error", "code": "generation_failed", "status": 500,
+        "message": "章节保存或读取未完成，请保留候选并核对实际目录",
+        "hint": "回复是否保存尚未确认；请复制已输出正文并核对实际章节，不会自动重试"})
 
 
 def _chapter_dict(chapter) -> dict:
@@ -89,20 +99,23 @@ def write_chapter(
     outline_node_id: str = "",
     previous_chapter_id: str = "",
     action_message_id: str = "",
-    expected_latest_id: str = "",
+    expected_latest_id: str | None = None,
 ):
     """新建一章：可承接指定上一章结尾，流式输出并落库为 draft。"""
     try:
+        generated_chapter.require_generation_session(db)
         repo = ChapterRepo(db)
         if action_message_id:
-            existing = db.query(models.ChatAction).filter(
-                models.ChatAction.message_id == action_message_id,
-                models.ChatAction.action_type == "chapter",
-            ).first()
-            if existing:
-                yield sse({"type": "done", "chapter": _chapter_dict(repo.get(novel_id, existing.result_id))})
+            existing = generated_chapter.existing_chat_chapter(db, novel_id, action_message_id)
+            if existing is not None:
+                yield sse({"type": "done", "chapter": _chapter_dict(existing)})
                 return
-        seq = repo.next_seq(novel_id)
+        source = generated_chapter.capture_source(db, novel_id)
+        if expected_latest_id is not None and source.latest_id != expected_latest_id:
+            raise generated_chapter.GeneratedChapterConflict()
+        # 干净会话中的旧ORM缓存不是本次来源；不丢弃任何调用方未提交修改。
+        db.expire_all()
+        seq = source.next_seq
         position = f"第 {seq} 章" + (f"《{title}》" if title else "")
         outline = None
         if outline_node_id:
@@ -154,39 +167,14 @@ def write_chapter(
             seq=seq, title=title or f"第{seq}章", content=full,
             status="draft", directive=directive, outline_node_id=outline_node_id,
         )
-        if action_message_id:
-            latest = repo.list(novel_id)
-            current_latest_id = latest[-1].id if latest else ""
-            if current_latest_id != expected_latest_id:
-                raise ValueError("生成期间最新章节发生变化，请重新确认后再写")
-            try:
-                action = models.ChatAction(
-                    message_id=action_message_id, novel_id=novel_id,
-                    action_type="chapter", status="done", result_id="", result_summary={},
-                )
-                db.add(action)
-                db.flush()  # 占用唯一键后才建章，重试不会多写一章。
-                chapter = models.Chapter(novel_id=novel_id, **data)
-                db.add(chapter)
-                db.flush()
-                action.result_id = chapter.id
-                action.result_summary = {"chapter_id": chapter.id, "title": chapter.title}
-                db.commit()
-                db.refresh(chapter)
-            except IntegrityError:
-                db.rollback()
-                existing = db.query(models.ChatAction).filter(
-                    models.ChatAction.message_id == action_message_id,
-                    models.ChatAction.action_type == "chapter",
-                ).first()
-                if not existing:
-                    raise
-                chapter = repo.get(novel_id, existing.result_id)
-        else:
-            chapter = repo.create(novel_id, **data)
+        chapter = generated_chapter.save_generated_chapter(
+            db, novel_id, source, data, action_message_id=action_message_id,
+        )
         yield sse({"type": "done", "chapter": _chapter_dict(chapter)})
+    except SQLAlchemyError:
+        # 写事务只由save helper负责回滚；不把SQL、参数或原文带进作者错误提示。
+        yield _generation_storage_error()
     except Exception as exc:  # noqa: BLE001
-        db.rollback()
         yield _stream_error(exc)
 
 

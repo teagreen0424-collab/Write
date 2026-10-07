@@ -344,6 +344,44 @@ test('已有手写正文未保存时AI生成入口提示保存，不调用模型
   context.dispose()
 })
 
+test('普通AI新章真实并发冲突保留精确输出与作者新稿，可复制且导航和刷新受保护', async () => {
+  const pending=wait();let handlers
+  const context=await writing({api:{listChapterMetadata:async()=>[]},streamSSE:async(_url,_payload,h)=>{
+    handlers=h;h.onToken(' 😀候选\u0000\r\n ');await pending.promise
+    await h.onError('生成期间最新章节发生变化，本次候选未保存','chapter_write_conflict',409)
+  }})
+  const generating=context.vm.doWrite();await settle()
+  context.vm.content.value='等待期间作者的新稿';context.vm.title.value='新标题'
+  pending.resolve();await generating
+  assert.equal(context.vm.streamText.value,' 😀候选\u0000\r\n ')
+  assert.equal(context.vm.content.value,'等待期间作者的新稿');assert.equal(context.vm.title.value,'新标题')
+  assert.equal(context.vm.selectedId.value,null);assert.equal(context.vm.streaming.value,false)
+  assert.equal(context.vm.streamUnconfirmed.value,false);assert.equal(context.vm.hasIncompleteOutput.value,true)
+  assert.ok(descendants(context.render(),node=>node.type==='textarea'&&node.props?.['aria-label']==='未完成稿').length)
+  const copied=[];Object.defineProperty(globalThis,'navigator',{configurable:true,value:{clipboard:{writeText:async text=>copied.push(text)}}})
+  await context.vm.copyIncompleteOutput();assert.deepEqual(copied,[' 😀候选\u0000\r\n '])
+  let prevented=false;context.listeners.get('beforeunload')({preventDefault(){prevented=true}});assert.equal(prevented,true)
+  assert.equal(context.requests.some(row=>['createChapter','updateChapter'].includes(row.name)),false)
+  context.dispose()
+})
+
+test('普通新章旧冲突在作品切换、ABA与卸载后不改变当前新稿或新一轮状态', async () => {
+  for(const changed of ['novel','aba','unmount']) {
+    const pending=wait();const context=await writing({api:{listChapterMetadata:async()=>[]},streamSSE:async(_url,_payload,h)=>{
+      h.onToken('旧作品候选');await pending.promise;h.onToken('旧迟到token');await h.onError('旧作品冲突','chapter_write_conflict',409)
+    }})
+    const generating=context.vm.doWrite();await settle()
+    if(changed==='unmount')context.dispose();else{context.props.novelId='novel-b';await settle();if(changed==='aba'){context.props.novelId='novel-a';await settle()}}
+    const stateBeforeLate={output:context.vm.streamText.value,streaming:context.vm.streaming.value}
+    context.vm.content.value='当前作者新稿';context.vm.title.value='当前标题'
+    pending.resolve();await generating
+    assert.equal(context.vm.content.value,'当前作者新稿');assert.equal(context.vm.title.value,'当前标题')
+    assert.equal(context.messages.length,0);assert.equal(context.vm.streamText.value,stateBeforeLate.output)
+    assert.equal(context.vm.streaming.value,stateBeforeLate.streaming)
+    if(changed!=='unmount')context.dispose()
+  }
+})
+
 test('删除迟到不重选或丢弃新作品正文，ABA与卸载不提示旧错误', async () => {
   for (const switching of ['novel', 'chapter', 'unmount']) for (const outcome of ['success', 'failure']) {
     const pending = wait()

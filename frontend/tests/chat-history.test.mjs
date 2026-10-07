@@ -43,6 +43,7 @@ async function runtime(overrides = {}) {
   globalThis[key] = harness
   globalThis.window = { addEventListener() {}, removeEventListener() {} }
   const helperURL = url(compile((await readFile(new URL('../src/utils/chatSubmission.ts', import.meta.url), 'utf8')).replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// registry${key}`)
+  const generationURL = url(compile((await readFile(new URL('../src/utils/chapterGeneration.ts', import.meta.url), 'utf8')).replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// generation${key}`)
   async function component(name) {
     const descriptor = parse(await readFile(new URL(`../src/components/${name}.vue`, import.meta.url), 'utf8')).descriptor
     const script = compileScript(descriptor, { id: name + key })
@@ -51,6 +52,7 @@ async function runtime(overrides = {}) {
       .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1}=__harness')
       .replace(/import \{ api \} from ['"]\.\.\/api['"]/g, 'const {api}=__harness')
       .replace(/from ['"]\.\.\/utils\/chatSubmission['"]/g, `from '${helperURL}'`)
+      .replace(/from ['"]\.\.\/utils\/chapterGeneration['"]/g, `from '${generationURL}'`)
       .replace(/import (\w+) from ['"]\.\/[^'"]+\.vue['"]/g, 'const $1={name:"$1"}')
       .replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')
     const definition = (await import(url(compile(source)))).default

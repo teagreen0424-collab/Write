@@ -1,12 +1,13 @@
 """聊天来源校验与动作去重。"""
 from fastapi import HTTPException
 from sqlalchemy import literal_column
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.application import outline_plan
 from app.application import writing
 from app.application import inject_idea
+from app.application import generated_chapter
 from app.infrastructure import models
 from app.infrastructure.repository import ConversationReadError, ConversationRepo
 from app.interfaces.schemas import OutlineVolumeDraft
@@ -200,16 +201,12 @@ def apply_outline(
 def write_chapter(db: Session, conversation_id: str, message_id: str, request: WriteChapterRequest):
     """仅显式确认的助手消息可建章；默认承接当前最新章。"""
     try:
+        generated_chapter.require_generation_session(db)
+        db.expire_all()  # 干净只读会话也必须采用当前绑定，而不是重放旧缓存作品或章节。
         conv, _ = source_message(db, conversation_id, message_id)
-        existing = db.query(models.ChatAction).filter(
-            models.ChatAction.message_id == message_id,
-            models.ChatAction.action_type == "chapter",
-        ).first()
-        if existing:
-            if existing.novel_id != conv.novel_id:
-                raise HTTPException(status_code=409, detail="该动作属于其他作品")
-            chapter = writing.ChapterRepo(db).get(conv.novel_id, existing.result_id)
-            yield writing.sse({"type": "done", "chapter": writing._chapter_dict(chapter)})
+        existing = generated_chapter.existing_chat_chapter(db, conv.novel_id, message_id)
+        if existing is not None:
+            yield writing.sse({"type": "done", "chapter": existing})
             return
         if request.outline_node_id:
             node = db.query(models.OutlineNode).filter(
@@ -230,6 +227,7 @@ def write_chapter(db: Session, conversation_id: str, message_id: str, request: W
             previous_chapter_id=previous_id, action_message_id=message_id,
             expected_latest_id=latest_id,
         )
+    except SQLAlchemyError:
+        yield writing._generation_storage_error()
     except Exception as exc:  # noqa: BLE001  SSE 流内保持错误事件协议
-        db.rollback()
-        yield writing.sse({"type": "error", "message": str(exc)})
+        yield writing._stream_error(exc)

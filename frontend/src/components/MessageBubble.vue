@@ -6,6 +6,7 @@ import type { Chapter, ChatAction, ChatMessage, OutlineApplyResult } from '../ty
 import ApplySuggestionCard from './ApplySuggestionCard.vue'
 import OutlinePlanCard from './OutlinePlanCard.vue'
 import ChapterWriteCard from './ChapterWriteCard.vue'
+import { findChapterGenerationState } from '../utils/chapterGeneration'
 
 const props = defineProps<{ message: ChatMessage; novelId: string | null; actions?: ChatAction[]; actionsStatus?: 'pending' | 'ready' | 'failed' }>()
 const emit = defineEmits<{
@@ -36,6 +37,11 @@ const appliedInfo = ref<Record<string, unknown> | null>(
 
 const isAssistant = computed(() => props.message.role === 'assistant')
 const hasActionSource = computed(() => isAssistant.value && !!props.novelId && !props.message.id.startsWith('local-'))
+const hasWritingDraft = computed(() => {
+  if (!hasActionSource.value) return false
+  const draft = findChapterGenerationState(props.novelId!, props.message.conversation_id, props.message.id)
+  return !!draft && (!!draft.candidate || draft.revision > 0 || draft.outcome !== 'idle' || draft.pending !== null)
+})
 const canApply = computed(
   () => hasActionSource.value && actionsStatus.value === 'ready',
 )
@@ -226,6 +232,7 @@ function onSettingsApplied(summary: { type: string; action: string; id: string }
           :title="canApply ? '确认指令后生成一章草稿' : '先转为作品'"
           @click="showWriting = !showWriting"
         >写这一章</n-button>
+        <n-button v-if="hasWritingDraft" size="tiny" quaternary aria-label="写章构思与候选" @click="showWriting = !showWriting">写章构思与候选</n-button>
         <n-tag v-if="settingsApplied" type="success" size="small">设定已提炼</n-tag>
         <n-button
           v-else size="tiny" quaternary :disabled="!canApply"
@@ -251,12 +258,13 @@ function onSettingsApplied(summary: { type: string; action: string; id: string }
         @cancel="showOutline = false"
       />
     </div>
-    <div v-if="showWriting && hasActionSource" :inert="actionsStatus !== 'ready'">
+    <div v-if="showWriting && hasActionSource" :inert="actionsStatus !== 'ready' && !hasWritingDraft">
     <ChapterWriteCard
       :novel-id="novelId!"
       :conversation-id="message.conversation_id"
       :message-id="message.id"
       :source-text="message.content"
+      :actions-ready="actionsStatus === 'ready'"
       @applied="onChapterApplied"
       @cancel="showWriting = false"
     />

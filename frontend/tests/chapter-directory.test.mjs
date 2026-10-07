@@ -11,7 +11,8 @@ const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source)
 const dependencies = Object.fromEntries(await Promise.all([
   ['../utils/chapter', '../src/utils/chapter.ts'], ['../utils/chapterCreation', '../src/utils/chapterCreation.ts'], ['../utils/wordLimits', '../src/utils/wordLimits.ts'],
   ['../utils/asyncScope', '../src/utils/asyncScope.ts'], ['../types', '../src/types.ts'],
-].map(async ([name, path]) => [name, moduleUrl(compile(await readFile(new URL(path, import.meta.url), 'utf8')))])))
+  ['../utils/chapterGeneration', '../src/utils/chapterGeneration.ts'],
+].map(async ([name, path]) => [name, moduleUrl(compile((await readFile(new URL(path, import.meta.url), 'utf8')).replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)))])))
 const apiModule = await import(moduleUrl(compile(await readFile(new URL('../src/api.ts', import.meta.url), 'utf8'))))
 const flush = async () => { for (let i = 0; i < 25; i++) { await Promise.resolve(); await nextTick() } }
 const deferred = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail }); return { promise, resolve, reject } }
@@ -55,6 +56,7 @@ async function panel(name = 'WritingPanel', options = {}) {
     api: Object.fromEntries(Object.entries(implementations).map(([name, fn]) => [name, (...args) => { requests.push({ name, args: structuredClone(args) }); return fn(...args) }])),
     streamSSE: options.streamSSE ?? (async () => { throw new Error('此流程不应调用模型') }),
     useMessage: () => Object.fromEntries(['success', 'warning', 'error', 'info'].map((type) => [type, (text) => messages.push({ type, text })])),
+    useDialog: () => ({ warning: () => {} }),
     onMounted: (fn) => { hooks.mount = fn }, onBeforeUnmount: (fn) => { hooks.unmount = fn },
   }
   for (const component of ['NButton', 'NCheckbox', 'NEmpty', 'NForm', 'NFormItem', 'NInput', 'NInputNumber', 'NList', 'NListItem', 'NMenu', 'NModal', 'NSelect', 'NTag']) harness[component] = component.toLowerCase()
