@@ -73,6 +73,94 @@ function nodes(node, predicate, found = []) {
 const posts = runtime => runtime.calls.filter(row => row.name === 'sendMessage')
 const unknown = async (_id, _raw, handlers) => handlers.onError('原发送实际写入被拒绝')
 
+test('会话目录后到：恢复的会话最初被空目录挡住，资格到达后首次读取且等待中新输入不丢', async () => {
+  const history = wait()
+  const r = await runtime({ api: { listMessages: () => history.promise } })
+  const c = await r.mount({ conversationIds: [] })
+  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, 0)
+  c.props.conversationIds = ['conversation-a']; await flush()
+  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, 1)
+  c.vm.input.value = '目录等待期间作者新构思'
+  history.resolve([{ id: 'persisted-history', conversation_id: 'conversation-a', role: 'assistant', content: '已经保存的历史', meta: null, created_at: '' }])
+  await flush()
+  assert.equal(c.vm.messages.value.length, 1)
+  assert.equal(nodes(c.render(), row => row.type?.name === 'MessageBubble').length, 1)
+  assert.equal(c.vm.input.value, '目录等待期间作者新构思')
+  c.props.conversationIds = ['conversation-a', 'b']; await flush()
+  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, 1)
+  assert.equal(posts(r).length, 0); c.dispose()
+})
+
+test('会话目录首次无过滤已读取，后来提供合法目录不重复读同一历史', async () => {
+  const r = await runtime(), c = await r.mount()
+  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, 1)
+  c.vm.input.value = '已有未发送稿'
+  c.props.conversationIds = ['conversation-a']; await flush()
+  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, 1)
+  assert.equal(c.vm.input.value, '已有未发送稿'); assert.equal(posts(r).length, 0); c.dispose()
+})
+
+test('目录资格后到不能重载跨挂载同会话的在途发送或清除原稿和锁', async () => {
+  const response = wait()
+  const r = await runtime({ api: { sendMessage: async (_id, _raw, handlers) => {
+    await response.promise; await handlers.onError('旧实例结果仍待核对')
+  } } })
+  const first = await r.mount(); first.vm.input.value = '原在途构思'
+  const sending = first.vm.send(); await until(() => posts(r).length === 1)
+  const original = first.vm.submission.value; first.dispose()
+  const next = await r.mount({ conversationIds: [] })
+  const reads = r.calls.filter(row => row.name === 'listMessages').length
+  next.props.conversationIds = ['conversation-a']; await flush()
+  assert.equal(r.calls.filter(row => row.name === 'listMessages').length, reads)
+  assert.equal(next.vm.streaming.value, true)
+  assert.equal(next.vm.submission.value, original)
+  assert.equal(nodes(next.render(), row => row.type?.name === 'NInput')[0].props.disabled, true)
+  await next.vm.send(); assert.equal(posts(r).length, 1)
+  response.resolve(); await sending
+  assert.equal(next.vm.submission.value.raw, '原在途构思')
+  assert.equal(next.vm.submission.value.status, 'unknown'); next.dispose()
+})
+
+test('未知原稿和新输入跨挂载保留，后到的合法历史不按文本冒充原UUID确认', async () => {
+  let pending
+  const r = await runtime({ api: { sendMessage: unknown, listMessages: () => pending ? pending.promise : [] } })
+  const first = await r.mount(); first.vm.input.value = '未知原构思'; await first.vm.send()
+  first.vm.input.value = '等待核对时另写的新稿'
+  const original = first.vm.submission.value; first.dispose(); pending = wait()
+  const next = await r.mount({ conversationIds: [] })
+  next.props.conversationIds = ['conversation-a']; await flush()
+  assert.equal(next.vm.input.value, '等待核对时另写的新稿')
+  pending.resolve([{ id: 'another-saved-UUID', conversation_id: 'conversation-a', role: 'user', content: '未知原构思', meta: null, created_at: '' }])
+  await flush()
+  assert.equal(next.vm.messages.value.length, 1)
+  assert.equal(next.vm.submission.value, original); assert.equal(original.status, 'unknown')
+  assert.equal(next.vm.input.value, '等待核对时另写的新稿')
+  assert.equal(next.vm.dirty.value, true); assert.equal(posts(r).length, 1); next.dispose()
+})
+
+test('后到资格的A→B→A读取仍拒绝旧A，明确删除清状态且旧读取不能复活', async () => {
+  const reads = []
+  const r = await runtime({ api: { listMessages: id => { const pending = wait(); reads.push({ id, ...pending }); return pending.promise } } })
+  const c = await r.mount({ conversationIds: [] })
+  c.props.conversationIds = ['conversation-a']; await flush()
+  const originalConversation = c.props.conversation
+  c.props.conversation = { id: 'b', novel_id: null, title: 'B' }; await flush()
+  assert.equal(reads.length, 1)
+  c.props.conversationIds = ['conversation-a', 'b']; await flush()
+  c.props.conversation = originalConversation; await flush(); assert.equal(reads.length, 3)
+  const row = (id, content) => ({ id: content, conversation_id: id, role: 'assistant', content, meta: null, created_at: '' })
+  reads[0].resolve([row('conversation-a', '旧A')]); reads[1].resolve([row('b', 'B历史')]); await flush()
+  assert.equal(c.vm.messages.value.length, 0)
+  reads[2].resolve([row('conversation-a', '新A')]); await flush()
+  assert.equal(c.vm.messages.value[0].content, '新A')
+  const oldRead = c.vm.loadMessages(); await flush()
+  c.props.conversationIds = []; await flush()
+  assert.equal(r.helper.chatSubmissionStates.size, 0)
+  reads[3].resolve([row('conversation-a', '删除后的旧读')]); await oldRead
+  assert.equal(c.vm.messages.value.length, 0); assert.equal(r.helper.chatSubmissionStates.size, 0)
+  c.dispose()
+})
+
 test('发送前独立冻结精确原稿与UUID，失败历史空不删唯一原文，可复制或明确恢复且刷新保护仍在', async () => {
   const r = await runtime({ api: { sendMessage: unknown } }), c = await r.mount(), raw = '\n　原构思😀\u0000，首尾必须保留。　\n', copied = []
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async value => copied.push(value) } } })

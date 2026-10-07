@@ -2,7 +2,7 @@
 from typing import Optional, Type
 
 from fastapi import HTTPException
-from sqlalchemy import func
+from sqlalchemy import func, literal_column
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -354,6 +354,20 @@ class ChapterRepo:
             .all()
         )
 
+    def recent_finalized_summaries(self, novel_id: str):
+        """聊天只取最后三章的序号/摘要；SQLite并列seq保留原行顺序。"""
+        rows = (
+            self.db.query(self.model.seq, self.model.summary)
+            .filter(
+                self.model.novel_id == novel_id,
+                self.model.status == ChapterStatus.FINALIZED.value,
+            )
+            .order_by(self.model.seq.desc(), literal_column("chapter.rowid").desc())
+            .limit(3)
+            .all()
+        )
+        return list(reversed(rows))
+
 
 class ChapterRevisionRepo:
     """章节历史版本仓储。
@@ -675,6 +689,18 @@ class ConversationRepo:
             .order_by(models.Message.created_at)
             .all()
         )
+
+    def recent_messages(self, conversation_id: str):
+        """模型只读最近二十条role/content；并列时间戳按SQLite原行顺序截取。"""
+        self.get(conversation_id)
+        rows = (
+            self.db.query(models.Message.role, models.Message.content)
+            .filter(models.Message.conversation_id == conversation_id)
+            .order_by(models.Message.created_at.desc(), literal_column("message.rowid").desc())
+            .limit(20)
+            .all()
+        )
+        return list(reversed(rows))
 
     def update_message(self, conversation_id: str, message_id: str, meta=None):
         obj = (

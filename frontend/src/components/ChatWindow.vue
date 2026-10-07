@@ -272,12 +272,16 @@ watch(
   { immediate: true, flush: 'sync' },
 )
 watch(dirty, (value) => emit('dirty-change', value), { immediate: true, flush: 'sync' })
-watch(() => props.conversationIds, (ids) => {
-  if (!ids) return
-  const existing = new Set(ids)
-  for (const scope of states.keys()) {
-    if (!existing.has(JSON.parse(scope)[0])) states.delete(scope)
+watch(() => props.conversationIds, (ids, previousIds) => {
+  if (ids) {
+    const existing = new Set(ids)
+    for (const scope of states.keys()) {
+      if (!existing.has(JSON.parse(scope)[0])) states.delete(scope)
+    }
   }
+  // 会话先恢复、目录后到时，scope没有变化；补上原先因资格未就绪而跳过的只读历史。
+  const id = props.conversation?.id
+  if (id && previousIds && !previousIds.includes(id) && (!ids || ids.includes(id)) && !streaming.value) void loadMessages()
 }, { flush: 'sync' })
 function beforeUnload(event: BeforeUnloadEvent) {
   if (!dirty.value) return

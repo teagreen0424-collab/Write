@@ -156,7 +156,7 @@ def build_chat_context(
 
     chain_lines = [
         f"第{c.seq}章：{c.summary}"
-        for c in repos.ChapterRepo(db).finalized(novel_id)[-3:]
+        for c in repos.ChapterRepo(db).recent_finalized_summaries(novel_id)
         if c.summary
     ]
     if chain_lines:
@@ -200,8 +200,7 @@ def reply_conversation(db: Session, conversation_id: str, content: str, *, reque
                 repo.update(conversation_id, title=content.strip()[:20])
                 conv = repo.get(conversation_id)
 
-        history = repo.list_messages(conversation_id)
-        recent = history[-20:]
+        recent = repo.recent_messages(conversation_id)
         messages: list[dict] = [{"role": "system", "content": CHAT_ADVISOR_SYSTEM}]
         if conv.novel_id:
             ctx = build_chat_context(db, conv.novel_id, query=content)
