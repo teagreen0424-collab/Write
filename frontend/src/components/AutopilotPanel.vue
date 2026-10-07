@@ -1,3 +1,19 @@
+<script lang="ts">
+import { ref as sharedRef } from 'vue'
+
+interface DirectiveInput { text: string; revision: number }
+interface DirectiveSubmission {
+  token: number; state: 'pending' | 'confirmed' | 'unknown'
+  novelId: string; taskId: string; text: string; revision: number; notice?: string
+}
+// 离开页签只卸载监控；同一页面内保留作者构思与原任务的在途提交。
+const autopilotAuthor = {
+  inputs: sharedRef(new Map<string, DirectiveInput>()),
+  submissions: sharedRef(new Map<string, DirectiveSubmission>()),
+  sequence: 0,
+}
+</script>
+
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts/core'
@@ -22,6 +38,8 @@ const running = ref(false)
 const serverRunning = ref(false)
 const startingTask = ref(false)
 const currentTaskId = ref('')
+let directiveScopeRevision = 0
+watch(currentTaskId, () => { directiveScopeRevision += 1 }, { flush: 'sync' })
 const taskStatus = ref<AutopilotTaskStatus | 'idle'>('idle')
 const connectionState = ref<'idle' | 'connecting' | 'connected' | 'reconnecting' | 'disconnected'>('idle')
 const checkingStatus = ref(false)
@@ -34,7 +52,20 @@ const taskNotice = ref('')
 const progressText = ref('')
 const done = ref(0)
 const total = ref(0)
-const directive = ref('')
+const directive = computed({
+  get: () => autopilotAuthor.inputs.value.get(props.novelId)?.text ?? '',
+  set: (text: string) => {
+    if (!props.novelId) return
+    const previous = autopilotAuthor.inputs.value.get(props.novelId)
+    autopilotAuthor.inputs.value.set(props.novelId, { text, revision: (previous?.revision ?? 0) + 1 })
+  },
+})
+const submissionKey = (novelId: string, taskId: string) => JSON.stringify([novelId, taskId])
+const directiveSubmission = computed(() => autopilotAuthor.submissions.value.get(submissionKey(props.novelId, currentTaskId.value)))
+const injecting = computed(() => directiveSubmission.value?.state === 'pending')
+const injectionUnknown = computed(() => directiveSubmission.value?.state === 'unknown')
+const pendingDirective = computed(() => [...autopilotAuthor.submissions.value.values()]
+  .some((submission) => submission.novelId === props.novelId && submission.state === 'pending'))
 const minWords = ref<number | null>(null)
 const maxWords = ref<number | null>(null)
 const taskWordLimits = ref<WordLimits | null>(null)
@@ -72,6 +103,7 @@ const activeDraftList = computed(() => Object.values(activeDrafts.value))
 const hasActiveTask = computed(() => startingTask.value || serverRunning.value)
 const hasPendingOutput = computed(() => activeDraftList.value.some((draft) => draft.saveState !== 'saved')
   || failedDrafts.value.some((draft) => draft.saveState !== 'saved'))
+const authorDirty = computed(() => hasPendingOutput.value || directive.value.length > 0 || pendingDirective.value || injectionUnknown.value)
 let runId = 0
 let statusRequestId = 0
 let attempt = 0
@@ -341,7 +373,7 @@ async function confirmDiscard() {
 }
 
 function handleBeforeUnload(event: BeforeUnloadEvent) {
-  if (!hasPendingOutput.value) return
+  if (!authorDirty.value) return
   event.preventDefault()
   event.returnValue = ''
 }
@@ -873,7 +905,7 @@ async function resume() {
 }
 
 async function inject() {
-  if (!serverRunning.value || !currentTaskId.value) return
+  if (!props.novelId || !serverRunning.value || !currentTaskId.value || injecting.value || injectionUnknown.value) return
   if (!directive.value.trim()) {
     message.error('请输入构思')
     return
@@ -882,13 +914,51 @@ async function inject() {
   const novelId = props.novelId
   const taskId = currentTaskId.value
   const submittedDirective = directive.value
+  const revision = autopilotAuthor.inputs.value.get(novelId)?.revision ?? 0
+  const key = submissionKey(novelId, taskId), token = ++autopilotAuthor.sequence, cursor = eventCursor
+  const scopeRevision = directiveScopeRevision
+  const submission: DirectiveSubmission = { novelId, taskId, token, state: 'pending', text: submittedDirective, revision }
+  autopilotAuthor.submissions.value.set(key, submission)
+  const ownSubmission = () => autopilotAuthor.submissions.value.get(key)?.token === token
+  const current = () => ownSubmission() && isCurrentRun(currentRunId, novelId)
+    && currentTaskId.value === taskId && directiveScopeRevision === scopeRevision
   try {
-    await api.injectAutopilot(novelId, taskId, submittedDirective)
-    if (!isCurrentRun(currentRunId, novelId) || currentTaskId.value !== taskId || !serverRunning.value) return
+    const result = await api.injectAutopilot(novelId, taskId, submittedDirective)
+    if (!ownSubmission()) return
+    if (!result || result.type !== 'control' || result.action !== 'inject' || result.task_id !== taskId
+      || (result.novel_id != null && result.novel_id !== novelId)
+      || !Number.isSafeInteger(result.event_id) || (result.event_id ?? 0) <= cursor
+      || typeof result.paused !== 'boolean' || typeof result.pause_requested !== 'boolean'
+      || typeof result.message !== 'string' || !result.message.trim()) {
+      autopilotAuthor.submissions.value.set(key, { ...submission, state: 'unknown', notice: '未收到与原任务一致的完整确认。' })
+      if (current()) message.warning('构思注入结果尚未确认，可能已经被后台接收；请保留原文并核对章节，本任务不会重复提交。')
+      return
+    }
+    autopilotAuthor.submissions.value.set(key, { ...submission, state: 'confirmed' })
+    if (!current() || !serverRunning.value) return
     message.success('已注入构思')
-    if (directive.value === submittedDirective) directive.value = ''
+    if (autopilotAuthor.inputs.value.get(novelId)?.revision === revision && directive.value === submittedDirective) directive.value = ''
   } catch (e) {
-    if (isCurrentRun(currentRunId, novelId) && currentTaskId.value === taskId) message.error((e as Error).message)
+    if (!ownSubmission()) return
+    const error = e as Error & { status?: number }
+    const rejected = typeof error.status === 'number' && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429
+    if (rejected) {
+      if (current()) message.error(error.message)
+      if (ownSubmission()) autopilotAuthor.submissions.value.delete(key)
+    } else {
+      autopilotAuthor.submissions.value.set(key, { ...submission, state: 'unknown', notice: error.message })
+      if (current()) message.warning(`构思注入结果尚未确认：${error.message}。可能已被后台接收，请保留原文并核对章节，本任务不会重复提交。`)
+    }
+  }
+}
+
+async function copyDirectiveText(text: string) {
+  const expectedRunId = runId, novelId = props.novelId
+  try {
+    await navigator.clipboard.writeText(text)
+    if (isCurrentRun(expectedRunId, novelId)) message.success('已复制构思')
+  } catch {
+    if (isCurrentRun(expectedRunId, novelId)) message.warning('自动复制失败，请在构思输入框或下方原文中手动选中复制。')
   }
 }
 
@@ -942,8 +1012,9 @@ watch(
       loadStoredDrafts()
     }
   },
+  { flush: 'sync' },
 )
-watch(hasPendingOutput, (dirty) => emit('dirty-change', dirty), { immediate: true })
+watch(authorDirty, (dirty) => emit('dirty-change', dirty), { immediate: true, flush: 'sync' })
 </script>
 
 <template>
@@ -978,11 +1049,21 @@ watch(hasPendingOutput, (dirty) => emit('dirty-change', dirty), { immediate: tru
     <div class="inject-row">
       <n-input
         v-model:value="directive"
+        :disabled="!novelId"
         placeholder="注入构思（应用到下一章，如：让主角与 B 决裂）"
         style="flex: 1"
       />
-      <n-button type="info" :disabled="!serverRunning || !currentTaskId" @click="inject">注入</n-button>
+      <n-button type="info" :loading="injecting" :disabled="!serverRunning || !currentTaskId || injecting || injectionUnknown" @click="inject">注入</n-button>
+      <n-button v-if="directive.length" size="small" @click="copyDirectiveText(directive)">复制当前构思</n-button>
     </div>
+    <p v-if="directive.length || pendingDirective" class="output-hint">未提交构思在当前页面内按作品保留，切换页签后可以找回；完整刷新或关闭页面前请复制保留，不会自动注入后台。</p>
+    <p v-if="directiveSubmission?.state === 'confirmed' && directive.length" class="output-hint">上一次构思已接收，当前输入已保留；只有再次点击“注入”才会提交。</p>
+    <section v-if="injectionUnknown && directiveSubmission" class="quality-warnings" aria-label="构思注入结果待核对">
+      <div class="draft-heading">本次构思注入结果尚未确认</div>
+      <p class="output-hint">{{ directiveSubmission.notice }} 指令可能已经被后台接收。公开任务状态不能核对具体构思，请先核对章节；本任务不重复注入，暂停、恢复和后台运行仍可继续。任务结束后可在新任务中明确注入。</p>
+      <textarea :value="directiveSubmission.text" readonly class="draft-text" aria-label="本次提交的构思原文"></textarea>
+      <n-button size="small" @click="copyDirectiveText(directiveSubmission.text)">复制本次构思</n-button>
+    </section>
 
     <p class="output-hint">每章保存后会逐项核对构思、前章承接和设定，并核对已设置的字数目标；发现问题、字数越界或检查未完成时暂停后续生成，正文保留。</p>
 

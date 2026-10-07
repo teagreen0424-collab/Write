@@ -136,7 +136,7 @@ function navigateSafely(target: string, navigate: () => void) {
       outlineDirty.value ? '大纲有未保存编辑、生成预览，或正在保存。' : '',
       activeTab.value === 'writing' && writingDirty.value ? '当前章节有未保存修改或未完成输出。' : '',
       activeTab.value === 'autopilot' && autopilotDirty.value
-        ? '自动驾驶继续在后台运行，离开只断开本页监控。未得到暂存确认的本页片段离开后可能丢失，请先复制保留；已暂存片段可以重新找回。'
+        ? '自动驾驶继续在后台运行，离开只断开本页监控。未提交构思在当前页面内保留，完整刷新或关闭页面前请复制。未得到暂存确认的本页片段离开后可能丢失，请先复制保留；已暂存片段可以重新找回。'
         : '',
     ].filter(Boolean).join('')
     pendingNavigation.value = navigate

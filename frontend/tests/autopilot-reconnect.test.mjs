@@ -51,7 +51,7 @@ async function panel(options = {}) {
     deleteAutopilotDraft: async () => ({ deleted: true }),
     pauseAutopilot: async (...args) => { controls.push(['pause', ...args]); return { status: 'paused' } },
     resumeAutopilot: async (...args) => { controls.push(['resume', ...args]); return { status: 'running' } },
-    injectAutopilot: async (...args) => { controls.push(['inject', ...args]); return { status: 'injected' } },
+    injectAutopilot: async (...args) => { controls.push(['inject', ...args]); return { type: 'control', action: 'inject', task_id: args[1], event_id: 4, paused: false, pause_requested: false, message: '已接收章前指令' } },
     ...options.api,
   }
   globalThis.window = { addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: (name) => listeners.delete(name) }
@@ -305,7 +305,7 @@ test('真实 SFC 确认删除后迟到草稿列表与错误不能复活该 UUID'
 
 test('真实 SFC 监控断开仍可按 task ID 暂停、恢复和注入，作者新输入不被迟到响应清掉', async () => {
   const injected = wait(), controls = []
-  const context = await panel({ api: { injectAutopilot: async (...args) => { controls.push(args); await injected.promise } } })
+  const context = await panel({ api: { injectAutopilot: async (...args) => { controls.push(args); await injected.promise; return { type: 'control', action: 'inject', task_id: args[1], event_id: 4, paused: false, pause_requested: false, message: '已接收章前指令' } } } })
   context.vm.handleConnectionError('网络断开')
   await context.vm.pause()
   assert.equal(context.vm.pauseRequested.value, true)
