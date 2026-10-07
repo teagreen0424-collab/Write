@@ -1,4 +1,4 @@
-import { splitChapterFixtures } from './chapter-fixtures.mjs'
+import { splitChapterFixtures, memoryStorage } from './chapter-fixtures.mjs'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
@@ -11,7 +11,7 @@ const compile = (source) => ts.transpileModule(source, { compilerOptions: {
 } }).outputText
 const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 const dependencyUrls = Object.fromEntries(await Promise.all([
-  ['../types', '../src/types.ts'], ['../utils/chapter', '../src/utils/chapter.ts'],
+  ['../types', '../src/types.ts'], ['../utils/chapter', '../src/utils/chapter.ts'], ['../utils/chapterCreation', '../src/utils/chapterCreation.ts'],
   ['../utils/wordLimits', '../src/utils/wordLimits.ts'],
 ].map(async ([name, path]) => [name, moduleUrl(compile(await readFile(new URL(path, import.meta.url), 'utf8')))])))
 const settle = async () => { for (let i = 0; i < 20; i += 1) { await Promise.resolve(); await nextTick() } }
@@ -25,6 +25,7 @@ async function writing(options = {}) {
   const props = reactive({ novelId: 'novel-a', ...options.props })
   const messages = [], requests = [], emitted = [], hooks = {}, listeners = new Map()
   globalThis.window = { addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: (name) => listeners.delete(name) }
+  globalThis.localStorage = memoryStorage()
   const implementations = {
     listChapterMetadata: async (id) => [chapter(id)],
     createChapter: async (id, data) => chapter(id, { ...data, id: 'created-chapter', status: 'draft', summary: '', tension_score: null, drift_score: null }),
@@ -94,7 +95,9 @@ test('空作品真实模板可手写保存草稿，不调用模型且新文本�
   assert.equal(vm.content.value, '断网也能写的新正文')
   await vm.saveContent()
   const request = context.requests.find((entry) => entry.name === 'createChapter')
-  assert.deepEqual(request.args, ['novel-a', { title: '离线手写章', directive: '作者自己的方向', content: '断网也能写的新正文', status: 'draft' }])
+  const { request_id, ...payload } = request.args[1]
+  assert.match(request_id, /^[0-9a-f-]{36}$/)
+  assert.deepEqual([request.args[0], payload], ['novel-a', { title: '离线手写章', directive: '作者自己的方向', content: '断网也能写的新正文', status: 'draft' }])
   assert.equal(vm.selectedId.value, 'created-chapter')
   assert.equal(vm.isDirty.value, false)
   assert.equal(context.requests.some((entry) => entry.name === 'updateChapter'), false)
@@ -152,7 +155,7 @@ test('新建与普通保存失败保留作者文本及脏状态', async () => {
     context.vm.title.value = '未保存标题'; context.vm.content.value = '不得丢失的正文'
     await context.vm.saveContent()
     assert.equal(context.vm.content.value, '不得丢失的正文'); assert.equal(context.vm.isDirty.value, true)
-    assert.equal(context.vm.saving.value, false); assert.equal(context.messages[0].text, '本地保存失败')
+    assert.equal(context.vm.saving.value, false); assert.match(context.messages[0].text, /本地保存失败/)
     context.dispose()
   }
 })

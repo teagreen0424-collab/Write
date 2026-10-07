@@ -1,9 +1,10 @@
 """章节 CRUD + 写作/续写/改写/定稿/版本 路由。"""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.application import revisions as revisions_uc
+from app.application import chapter_creation as chapter_creation_uc
 from app.application import settle as settle_uc
 from app.application.settlement_receipts import SettleSourceChanged
 from app.application import writing as writing_uc
@@ -12,7 +13,7 @@ from app.application import story_review as story_review_uc
 from app.application import chapter_repair as chapter_repair_uc
 from app.application.word_count import check_word_limits
 from app.infrastructure.db import SessionLocal, get_db
-from app.infrastructure.repository import ChapterRepo, ChapterRevisionRepo, NovelRepo, OutlineRepo
+from app.infrastructure.repository import ChapterRepo, ChapterRevisionRepo
 from app.interfaces import schemas
 
 router = APIRouter(prefix="/novels/{novel_id}/chapters", tags=["chapter"])
@@ -21,14 +22,7 @@ router = APIRouter(prefix="/novels/{novel_id}/chapters", tags=["chapter"])
 # ================= CRUD =================
 def _validate_outline_binding(db: Session, novel_id: str, node_id: str | None):
     """普通章节 CRUD 只能绑定本作品的章级大纲；空字符串表示解除绑定。"""
-    if not node_id:
-        return
-    try:
-        node = OutlineRepo(db).get(novel_id, node_id)
-    except HTTPException as error:
-        raise HTTPException(status_code=400, detail="大纲节点不存在或不属于当前作品") from error
-    if node.level != "chapter":
-        raise HTTPException(status_code=400, detail="章节只能绑定章级大纲节点")
+    chapter_creation_uc.validate_outline_binding(db, novel_id, node_id)
 
 
 @router.get("", response_model=list[schemas.ChapterRead])
@@ -41,11 +35,15 @@ def list_chapter_metadata(novel_id: str, db: Session = Depends(get_db)):
     return ChapterRepo(db).list_metadata(novel_id)
 
 
-@router.post("", response_model=schemas.ChapterRead, status_code=201)
-def create_chapter(novel_id: str, payload: schemas.ChapterCreate, db: Session = Depends(get_db)):
-    NovelRepo(db).get(novel_id)
-    _validate_outline_binding(db, novel_id, payload.outline_node_id)
-    return ChapterRepo(db).create(novel_id, **payload.model_dump(mode="json"))
+@router.post("", response_model=schemas.ChapterCreationRead, status_code=201)
+def create_chapter(novel_id: str, payload: schemas.ChapterCreate, response: Response, db: Session = Depends(get_db)):
+    try:
+        result = chapter_creation_uc.create_manual_chapter(db, novel_id, payload)
+    except chapter_creation_uc.ChapterCreationError as error:
+        return JSONResponse(status_code=error.status_code, content={"detail": error.detail, "code": error.code})
+    if result["creation_replayed"]:
+        response.status_code = 200
+    return result
 
 
 @router.get("/{chapter_id}", response_model=schemas.ChapterRead)

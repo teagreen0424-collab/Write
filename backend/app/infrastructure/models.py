@@ -128,6 +128,19 @@ class Chapter(Base, TimestampMixin):
     directive: Mapped[str] = mapped_column(Text, default="")
 
 
+class ChapterCreationReceipt(Base):
+    """手工创建请求的已提交身份；章删除后保留，作品删除时清理。"""
+
+    __tablename__ = "chapter_creation_receipt"
+
+    request_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    novel_id: Mapped[str] = mapped_column(String(36), ForeignKey("novel.id", ondelete="CASCADE"), index=True)
+    # 不外键关联章节：删除后的迟到创建请求不能复活正文。
+    chapter_id: Mapped[str] = mapped_column(String(36))
+    payload_fingerprint: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[str] = mapped_column(String(40), default=_now)
+
+
 class AutopilotDraft(Base, TimestampMixin):
     """自动驾驶恢复缓存，独立于正文、章节版本和设定事实。
 

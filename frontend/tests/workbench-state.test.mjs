@@ -12,7 +12,7 @@ const compile = (source) => ts.transpileModule(source, { compilerOptions: {
 const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 const dependencyUrls = Object.fromEntries(await Promise.all([
   ['../types', '../src/types.ts'],
-  ['../utils/chapter', '../src/utils/chapter.ts'],
+  ['../utils/chapter', '../src/utils/chapter.ts'], ['../utils/chapterCreation', '../src/utils/chapterCreation.ts'],
   ['../utils/wordLimits', '../src/utils/wordLimits.ts'],
   ['../utils/asyncScope', '../src/utils/asyncScope.ts'],
 ].map(async ([name, path]) => [name, moduleUrl(compile(await readFile(new URL(path, import.meta.url), 'utf8')))])))

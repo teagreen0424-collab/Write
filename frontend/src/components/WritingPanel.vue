@@ -16,6 +16,8 @@ import {
 import { api, streamSSE } from '../api'
 import { chapterLabel, countCharacters } from '../utils/chapter'
 import { wordLimitError, wordLimitLabel, wordLimits } from '../utils/wordLimits'
+import { isChapterCreationResult, listChapterCreations, newChapterCreation, removeChapterCreation, storeChapterCreation,
+  type ChapterCreationIntent } from '../utils/chapterCreation'
 import ChapterRevisionPanel from './ChapterRevisionPanel.vue'
 import type {
   Chapter,
@@ -52,6 +54,25 @@ const content = ref('')
 const contentRef = ref<HTMLTextAreaElement | null>(null)
 const savedSnapshot = ref({ title: '', directive: '', content: '' })
 const saving = ref(false)
+const activeCreation = ref<ChapterCreationIntent | null>(null)
+const creationRecords = ref<ChapterCreationIntent[]>([])
+const creationStorageWarning = ref('')
+const creationMemory = new Map<string, ChapterCreationIntent>()
+const creationPersisted = new Set<string>()
+const creationVolatile = new Set<string>()
+const creationKey = (novelId: string, requestId: string) => `${novelId}/${requestId}`
+let creationBindingRevision = 0
+const hasUnverifiedCreation = computed(() => !!activeCreation.value && !selectedId.value)
+const creationBlocked = computed(() => !!activeCreation.value?.blockedCode)
+const creationBlockedMessage = computed(() => {
+  const labels: Record<string, string> = {
+    chapter_creation_deleted: '原创建章节已删除，本次未重建。请先复制稿件并核对目录，再决定是否另开新章。',
+    chapter_creation_payload_conflict: '原创建请求与首次提交不一致。请先复制稿件并核对目录，再决定是否另开新章。',
+    chapter_creation_scope_conflict: '原创建请求属于其他作品。请先复制稿件并核对目标作品，再决定是否另开新章。',
+    local_record_discarded: '本地核对记录已移除，原稿仍可能在目录。请先复制稿件并核对目录，再决定是否另开新章。',
+  }
+  return labels[activeCreation.value?.blockedCode ?? ''] ?? '原创建请求已被拒绝，请先复制稿件并核对目录。'
+})
 interface EditorScope { novelId: string; chapterId: string | null; epoch: number }
 let pageEpoch = 0
 let editorEpoch = 0
@@ -264,7 +285,7 @@ const hasIncompleteOutput = computed(() => !!streamError.value)
 const hasUnsavedChanges = computed(
   () => isDirty.value || isSummaryDirty.value || streaming.value || hasIncompleteOutput.value
     || saving.value || previewApplying.value || showPreview.value
-    || settleLoading.value || settleApplying.value || showSettle.value,
+    || settleLoading.value || settleApplying.value || showSettle.value || hasUnverifiedCreation.value,
 )
 
 function captureEditorScope(): EditorScope {
@@ -278,6 +299,7 @@ function isCurrentEditorScope(scope: EditorScope): boolean {
 
 function invalidateEditorBinding() {
   editorEpoch += 1
+  activeCreation.value = null
   invalidateChapterDetail()
   saveRequestId += 1
   saving.value = false
@@ -348,7 +370,94 @@ function finishDiscard(confirmed: boolean) {
 }
 
 async function confirmDiscard(): Promise<boolean> {
-  return !hasUnsavedChanges.value || await askDiscard('当前章节有未保存修改或未完成输出，确定放弃并离开吗？')
+  return !hasUnsavedChanges.value || await askDiscard(hasUnverifiedCreation.value
+    ? '这次草稿可能已经保存，结果尚未核对。已保留的浏览器记录可用于恢复；记录保存失败或已移除时请先复制稿件。确定离开当前稿吗？'
+    : '当前章节有未保存修改或未完成输出，确定放弃并离开吗？')
+}
+
+function refreshCreationRecords() {
+  if (!props.novelId) { creationRecords.value = []; return }
+  const result = listChapterCreations(props.novelId)
+  const memory = [...creationMemory.values()].filter((record) => record.novelId === props.novelId)
+  const combined = new Map(result.records.map((record) => [record.requestId, record]))
+  for (const record of result.records) {
+    const key = creationKey(record.novelId, record.requestId)
+    creationPersisted.add(key)
+    if (!creationVolatile.has(key)) creationMemory.set(key, record)
+  }
+  for (const record of memory) {
+    if (!combined.has(record.requestId) || creationVolatile.has(creationKey(record.novelId, record.requestId))) combined.set(record.requestId, record)
+  }
+  if (activeCreation.value?.novelId === props.novelId) combined.set(activeCreation.value.requestId, activeCreation.value)
+  creationRecords.value = [...combined.values()].sort((a, b) => b.createdAt - a.createdAt)
+  if (result.unavailable) creationStorageWarning.value = '浏览器核对记录不可用，请先复制稿件；关闭或刷新后可能无法恢复本次核对入口。'
+  else if (result.invalid) creationStorageWarning.value = '部分待核对记录无法读取，请保留稿件并检查浏览器存储。'
+}
+
+function persistCreation(intent: ChapterCreationIntent) {
+  const key = creationKey(intent.novelId, intent.requestId)
+  creationMemory.set(key, intent)
+  const index = creationRecords.value.findIndex((record) => record.requestId === intent.requestId)
+  if (index < 0) creationRecords.value.push(intent)
+  else creationRecords.value[index] = intent
+  if (storeChapterCreation(intent)) {
+    creationPersisted.add(key)
+    creationVolatile.delete(key)
+    if (!creationVolatile.size && /^(最新编辑稿|本次核对记录)/.test(creationStorageWarning.value)) creationStorageWarning.value = ''
+  } else {
+    creationVolatile.add(key)
+    creationStorageWarning.value = creationPersisted.has(key)
+      ? '最新编辑稿未能更新到浏览器核对记录，请先复制稿件；刷新后只能恢复先前保存的记录。'
+      : '本次核对记录未能保存在浏览器，请先复制稿件；关闭或刷新后可能无法找回这次保存结果。'
+  }
+}
+
+async function restoreCreation(requestId: string) {
+  if (saving.value || streaming.value || repairApplying.value) return
+  const scope = captureEditorScope(), revision = authorRevision
+  if (!await confirmDiscard() || !isCurrentEditorScope(scope) || revision !== authorRevision) return
+  refreshCreationRecords()
+  const record = creationRecords.value.find((row) => row.requestId === requestId && row.novelId === scope.novelId)
+  if (!record) { message.warning('待核对记录已不存在，请核对章节目录'); return }
+  const restored = JSON.parse(JSON.stringify(record)) as ChapterCreationIntent
+  const page = pageEpoch
+  // force 分支同步重置；恢复与赋值之间不让出微任务，避免迟到恢复覆盖刚切换的编辑器。
+  void startNew(true)
+  if (unmounted || page !== pageEpoch || props.novelId !== scope.novelId) return
+  title.value = restored.draft.title
+  content.value = restored.draft.content
+  directive.value = restored.draft.directive
+  activeCreation.value = restored
+  creationBindingRevision = authorRevision
+  message.info('待核对稿已恢复，请点击“核对原保存”确认结果；编辑稿仍保留。')
+}
+
+async function discardCreation(requestId: string) {
+  if (saving.value) return
+  const scope = captureEditorScope()
+  if (!await askDiscard('这条草稿可能已经保存在章节目录。此操作只移除浏览器核对记录，不删除章节；请先复制需要保留的稿件。确定移除本地记录吗？', '移除本地记录')
+    || !isCurrentEditorScope(scope)) return
+  if (!removeChapterCreation(scope.novelId, requestId)) {
+    creationStorageWarning.value = '浏览器记录移除失败，记录仍保留；章节未受到影响。'
+    message.warning(creationStorageWarning.value)
+    return
+  }
+  creationRecords.value = creationRecords.value.filter((record) => record.requestId !== requestId)
+  const key = creationKey(scope.novelId, requestId)
+  creationMemory.delete(key)
+  creationPersisted.delete(key)
+  creationVolatile.delete(key)
+  if (activeCreation.value?.requestId === requestId) {
+    // 移除核对记录不等于授权把可能已保存的稿件再创建一遍。
+    activeCreation.value.blockedCode = 'local_record_discarded'
+  }
+  message.info('本地核对记录已移除，请按需要检查章节目录')
+}
+
+async function copyCreationDraft() {
+  const text = `${title.value}\n章前指令：${directive.value}\n\n${content.value}`
+  try { await navigator.clipboard.writeText(text); message.success('已复制当前稿件') }
+  catch { message.warning('复制未完成，请选中编辑区的标题、指令和正文自行复制') }
 }
 
 function clearStreamOutput() {
@@ -670,6 +779,7 @@ async function generateChapter(
 }
 
 async function doWrite() {
+  if (hasUnverifiedCreation.value) { message.warning('请先核对原草稿保存，或明确另开新章后再生成'); return }
   if (isDirty.value && content.value.trim() && !requireSaved('AI生成新章')) return
   await generateChapter()
 }
@@ -1133,28 +1243,62 @@ function locateExcerpt(excerpt: string) {
 }
 
 async function saveContent() {
-  if (!props.novelId || saving.value || previewApplying.value || deleting.value || streaming.value || repairApplying.value || !isDirty.value) return
+  if (!props.novelId || saving.value || previewApplying.value || deleting.value || streaming.value || repairApplying.value
+    || (!isDirty.value && !hasUnverifiedCreation.value)) return
+  if (creationBlocked.value) { message.warning('原创建意图已被拒绝，请保留稿件核对目录，或明确另开新章'); return }
   let scope = captureEditorScope()
   let requestId = ++saveRequestId
   restoreRequestId += 1
   const revision = authorRevision
   const submitted = authorSnapshot()
+  let intent = scope.chapterId ? null : activeCreation.value
+  if (!scope.chapterId && !intent) {
+    try { intent = newChapterCreation(scope.novelId, submitted) }
+    catch { message.warning('无法建立安全的草稿保存记录，请先复制稿件并检查浏览器支持；本次未提交。'); return }
+    activeCreation.value = intent
+    creationBindingRevision = revision
+    persistCreation(intent)
+  }
   const isCurrent = () => isCurrentEditorScope(scope) && requestId === saveRequestId
   saving.value = true
   try {
     const updated = scope.chapterId
       ? await api.updateChapter(scope.novelId, scope.chapterId, { ...submitted, revision_source: 'manual_save' })
-      : await api.createChapter(scope.novelId, { ...submitted, status: 'draft' })
+      : await api.createChapter(scope.novelId, JSON.parse(intent!.payloadJson))
     if (!isCurrent()) return
     if (!updated.id || updated.novel_id !== scope.novelId || (scope.chapterId && updated.id !== scope.chapterId)) {
       message.warning('保存响应与原作品章节不一致，请保留文本并刷新核对保存结果')
       return
     }
+    let preserveCreationDraft = false
+    let creationReplayed = false
+    if (intent) {
+      if (!isChapterCreationResult(updated)) {
+        message.warning('未收到完整的草稿创建确认，保存结果尚未核对；原提交与编辑稿已保留，请核对原保存。')
+        return
+      }
+      const result = updated
+      preserveCreationDraft = intent.edited || authorRevision !== creationBindingRevision || result.author_changed_since_creation
+      creationReplayed = result.creation_replayed
+      if (activeCreation.value?.requestId !== intent.requestId) return
+      if (!removeChapterCreation(intent.novelId, intent.requestId)) {
+        creationStorageWarning.value = '草稿已确认保存，但浏览器核对记录清理失败；再次核对会读取原章节，不会另建。'
+        message.warning(creationStorageWarning.value)
+      } else {
+        creationRecords.value = creationRecords.value.filter((record) => record.requestId !== intent!.requestId)
+        const key = creationKey(intent.novelId, intent.requestId)
+        creationMemory.delete(key)
+        creationPersisted.delete(key)
+        creationVolatile.delete(key)
+        if (!creationRecords.value.length) creationStorageWarning.value = ''
+      }
+      activeCreation.value = null
+    }
     // 保存回应是基线；等待期间的新输入仍属于作者，不能被回应覆盖或标成已保存。
     chapterLoadRequestId += 1
     upsertChapter(updated)
     savedSnapshot.value = { title: updated.title, directive: updated.directive, content: updated.content }
-    if (revision === authorRevision) {
+    if (revision === authorRevision && !preserveCreationDraft) {
       title.value = updated.title
       directive.value = updated.directive
       content.value = updated.content
@@ -1170,12 +1314,25 @@ async function saveContent() {
       await loadChapters()
       if (!isCurrent()) return
       upsertChapter(updated)
-      message.success('已保存')
+      message.success(intent ? (creationReplayed ? '已核对原保存，未另建章节' : '草稿已保存') : '已保存')
+      if (preserveCreationDraft) message.warning('原章节已确认，当前编辑稿已保留；请核对差异，需要保存新改动时再点击“保存”。')
     } catch (error) {
-      if (isCurrent()) message.warning(`已保存，但章节列表刷新失败：${(error as Error).message}`)
+      if (isCurrent()) {
+        message.warning(`已保存，但章节列表刷新失败：${(error as Error).message}`)
+        if (preserveCreationDraft) message.warning('原章节已确认，当前编辑稿已保留；请核对差异，需要保存新改动时再点击“保存”。')
+      }
     }
   } catch (e) {
-    if (isCurrent()) message.error((e as Error).message)
+    if (isCurrent()) {
+      if (intent && activeCreation.value?.requestId === intent.requestId) {
+        const failure = e as Error & { code?: string }
+        if (['chapter_creation_deleted', 'chapter_creation_payload_conflict', 'chapter_creation_scope_conflict'].includes(failure.code ?? '')) {
+          intent.blockedCode = failure.code
+          persistCreation(intent)
+          message.warning(`${failure.message}；当前稿件仍保留，原请求不会换标识重新创建。请核对目录或明确另开新章。`)
+        } else message.warning(`保存结果尚未核对：${failure.message}。请点击“核对原保存”沿用原提交确认，等待期间的新编辑仍保留。`)
+      } else message.error((e as Error).message)
+    }
   } finally {
     if (isCurrent()) saving.value = false
   }
@@ -1605,7 +1762,10 @@ watch(
     pageEpoch += 1
     chapterLoadRequestId += 1
     chapters.value = []
+    creationRecords.value = []
+    creationStorageWarning.value = ''
     startNew(true)
+    refreshCreationRecords()
     if (props.novelId) {
       const epoch = pageEpoch
       loadChapters().catch((error) => {
@@ -1617,6 +1777,11 @@ watch(
 )
 watch(() => [title.value, content.value, directive.value], () => {
   authorRevision += 1
+  if (activeCreation.value) {
+    activeCreation.value.draft = authorSnapshot()
+    activeCreation.value.edited = activeCreation.value.edited || authorRevision !== creationBindingRevision
+    if (activeCreation.value.blockedCode !== 'local_record_discarded') persistCreation(activeCreation.value)
+  }
   invalidateChapterDetail()
   invalidatePreview(false)
   nextChapterRequestId += 1
@@ -1733,11 +1898,22 @@ onBeforeUnmount(() => {
           <n-button :disabled="!selectedId || repairApplying" :loading="streaming" @click="doContinue">
             续写本章
           </n-button>
-          <n-button :disabled="!novelId || !isDirty || repairApplying || streaming" :loading="saving" @click="saveContent">{{ selectedId ? '保存' : '保存草稿' }}</n-button>
+          <n-button :disabled="!novelId || (!isDirty && !hasUnverifiedCreation) || creationBlocked || repairApplying || streaming" :loading="saving" @click="saveContent">{{ selectedId ? '保存' : hasUnverifiedCreation ? '核对原保存' : '保存草稿' }}</n-button>
           <span v-if="novelId" class="save-state" :class="{ dirty: isDirty }">
             {{ isDirty ? '未保存' : selectedId ? '已保存' : '新章草稿' }}
           </span>
         </div>
+        <section v-if="creationRecords.length || activeCreation || creationStorageWarning" class="story-review-hint" aria-label="待核对草稿保存">
+          <p v-if="hasUnverifiedCreation">这次草稿可能已经保存，结果尚未核对。核对原保存会沿用首次提交，当前新编辑仍保留；需要另写一章时请明确点击“新章”。</p>
+          <p v-if="creationBlocked" role="alert">{{ creationBlockedMessage }}</p>
+          <p v-if="creationStorageWarning" class="repair-error" role="alert">{{ creationStorageWarning }}</p>
+          <n-button v-if="hasUnverifiedCreation" size="small" @click="copyCreationDraft">复制当前稿件</n-button>
+          <div v-for="record in creationRecords" :key="record.requestId" class="btn-row">
+            <span>待核对：{{ record.draft.title || '未命名草稿' }} · {{ new Date(record.createdAt).toLocaleString() }}</span>
+            <n-button size="small" :disabled="saving || activeCreation?.requestId === record.requestId" @click="restoreCreation(record.requestId)">恢复待核对稿</n-button>
+            <n-button size="small" :disabled="saving" @click="discardCreation(record.requestId)">移除本地记录</n-button>
+          </div>
+        </section>
         <div class="btn-row edit-actions">
           <n-select
             v-model:value="rewriteIntent"

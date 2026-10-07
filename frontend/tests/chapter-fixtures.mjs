@@ -6,6 +6,15 @@ export function metadataFixture(chapter) {
     word_count: Array.from((chapter.content ?? '').replace(/[\p{White_Space}\u001c-\u001f]/gu, '')).length }
 }
 
+export function memoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial))
+  return {
+    get length() { return values.size }, key: (index) => [...values.keys()][index] ?? null,
+    getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key), clear: () => values.clear(), values,
+  }
+}
+
 export function splitChapterFixtures(implementations, fallback) {
   const snapshots = new Map()
   const remember = (novelId, row) => snapshots.set(`${novelId}/${row.id}`, structuredClone(row))
@@ -24,7 +33,7 @@ export function splitChapterFixtures(implementations, fallback) {
     if (implementations[name]) api[name] = async (...args) => {
       const row = await implementations[name](...args)
       if (row?.id) remember(args[0], row)
-      return row
+      return name === 'createChapter' ? { created_at: '', updated_at: '', creation_replayed: false, author_changed_since_creation: false, ...row } : row
     }
   }
   return api

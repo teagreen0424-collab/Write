@@ -186,6 +186,11 @@ export interface ChapterMetadata extends Pick<Chapter,
   word_count: number
 }
 
+export interface ChapterCreationResult extends Chapter {
+  creation_replayed: boolean
+  author_changed_since_creation: boolean
+}
+
 export interface Conflict {
   rule: string
   message: string

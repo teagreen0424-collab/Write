@@ -222,6 +222,7 @@ class RelationshipRead(ORMBase):
 
 # ================= Chapter =================
 class ChapterCreate(BaseModel):
+    request_id: Optional[UUID] = None
     title: str = ""
     seq: Optional[int] = None
     content: str = ""
@@ -256,6 +257,11 @@ class ChapterRead(ORMBase):
     directive: str
     created_at: str
     updated_at: str
+
+
+class ChapterCreationRead(ChapterRead):
+    creation_replayed: bool
+    author_changed_since_creation: bool
 
 
 class ChapterMetadata(ORMBase):

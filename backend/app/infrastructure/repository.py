@@ -4,6 +4,7 @@ from typing import Optional, Type
 from fastapi import HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.domain.entities import ChapterStatus, OutlineLevel
 from app.infrastructure import models
@@ -80,6 +81,7 @@ class NovelRepo:
             models.AutopilotTaskEvent,
             models.AutopilotTask,
             models.ChapterSettleReceipt,
+            models.ChapterCreationReceipt,
             models.Character,
             models.Location,
             models.WorldSetting,
@@ -231,14 +233,20 @@ class ChapterRepo:
         )
         return (max_seq or 0) + 1
 
-    def create(self, novel_id: str, **data):
+    def create(self, novel_id: str, *, commit: bool = True, **data):
         self._ensure_novel(novel_id)
         if data.get("seq") is None:
             data["seq"] = self.next_seq(novel_id)
         obj = self.model(novel_id=novel_id, **data)
         self.db.add(obj)
+        self.db.flush()
+        if not commit:
+            return obj
+        # 调用方可能已平移章节序号；保留同一事务，提交前冻结完整响应。
+        frozen = {column.key: getattr(obj, column.key) for column in self.model.__table__.columns}
         self.db.commit()
-        self.db.refresh(obj)
+        for key, value in frozen.items():
+            set_committed_value(obj, key, value)
         return obj
 
     def update(self, novel_id: str, chapter_id: str, **data):

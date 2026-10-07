@@ -5,6 +5,7 @@ import type {
   AutopilotTaskSnapshot,
   Chapter,
   ChapterMetadata,
+  ChapterCreationResult,
   ChapterAuthorFields,
   ChapterRepairPreview,
   ChapterRepairRequest,
@@ -240,7 +241,11 @@ export const api = {
     request<Novel>(`${BASE}/novels`, { method: 'POST', body: JSON.stringify(data) }),
   updateNovel: (id: string, data: Partial<Novel>) =>
     request<Novel>(`${BASE}/novels/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  deleteNovel: (id: string) => request<void>(`${BASE}/novels/${id}`, { method: 'DELETE' }),
+  deleteNovel: async (id: string) => {
+    await request<void>(`${BASE}/novels/${id}`, { method: 'DELETE' })
+    // 浏览器恢复记录是后置清理；缓存或模块加载故障不能把数据库已删除报成失败。
+    try { (await import('./utils/chapterCreation')).clearNovelChapterCreations(id) } catch { /* 保持主删除结果 */ }
+  },
 
   // 六类实体（作品作用域下）
   listEntities: (novelId: string, apiPath: string) =>
@@ -270,7 +275,7 @@ export const api = {
   getChapter: (novelId: string, id: string) =>
     request<Chapter>(`${BASE}/novels/${novelId}/chapters/${id}`),
   createChapter: (novelId: string, data: Record<string, unknown>) =>
-    request<Chapter>(`${BASE}/novels/${novelId}/chapters`, {
+    request<ChapterCreationResult>(`${BASE}/novels/${novelId}/chapters`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),
