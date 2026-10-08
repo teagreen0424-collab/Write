@@ -42,9 +42,12 @@ async function panel(options = {}) {
   }
   const manualChapterURL = moduleUrl(compile((await readFile(new URL('../src/utils/manualChapterDraft.ts', import.meta.url), 'utf8'))
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// manual-page-${sequence}`)
+  const deletionChapterURL = moduleUrl(compile((await readFile(new URL('../src/utils/chapterDeletionDraft.ts', import.meta.url), 'utf8'))
+    .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// deletion-page-${sequence}`)
   const source = 'const __harness = globalThis.__storyCheckHarness\n' + script
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
     .replace(/from ['"]\.\.\/utils\/manualChapterDraft['"]/g, `from '${manualChapterURL}'`)
+    .replace(/from ['"]\.\.\/utils\/chapterDeletionDraft['"]/g, `from '${deletionChapterURL}'`)
     .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1} = __harness')
     .replace(/import \{ api, streamSSE \} from ['"]\.\.\/api['"]/g, 'const { api, streamSSE } = __harness')
     .replace(/from ['"]\.\.\/utils\/chapter['"]/g, `from '${chapterUrl}'`)

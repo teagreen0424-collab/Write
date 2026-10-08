@@ -28,6 +28,7 @@ export interface ManualChapterDraft {
   submission: ManualChapterSubmission | null
   retained: ManualChapterSubmission[]
   error: string
+  deletionDisposition?: { operation: number; revision: number; submissionOperation: number | null; author: ChapterAuthorFields }
 }
 export interface ManualChapterRead {
   key: string
@@ -47,6 +48,23 @@ export const manualChapterDirty = (state: ManualChapterDraft) => !sameAuthor(sta
 export const manualChapterWriteBlocked = (state: ManualChapterDraft | undefined | null) => !!state && (state.pending !== null || state.checking !== null || state.phase === 'unknown' || !state.exists)
 export const findManualChapterDraft = (novelId: string, chapterId: string) => records.get(keyOf(novelId, chapterId))
 export const manualChapterDrafts = () => [...records.values()]
+export const manualChapterNeedsWarning = (state: ManualChapterDraft) => state.pending !== null || state.submission?.outcome === 'unknown'
+  || state.retained.some(submission => submission.outcome === 'unknown')
+  || ((!state.exists || manualChapterDirty(state)) && !(state.deletionDisposition
+    && state.deletionDisposition.revision === state.revision && state.deletionDisposition.submissionOperation === (state.submission?.operation ?? null)
+    && sameAuthor(state.deletionDisposition.author, state.draft)))
+
+export function markManualChapterDeleted(novelId: string, chapterId: string,
+  disposition?: { operation: number; revision: number; submissionOperation: number | null; author: ChapterAuthorFields }) {
+  const state = findManualChapterDraft(novelId, chapterId)
+  if (!state) return
+  state.exists = false
+  state.phase = 'missing'
+  state.observed = null
+  if (disposition) state.deletionDisposition = { ...disposition, author: manualChapterAuthor(disposition.author) }
+  state.version += 1
+  state.error = '原章节当前不存在，页内原提交和后来稿仅可复制，不会重新创建。'
+}
 
 export function completeManualChapter(value: unknown, novelId: string, chapterId: string): value is ManualChapterFact {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
@@ -65,8 +83,7 @@ function installUnload() {
   if (unloadInstalled || typeof window === 'undefined') return
   unloadInstalled = true
   window.addEventListener('beforeunload', event => {
-    if (!manualChapterDrafts().some(state => state.pending !== null || state.submission?.outcome === 'unknown'
-      || state.retained.some(submission => submission.outcome === 'unknown') || !state.exists || manualChapterDirty(state))) return
+    if (!manualChapterDrafts().some(manualChapterNeedsWarning)) return
     event.preventDefault()
     event.returnValue = ''
   })

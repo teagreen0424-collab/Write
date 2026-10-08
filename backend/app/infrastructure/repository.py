@@ -312,51 +312,55 @@ class ChapterRepo:
 
     def delete(self, novel_id: str, chapter_id: str):
         obj = self.get(novel_id, chapter_id)
-        self.db.query(models.ChapterSettleReceipt).filter(
-            models.ChapterSettleReceipt.novel_id == novel_id,
-            models.ChapterSettleReceipt.chapter_id == chapter_id,
-        ).delete(synchronize_session=False)
-        # 删除章节时同步清理它派生出的记忆，避免后续检索召回已经删除的正文。
-        self.db.query(models.MemoryChunk).filter(
-            models.MemoryChunk.novel_id == novel_id,
-            models.MemoryChunk.source_chapter_id == chapter_id,
-        ).delete(synchronize_session=False)
-        # 章节删除仍是永久删除：历史版本一并清理，不保留回收站。
-        self.db.query(models.ChapterRevision).filter(
-            models.ChapterRevision.novel_id == novel_id,
-            models.ChapterRevision.chapter_id == chapter_id,
-        ).delete(synchronize_session=False)
-        # 伏笔本身属于 Story Bible，只解除对已删除章节的引用，不删除伏笔记录。
-        planted = (
-            self.db.query(models.Foreshadowing)
-            .filter(
-                models.Foreshadowing.novel_id == novel_id,
-                models.Foreshadowing.planted_chapter_id == chapter_id,
-            )
-            .all()
-        )
-        consumed = (
-            self.db.query(models.Foreshadowing)
-            .filter(
-                models.Foreshadowing.novel_id == novel_id,
-                models.Foreshadowing.consumed_chapter_id == chapter_id,
-            )
-            .all()
-        )
-        for item in planted:
-            item.planted_chapter_id = ""
-        for item in consumed:
-            item.consumed_chapter_id = ""
-        # 引用变化与章节删除同一事务失效旧设定索引，避免召回已删除章节 ID。
-        affected_ids = {item.id for item in planted + consumed}
-        if affected_ids:
+        try:
+            self.db.query(models.ChapterSettleReceipt).filter(
+                models.ChapterSettleReceipt.novel_id == novel_id,
+                models.ChapterSettleReceipt.chapter_id == chapter_id,
+            ).delete(synchronize_session=False)
+            # 删除章节时同步清理它派生出的记忆，避免后续检索召回已经删除的正文。
             self.db.query(models.MemoryChunk).filter(
                 models.MemoryChunk.novel_id == novel_id,
-                models.MemoryChunk.kind == "setting",
-                models.MemoryChunk.embedding_id.in_(affected_ids),
+                models.MemoryChunk.source_chapter_id == chapter_id,
             ).delete(synchronize_session=False)
-        self.db.delete(obj)
-        self.db.commit()
+            # 章节删除仍是永久删除：历史版本一并清理，不保留回收站。
+            self.db.query(models.ChapterRevision).filter(
+                models.ChapterRevision.novel_id == novel_id,
+                models.ChapterRevision.chapter_id == chapter_id,
+            ).delete(synchronize_session=False)
+            # 伏笔本身属于 Story Bible，只解除对已删除章节的引用，不删除伏笔记录。
+            planted = (
+                self.db.query(models.Foreshadowing)
+                .filter(
+                    models.Foreshadowing.novel_id == novel_id,
+                    models.Foreshadowing.planted_chapter_id == chapter_id,
+                )
+                .all()
+            )
+            consumed = (
+                self.db.query(models.Foreshadowing)
+                .filter(
+                    models.Foreshadowing.novel_id == novel_id,
+                    models.Foreshadowing.consumed_chapter_id == chapter_id,
+                )
+                .all()
+            )
+            for item in planted:
+                item.planted_chapter_id = ""
+            for item in consumed:
+                item.consumed_chapter_id = ""
+            # 引用变化与章节删除同一事务失效旧设定索引，避免召回已删除章节 ID。
+            affected_ids = {item.id for item in planted + consumed}
+            if affected_ids:
+                self.db.query(models.MemoryChunk).filter(
+                    models.MemoryChunk.novel_id == novel_id,
+                    models.MemoryChunk.kind == "setting",
+                    models.MemoryChunk.embedding_id.in_(affected_ids),
+                ).delete(synchronize_session=False)
+            self.db.delete(obj)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
 
     def finalized(self, novel_id: str):
         """已定稿章节（按 seq 排序），用于导出与摘要链。"""

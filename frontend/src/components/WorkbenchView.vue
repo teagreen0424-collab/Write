@@ -248,7 +248,7 @@ function navigateSafely(target: string, navigate: () => void) {
       projectUnsaved.value ? '作品构思或待核对原提交在当前页面内保留，完整刷新或关闭前请复制。' : '',
       settingsDirty.value ? '设定或文风有未保存修改，或原提交待核对。原提交、后来稿和等待状态在本页面内保留，不会自动保存；完整刷新或关闭前请复制。' : '',
       outlineDirty.value ? '大纲有未保存编辑、生成预览，或正在保存。' : '',
-      activeTab.value === 'writing' && writingDirty.value ? '当前章节有未保存修改或未完成输出。已建立手工保存记录的已有章节原提交与后来稿在本页暂留；其他未提交内容离开后可能放弃，完整刷新或关闭前请先复制。' : '',
+      activeTab.value === 'writing' && writingDirty.value ? '当前章节有未保存修改、待核对请求或未完成输出。已建立手工保存或删除记录的已有章节原稿与后来稿在本页暂留；离页不会取消已发删除。其他未提交内容离开后可能放弃，完整刷新或关闭前请先复制。' : '',
       activeTab.value === 'autopilot' && autopilotDirty.value
         ? '自动驾驶继续在后台运行，离开只断开本页监控。未提交构思在当前页面内保留，完整刷新或关闭页面前请复制。未得到暂存确认的本页片段离开后可能丢失，请先复制保留；已暂存片段可以重新找回。'
         : '',

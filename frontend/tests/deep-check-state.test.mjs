@@ -49,9 +49,12 @@ async function panel(options = {}) {
   const script = compileScript(descriptor, { id: `deep-${sequence}` })
   const manualChapterURL = moduleUrl(compile((await readFile(new URL('../src/utils/manualChapterDraft.ts', import.meta.url), 'utf8'))
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// manual-page-${sequence}`)
+  const deletionChapterURL = moduleUrl(compile((await readFile(new URL('../src/utils/chapterDeletionDraft.ts', import.meta.url), 'utf8'))
+    .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// deletion-page-${sequence}`)
   let source = `const __harness = globalThis.${key}\n` + script.content
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
     .replace(/from ['"]\.\.\/utils\/manualChapterDraft['"]/g, `from '${manualChapterURL}'`)
+    .replace(/from ['"]\.\.\/utils\/chapterDeletionDraft['"]/g, `from '${deletionChapterURL}'`)
     .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1} = __harness')
     .replace(/import \{ api, streamSSE \} from ['"]\.\.\/api['"]/g, 'const { api, streamSSE } = __harness')
     .replace(/import (\w+) from ['"]\.\/[^'"]+\.vue['"]/g, 'const $1 = {}')

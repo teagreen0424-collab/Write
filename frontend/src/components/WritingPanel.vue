@@ -23,7 +23,11 @@ import { isChapterCreationResult, listChapterCreations, newChapterCreation, remo
 import { adoptManualChapter, beginManualChapterCheck, beginManualChapterSave, completeManualChapter, editManualChapter,
   failManualChapterSave, findManualChapterDraft, finishManualChapterSave, manualChapterAuthor, manualChapterDraft,
   manualChapterDrafts, manualChapterDirty, manualChapterRead, manualChapterWriteBlocked, missingManualChapter,
-  observeManualChapter, synchronizeManualChapter, type ManualChapterDraft } from '../utils/manualChapterDraft'
+  manualChapterNeedsWarning, markManualChapterDeleted, observeManualChapter, synchronizeManualChapter, type ManualChapterDraft } from '../utils/manualChapterDraft'
+import { beginChapterDeletion, beginChapterDeletionCheck, chapterDeletionDisposed, chapterDeletionDrafts, chapterDeletionNeedsWarning,
+  chapterDeletionWriteBlocked, editChapterDeletion, failChapterDeletion, findChapterDeletionDraft, finishChapterDeletion,
+  missingChapterDeletion, observeChapterDeletion, releaseChapterDeletionDraft, sameChapterDeletionManualGuard, synchronizeChapterDeletion,
+  type ChapterDeletionDraft, type ChapterDeletionManualGuard } from '../utils/chapterDeletionDraft'
 import ChapterRevisionPanel from './ChapterRevisionPanel.vue'
 import type {
   Chapter,
@@ -63,9 +67,14 @@ const content = ref('')
 const contentRef = ref<HTMLTextAreaElement | null>(null)
 const savedSnapshot = ref({ title: '', directive: '', content: '' })
 const manualState = ref<ManualChapterDraft | null>(null)
+const deletionState = ref<ChapterDeletionDraft | null>(null)
+const deletionRecords = computed(() => chapterDeletionDrafts())
+const deletionCopyFallback = ref('')
+const deletionCopyOriginal = ref(false)
 const localSaving = ref(false)
 const saving = computed({ get: () => localSaving.value || !!manualState.value?.pending, set: value => { localSaving.value = value } })
-const manualBlocked = computed(() => manualChapterWriteBlocked(selectedId.value ? findManualChapterDraft(props.novelId, selectedId.value) : null))
+const manualBlocked = computed(() => manualChapterWriteBlocked(selectedId.value ? findManualChapterDraft(props.novelId, selectedId.value) : null)
+  || chapterDeletionWriteBlocked(selectedId.value ? findChapterDeletionDraft(props.novelId, selectedId.value) : null))
 const manualRecords = computed(() => manualChapterDrafts().filter(state => state.submission || manualChapterDirty(state)))
 const manualCopyFallback = ref('')
 const manualCopyOriginal = ref(false)
@@ -216,9 +225,11 @@ const discardPrompt = ref('')
 const discardConfirmText = ref('放弃修改')
 let resolveDiscard: ((confirmed: boolean) => void) | null = null
 const showDelete = ref(false)
+const deleteConfirmation = ref<(EditorScope & { authorRevision: number; deletionVersion: number | null; manual: ChapterDeletionManualGuard | null }) | null>(null)
 const showWriteNext = ref(false)
 const showRevisions = ref(false)
-const deleting = ref(false)
+const localDeleting = ref(false)
+const deleting = computed({ get: () => localDeleting.value || deletionState.value?.pending !== null && !!deletionState.value, set: value => { localDeleting.value = value } })
 const nextTitle = ref('')
 const nextDirective = ref('')
 const nextOutlineNodes = ref<OutlineNode[]>([])
@@ -332,10 +343,12 @@ const isDirty = computed(
 const isSummaryDirty = computed(() => showSummary.value && summaryDraft.value !== savedSummary.value)
 const hasIncompleteOutput = computed(() => !!streamError.value)
 const hasUnsavedChanges = computed(
-  () => isDirty.value || isSummaryDirty.value || streaming.value || hasIncompleteOutput.value
+  () => (isDirty.value && !(deletionState.value && chapterDeletionDisposed(deletionState.value))) || isSummaryDirty.value || streaming.value || hasIncompleteOutput.value
     || saving.value || previewApplying.value || showPreview.value
     || settleLoading.value || settleApplying.value || showSettle.value || hasUnverifiedCreation.value
-    || manualState.value?.phase === 'unknown' || manualState.value?.phase === 'missing',
+    || manualState.value?.phase === 'unknown'
+    || !!(manualState.value?.phase === 'missing' && manualChapterNeedsWarning(manualState.value))
+    || !!(deletionState.value && chapterDeletionNeedsWarning(deletionState.value)),
 )
 
 function captureEditorScope(): EditorScope {
@@ -354,6 +367,7 @@ function invalidateEditorBinding() {
   saveRequestId += 1
   saving.value = false
   manualState.value = null
+  deletionState.value = null
   deleteRequestId += 1
   deleting.value = false
   showDelete.value = false
@@ -418,6 +432,14 @@ function displayManualDraft(state: ManualChapterDraft, updateDetail = true) {
 }
 
 function manualWriteAllowed(novelId = props.novelId, chapterId = selectedId.value) {
+  const deletion = chapterId ? findChapterDeletionDraft(novelId, chapterId) : undefined
+  if (chapterDeletionWriteBlocked(deletion)) {
+    message.warning(!deletion?.exists ? '原章节当前不存在，删除原稿和后来稿仅可复制。' : deletion.pending !== null
+      ? '原章节删除仍在等待回应，同一章节暂不重复写入；离页不会取消删除。'
+      : deletion.checking !== null ? '正在核对删除目标当前资料，请等待核对完成。'
+        : '原删除结果尚未确认；请先核对当前资料，再明确决定是否承担旧删除迟到的风险。')
+    return false
+  }
   const state = chapterId ? findManualChapterDraft(novelId, chapterId) : undefined
   if (!manualChapterWriteBlocked(state)) return true
   message.warning(state?.exists === false ? '原章节当前不存在，页内稿件仅可复制。' : state?.checking !== null
@@ -425,6 +447,70 @@ function manualWriteAllowed(novelId = props.novelId, chapterId = selectedId.valu
     ? '原章节保存仍在等待回应，请先保留输入并等待；同一章节不会重复提交。'
     : '原章节保存结果尚未核对，请先核对当前资料，再明确决定如何继续。')
   return false
+}
+
+function deletionManualGuard(novelId: string, chapterId: string): ChapterDeletionManualGuard | null {
+  const state = findManualChapterDraft(novelId, chapterId)
+  return state ? { version: state.version, revision: state.revision, submissionOperation: state.submission?.operation ?? null,
+    author: manualChapterAuthor(state.draft) } : null
+}
+
+function displayDeletionDraft(state: ChapterDeletionDraft) {
+  if (state.novelId !== props.novelId || state.chapterId !== selectedId.value || unmounted) return
+  manualInternalUpdate += 1
+  try {
+    savedSnapshot.value = manualChapterAuthor(state.baseline)
+    title.value = state.draft.title
+    directive.value = state.draft.directive
+    content.value = state.draft.content
+    selectedDetail.value = state.fact as Chapter
+    if (!state.exists) chapters.value = chapters.value.filter(chapter => chapter.id !== state.chapterId)
+  } finally { manualInternalUpdate -= 1 }
+}
+
+function openDeleteConfirmation() {
+  if (!manualWriteAllowed() || !selectedChapter.value || deleting.value || saving.value || streaming.value
+    || previewApplying.value || repairApplying.value || showRevisions.value || summarySaving.value || settleApplying.value || settleLoading.value) return
+  deleteConfirmation.value = { ...captureEditorScope(), authorRevision, deletionVersion: deletionState.value?.version ?? null,
+    manual: deletionManualGuard(props.novelId, selectedId.value!) }
+  showDelete.value = true
+}
+
+async function checkChapterDeletion(state = deletionState.value) {
+  if (!state) return
+  const check = beginChapterDeletionCheck(state, deletionManualGuard(state.novelId, state.chapterId))
+  if (!check) return
+  const scope = captureEditorScope()
+  try {
+    const fact = await api.getChapter(state.novelId, state.chapterId)
+    if (state.checking !== check.operation) return
+    if (!completeManualChapter(fact, state.novelId, state.chapterId)
+      || !observeChapterDeletion(state, check.read, deletionManualGuard(state.novelId, state.chapterId), fact)) {
+      if (isCurrentEditorScope(scope)) message.warning('当前资料不完整，或读取期间作者输入/已保存事实已改变，请重新明确核对；稿件仍保留。')
+    } else if (isCurrentEditorScope(scope)) message.info('已读取删除目标当前资料。这不是原删除回执，也不能证明旧删除请求以后不会迟到。')
+  } catch (error) {
+    if (state.checking !== check.operation) return
+    if ((error as Error & { status?: number }).status === 404
+      && missingChapterDeletion(state, check.read, deletionManualGuard(state.novelId, state.chapterId))) {
+      markManualChapterDeleted(state.novelId, state.chapterId)
+    } else state.error = `删除目标资料读取未完成：${(error as Error).message}`
+    if (isCurrentEditorScope(scope)) message.warning(state.error)
+  } finally { if (state.checking === check.operation) state.checking = null }
+}
+
+function releaseChapterDeletion() {
+  const state = deletionState.value
+  if (!state || !releaseChapterDeletionDraft(state, deletionManualGuard(state.novelId, state.chapterId))) return
+  displayDeletionDraft(state)
+  if (manualState.value) synchronizeManualChapter(manualState.value, state.fact, state.draft, state.baseline)
+  message.warning('已采用当前资料为编辑基线，没有自动保存或删除；原删除仍没有回执，旧删除请求仍可能迟到。手工未知提交需另行核对，下一次写入由你明确决定。')
+}
+
+async function copyChapterDeletion(state: ChapterDeletionDraft, original: boolean, retainedIndex?: number) {
+  const submission = retainedIndex === undefined ? state.submission : state.retained[retainedIndex]
+  const text = JSON.stringify(manualChapterAuthor(original ? submission.author : state.draft), null, 2)
+  try { await navigator.clipboard.writeText(text); if (!unmounted) message.success(original ? '已复制删除原稿' : '已复制删除期间当前稿') }
+  catch { if (!unmounted) { deletionCopyOriginal.value = original; deletionCopyFallback.value = text } }
 }
 
 async function checkManualChapter(state = manualState.value) {
@@ -694,7 +780,7 @@ async function loadChapters() {
   const revision = authorRevision
   const loaded = await api.listChapterMetadata(novelId)
   if (unmounted || props.novelId !== novelId || epoch !== pageEpoch || requestId !== chapterLoadRequestId) return
-  chapters.value = loaded
+  chapters.value = loaded.filter(chapter => findChapterDeletionDraft(novelId, chapter.id)?.exists !== false)
   syncSelectedMetadata()
   if (props.initialChapterId && !selectedId.value && !streaming.value && !isDirty.value
     && isCurrentEditorScope(scope) && revision === authorRevision) {
@@ -756,6 +842,8 @@ function adoptChapter(c: Chapter) {
   clearMarks()
   const stored = findManualChapterDraft(c.novel_id, c.id)
   if (stored) { manualState.value = stored; displayManualDraft(stored) }
+  const deletion = findChapterDeletionDraft(c.novel_id, c.id)
+  if (deletion) { deletionState.value = deletion; displayDeletionDraft(deletion) }
 }
 
 async function selectChapter(c: Pick<Chapter, 'id' | 'novel_id'>, force = false): Promise<boolean> {
@@ -772,6 +860,11 @@ async function selectChapter(c: Pick<Chapter, 'id' | 'novel_id'>, force = false)
   if (!isCurrent()) return false
   const stored = findManualChapterDraft(scope.novelId, targetId)
   const read = stored ? manualChapterRead(stored) : null
+  const deletion = findChapterDeletionDraft(scope.novelId, targetId)
+  if (chapterDeletionWriteBlocked(deletion) && deletion) {
+    adoptChapter(deletion.fact as Chapter)
+    return true
+  }
   if (stored && (manualChapterWriteBlocked(stored) || manualChapterDirty(stored)) && stored.saved) {
     adoptChapter(stored.saved as Chapter)
     return true
@@ -1588,6 +1681,8 @@ async function saveContent() {
     try {
       const updated = await api.updateChapter(state.novelId, state.chapterId, JSON.parse(submission.payloadJson))
       const known = finishManualChapterSave(state, submission.operation, updated)
+      const deletion = findChapterDeletionDraft(state.novelId, state.chapterId)
+      if (known && deletion) synchronizeChapterDeletion(deletion, updated, state.baseline)
       if (!isCurrent()) return
       displayManualDraft(state)
       if (!known) { message.warning(state.error); return }
@@ -1728,7 +1823,28 @@ async function saveSummary() {
 
 async function deleteChapter() {
   if (!manualWriteAllowed()) return
-  if (!selectedId.value || deleting.value || saving.value || previewApplying.value || repairApplying.value || streaming.value) return
+  if (!selectedId.value || deleting.value || saving.value || previewApplying.value || repairApplying.value || streaming.value
+    || showRevisions.value || summarySaving.value || settleApplying.value || settleLoading.value) return
+  // The handler is also the explicit confirmation entry used by existing callers.
+  // An opened confirmation retains its source guard even if navigation dismisses it.
+  const confirmation = deleteConfirmation.value ?? { ...captureEditorScope(), authorRevision,
+    deletionVersion: findChapterDeletionDraft(props.novelId, selectedId.value)?.version ?? null,
+    manual: deletionManualGuard(props.novelId, selectedId.value) }
+  if ((deleteConfirmation.value && !showDelete.value) || !isCurrentEditorScope(confirmation) || confirmation.authorRevision !== authorRevision
+    || confirmation.deletionVersion !== (findChapterDeletionDraft(props.novelId, selectedId.value)?.version ?? null)
+    || !sameChapterDeletionManualGuard(confirmation.manual, deletionManualGuard(props.novelId, selectedId.value))) {
+    showDelete.value = false
+    message.warning('删除确认期间目标、输入或已保存事实已改变，请重新明确确认永久删除。')
+    return
+  }
+  if (!completeManualChapter(selectedDetail.value, props.novelId, selectedId.value)) {
+    message.warning('尚未取得完整章节资料，请先明确读取当前章节后再删除。')
+    return
+  }
+  const state = beginChapterDeletion(props.novelId, selectedId.value, selectedDetail.value, authorSnapshot(), savedSnapshot.value, confirmation.manual)
+  if (!state) return
+  deletionState.value = state
+  const operation = state.submission.operation
   let scope = captureEditorScope()
   let requestId = ++deleteRequestId
   restoreRequestId += 1
@@ -1739,7 +1855,12 @@ async function deleteChapter() {
   const deletedIndex = chapters.value.findIndex((chapter) => chapter.id === selectedId.value)
   deleting.value = true
   try {
-    await api.deleteChapter(scope.novelId, chapterId)
+    const result = await api.deleteChapter(scope.novelId, chapterId)
+    if (result !== undefined) throw new Error('删除回应未得到对应成功确认，请保留稿件并明确核对当前资料。')
+    if (!finishChapterDeletion(state, operation)) return
+    const manual = state.submission.manual
+    markManualChapterDeleted(novelId, chapterId, manual ? { operation, revision: manual.revision,
+      submissionOperation: manual.submissionOperation, author: manual.author } : undefined)
     if (unmounted || novelId !== props.novelId || epoch !== pageEpoch) return
     chapterLoadRequestId += 1
     invalidateChapterDetail()
@@ -1784,7 +1905,10 @@ async function deleteChapter() {
       if (isCurrent()) message.warning(`章节已删除，但章节列表刷新失败${keepNewEdits ? '；新增文字已保留为未保存草稿' : ''}：${(error as Error).message}`)
     }
   } catch (e) {
-    if (isCurrent()) message.error((e as Error).message)
+    const missing = (e as Error & { status?: number }).status === 404
+    failChapterDeletion(state, operation, (e as Error).message, missing)
+    if (missing) markManualChapterDeleted(novelId, chapterId)
+    if (isCurrent()) message.warning(`删除结果待核对：${(e as Error).message}。原稿和后来稿在本页保留，旧请求仍可能迟到。`)
   } finally {
     if (isCurrent()) deleting.value = false
   }
@@ -2103,13 +2227,22 @@ async function doExport(kind: 'markdown' | 'txt') {
 watch(() => [props.novelId, selectedId.value], invalidateEditorBinding, { flush: 'sync' })
 watch([() => manualState.value?.draft, () => manualState.value?.baseline, () => manualState.value?.saved, () => manualState.value?.phase], (values, previous) => {
   if (manualState.value) displayManualDraft(manualState.value, values[2] !== previous[2])
+  if ((values[2] !== previous[2] || values[1] !== previous[1]) && deletionState.value && manualState.value?.saved)
+    synchronizeChapterDeletion(deletionState.value, manualState.value.saved, manualState.value.baseline)
+}, { flush: 'sync' })
+watch([() => deletionState.value?.draft, () => deletionState.value?.baseline, () => deletionState.value?.phase, () => deletionState.value?.exists], () => {
+  if (deletionState.value) displayDeletionDraft(deletionState.value)
 }, { flush: 'sync' })
 watch([title, content, directive], () => {
   if (!manualInternalUpdate && manualState.value && manualState.value.chapterId === selectedId.value
     && manualState.value.novelId === props.novelId) editManualChapter(manualState.value, authorSnapshot())
+  if (!manualInternalUpdate && deletionState.value && deletionState.value.chapterId === selectedId.value
+    && deletionState.value.novelId === props.novelId) editChapterDeletion(deletionState.value, authorSnapshot())
 }, { flush: 'sync' })
 watch(savedSnapshot, () => {
   if (!manualInternalUpdate && manualState.value) synchronizeManualChapter(manualState.value, selectedDetail.value, authorSnapshot(), savedSnapshot.value)
+  if (!manualInternalUpdate && deletionState.value && completeManualChapter(selectedDetail.value, props.novelId, deletionState.value.chapterId))
+    synchronizeChapterDeletion(deletionState.value, selectedDetail.value, savedSnapshot.value)
 }, { flush: 'sync' })
 watch(
   () => props.novelId,
@@ -2120,8 +2253,10 @@ watch(
     creationRecords.value = []
     creationStorageWarning.value = ''
     startNew(true)
+    const deletion = props.initialChapterId ? findChapterDeletionDraft(props.novelId, props.initialChapterId) : undefined
     const stored = props.initialChapterId ? findManualChapterDraft(props.novelId, props.initialChapterId) : undefined
-    if (stored?.saved) {
+    if (deletion) adoptChapter(deletion.fact as Chapter)
+    else if (stored?.saved) {
       adoptChapter(stored.saved as Chapter)
       if (!manualChapterWriteBlocked(stored) && !manualChapterDirty(stored)) {
         const read = manualChapterRead(stored), scope = captureEditorScope(), revision = authorRevision
@@ -2344,7 +2479,7 @@ onBeforeUnmount(() => {
             type="error"
             secondary
             :disabled="!selectedId || streaming || repairApplying"
-            @click="showDelete = true"
+            @click="openDeleteConfirmation"
           >
             删除章节
           </n-button>
@@ -2358,6 +2493,32 @@ onBeforeUnmount(() => {
           <template v-else>如需生成下一章，请先选择章节列表中的最后一章。</template>
         </div>
       </div>
+      <section v-if="deletionState" aria-label="已有章节删除核对" class="manual-save-record">
+        <p role="status">{{ deletionState.pending !== null ? '原永久删除正在等待回应；离页不会取消，同一章节暂不重复写入。' : deletionState.submission.outcome === 'confirmed' ? '原永久删除已确认，章节与历史版本已删除；页内原稿仅供复制。' : !deletionState.exists ? '原章节当前不存在；当前缺失不是原未知删除的回执，页内稿仅供复制。' : deletionState.phase === 'released' ? '已明确采用当前资料继续编辑；原删除仍没有回执。' : '原删除结果尚未确认；原删除稿和后来输入分别保留。' }}</p>
+        <p>这是本页临时副本，不会恢复已删章节或自动保存；需要保留的内容请在完整刷新或关闭前复制。</p>
+        <p v-if="deletionState.error" role="alert">{{ deletionState.error }}</p>
+        <p v-if="deletionState.submission.outcome === 'unknown'">旧删除请求仍可能迟到。当前 GET 200 只说明此刻存在，不能证明旧请求不会以后删除；GET 404 也不是原删除回执。</p>
+        <n-button size="small" :loading="deletionState.checking !== null" @click="checkChapterDeletion()">核对删除目标当前资料</n-button>
+        <n-button v-if="deletionState.submission.outcome === 'unknown' && deletionState.observed && deletionState.exists" size="small" :disabled="deletionState.pending !== null || deletionState.checking !== null" @click="releaseChapterDeletion">已核对风险，继续编辑此章</n-button>
+        <n-button size="small" @click="copyChapterDeletion(deletionState, true)">复制删除原稿</n-button>
+        <n-button size="small" @click="copyChapterDeletion(deletionState, false)">复制删除期间当前稿</n-button>
+        <div v-if="deletionState.observed" aria-label="删除核对得到的当前章节资料">
+          <p>以下只是刚读取的当前资料。明确继续仅采用编辑基线，保留输入，没有自动写入；旧未知删除仍可能迟到。</p>
+          <n-input readonly :value="deletionState.observed.title" :input-props="{ 'aria-label': '删除核对当前章节标题' }" />
+          <n-input readonly :value="deletionState.observed.directive" :input-props="{ 'aria-label': '删除核对当前章前指令' }" />
+          <n-input readonly type="textarea" :value="deletionState.observed.content" :input-props="{ 'aria-label': '删除核对当前章节正文' }" />
+        </div>
+        <n-button v-for="(_submission, i) in deletionState.retained" :key="i" size="small" @click="copyChapterDeletion(deletionState, true, i)">复制此前未确认删除原稿 {{ i + 1 }}</n-button>
+      </section>
+      <section v-if="deletionRecords.some(state => state.key !== deletionState?.key)" aria-label="其他章节删除页内稿" class="manual-save-record">
+        <p>其他章节的删除原稿和后来稿仅供复制，不切换作品，不恢复已删章节。已确认处置的原稿副本不会单独触发关闭提醒。</p>
+        <article v-for="state in deletionRecords.filter(row => row.key !== deletionState?.key)" :key="state.key" :data-novel-id="state.novelId" :data-chapter-id="state.chapterId">
+          <p>{{ state.fact.title || '原章节' }} · {{ state.pending !== null ? '删除等待回应' : state.submission.outcome === 'confirmed' ? '永久删除已确认' : !state.exists ? '当前缺失，原删除未确认' : '原删除未确认，旧请求仍可能迟到' }}</p>
+          <n-button size="small" @click="copyChapterDeletion(state, true)">复制其他章节删除原稿</n-button>
+          <n-button size="small" @click="copyChapterDeletion(state, false)">复制其他章节删除期间当前稿</n-button>
+          <n-button v-for="(_submission, i) in state.retained" :key="i" size="small" @click="copyChapterDeletion(state, true, i)">复制此前未确认删除原稿 {{ i + 1 }}</n-button>
+        </article>
+      </section>
       <section v-if="manualState" aria-label="已有章节保存核对" class="manual-save-record">
         <p role="status">{{ manualState.phase === 'pending' ? '原提交正在等待保存回应，同一章节不会重复提交。' : manualState.phase === 'unknown' ? '原提交保存结果尚未确认；原提交和当前输入分别保留。' : !manualState.exists ? '原章节当前不存在，以下页内稿件仅可复制，不会重新创建。' : manualState.phase === 'known' ? '原提交已确认保存；当前输入是否保存请看编辑区状态。' : '已明确采用当前资料为编辑基线；当前输入尚需你决定是否保存。' }}</p>
         <p>本页原提交和后来稿暂留，不会自动保存。完整刷新或关闭页面前，请先复制需要保留的内容。</p>
@@ -2673,6 +2834,10 @@ onBeforeUnmount(() => {
       </template>
     </n-modal>
 
+    <n-modal :show="!!deletionCopyFallback" @update:show="value => { if (!value) deletionCopyFallback = '' }" preset="card" title="手动复制删除页内稿" style="width: 640px">
+      <p>剪贴板未写入，请在下方只读框中全选复制。JSON 保留标题、章前指令和正文的原始字符。</p>
+      <n-input readonly type="textarea" :value="deletionCopyFallback" :input-props="{ 'aria-label': deletionCopyOriginal ? '手动复制删除原稿' : '手动复制删除期间当前稿' }" :autosize="{ minRows: 4, maxRows: 14 }" />
+    </n-modal>
     <n-modal v-model:show="showDelete" preset="card" title="删除章节" style="width: 460px">
       <p>
         确定删除“{{ selectedChapter ? chapterLabel(selectedChapter) : '' }}”吗？该章约
@@ -2681,7 +2846,7 @@ onBeforeUnmount(() => {
       <p class="delete-warning">
         该章的<b>历史版本也会一并删除</b>，本阶段没有回收站。
       </p>
-      <p v-if="hasUnsavedChanges" class="delete-warning">当前未保存的修改和未完成输出也会一并丢失。</p>
+      <p v-if="hasUnsavedChanges" class="delete-warning">确认时的章节稿会在本页暂留供复制，不会恢复已删章节；其他未完成输出仍可能放弃。完整刷新或关闭前请先复制需要保留的内容。</p>
       <template #footer>
         <div class="modal-actions">
           <n-button @click="showDelete = false">取消</n-button>
