@@ -559,7 +559,13 @@ class OutlineRepo:
             data["sort_order"] = (max_order or 0) + 1
         obj = self.model(novel_id=novel_id, **data)
         self.db.add(obj)
-        self.db.commit()
+        # flush失败保原inactive/调用方rollback；COMMIT拒绝须释放池中的事务。
+        self.db.flush()
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         self.db.refresh(obj)
         return obj
 
@@ -568,7 +574,13 @@ class OutlineRepo:
         for k, v in data.items():
             if v is not None:
                 setattr(obj, k, v)
-        self.db.commit()
+        # flush失败保原inactive/调用方rollback；COMMIT拒绝须释放池中的事务。
+        self.db.flush()
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         self.db.refresh(obj)
         return obj
 
@@ -593,7 +605,13 @@ class OutlineRepo:
         for idx, node_id in enumerate(ordered_ids):
             obj = self.get(novel_id, node_id)
             obj.sort_order = idx
-        self.db.commit()
+        # flush失败保原inactive/调用方rollback；COMMIT拒绝须释放池中的事务。
+        self.db.flush()
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
 
 
 class MemoryChunkRepo:
