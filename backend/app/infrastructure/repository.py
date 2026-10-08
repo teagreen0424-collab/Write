@@ -51,7 +51,11 @@ class NovelRepo:
         self.db.flush()
         self.db.refresh(obj)
         frozen = {column.key: getattr(obj, column.key) for column in obj.__table__.columns}
-        self.db.commit()
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         for field, value in frozen.items():
             set_committed_value(obj, field, value)
         return obj
@@ -64,7 +68,11 @@ class NovelRepo:
         self.db.flush()
         self.db.refresh(obj)
         frozen = {column.key: getattr(obj, column.key) for column in obj.__table__.columns}
-        self.db.commit()
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         for field, value in frozen.items():
             set_committed_value(obj, field, value)
         return obj
@@ -665,7 +673,11 @@ class ConversationRepo:
         self.db.flush()
         self.db.refresh(obj)
         frozen = {column.key: getattr(obj, column.key) for column in self.model.__table__.columns}
-        self.db.commit()
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         for key, value in frozen.items():
             set_committed_value(obj, key, value)
         return obj
@@ -682,7 +694,11 @@ class ConversationRepo:
         self.db.flush()
         self.db.refresh(obj)
         frozen = {column.key: getattr(obj, column.key) for column in self.model.__table__.columns}
-        self.db.commit()
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         for key, value in frozen.items():
             set_committed_value(obj, key, value)
         return obj
