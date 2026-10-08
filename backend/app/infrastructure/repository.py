@@ -827,6 +827,11 @@ class ConversationRepo:
         if not obj:
             raise HTTPException(status_code=404, detail="消息不存在")
         obj.meta = {**(obj.meta or {}), **(meta or {})}
-        self.db.commit()
+        self.db.flush()
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         self.db.refresh(obj)
         return obj
