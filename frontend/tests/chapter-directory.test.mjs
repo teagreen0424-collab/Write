@@ -12,6 +12,7 @@ const dependencies = Object.fromEntries(await Promise.all([
   ['../utils/chapter', '../src/utils/chapter.ts'], ['../utils/chapterCreation', '../src/utils/chapterCreation.ts'], ['../utils/wordLimits', '../src/utils/wordLimits.ts'],
   ['../utils/asyncScope', '../src/utils/asyncScope.ts'], ['../types', '../src/types.ts'],
   ['../utils/chapterGeneration', '../src/utils/chapterGeneration.ts'],
+  ['../utils/generationConsistency', '../src/utils/generationConsistency.ts'],
 ].map(async ([name, path]) => [name, moduleUrl(compile((await readFile(new URL(path, import.meta.url), 'utf8')).replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)))])))
 const apiModule = await import(moduleUrl(compile(await readFile(new URL('../src/api.ts', import.meta.url), 'utf8'))))
 const flush = async () => { for (let i = 0; i < 25; i++) { await Promise.resolve(); await nextTick() } }

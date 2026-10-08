@@ -4,6 +4,7 @@ import { NButton, NInput, NSelect, useDialog, useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { Chapter, OutlineNode } from '../types'
 import { chapterGenerationOperation, chapterGenerationState, type ChapterGenerationState } from '../utils/chapterGeneration'
+import { createGenerationObservation, generationConsistencyMessage, verifyGenerationConsistency } from '../utils/generationConsistency'
 
 const props = defineProps<{
   novelId: string
@@ -147,12 +148,12 @@ async function write() {
       if (!await confirmDiscardCandidate() || !current(source) || target.revision !== revision || target.pending !== operation) return
     }
     if (!current(source) || target.pending !== operation || !actionsAvailable()) return
-    target.candidate = ''; target.outcome = 'generating'; target.error = ''; copyFallback.value = false
+    target.candidate = ''; target.outcome = 'generating'; target.error = ''; target.ruleCheck = null; copyFallback.value = false
     await api.writeMessageChapter(
       source.conversationId, source.messageId, payload,
       {
         onToken: (text) => { if (target.pending === operation) target.candidate += text },
-        onDone: (data) => {
+        onDone: async (data) => {
           if (target.pending !== operation) return
           if (!validChapter(data?.chapter, source.novelId)) {
             failed(target, '完成回包缺少对应章节详情，保存状态尚未确认，请复制候选并核对目录')
@@ -163,6 +164,15 @@ async function write() {
           // 已落地动作的重放可返回旧章；回执不能把本次不同构思冒称为已保存。
           target.unsavedEdits = target.revision !== revision || data.chapter.directive !== payload.directive
             || (!!payload.title && data.chapter.title !== payload.title) || data.chapter.outline_node_id !== payload.outline_node_id
+          const chapter = target.savedChapter!
+          const checkedSource = { novelId: source.novelId, chapterId: chapter.id,
+            subject: 'saved_chapter' as const, content: chapter.content, allowExistingAction: true }
+          target.ruleCheck = createGenerationObservation(checkedSource)
+          const checked = await verifyGenerationConsistency(data.consistency, checkedSource)
+          if (target.pending !== operation || target.savedChapter !== chapter) return
+          target.ruleCheck = checked
+          // 规则核验等待中的后来构思或改回，也不能冒称已保存并关闭卡片。
+          target.unsavedEdits = target.unsavedEdits || target.revision !== revision
           if (!current(source)) return
           toast.success(target.unsavedEdits ? '章节草稿已保存；等待期间的新构思尚未保存，请先复制' : '章节草稿已保存')
           if (!target.unsavedEdits && (!target.candidate || target.candidate === data.chapter.content)) emit('applied', data.chapter)
@@ -212,8 +222,8 @@ function cancelCard() { if (generating.value) return; if (savedChapter.value) fi
   <div class="write-card">
     <p>确认后创建一章草稿；{{ latestTitle }}。生成期间若最新章或章序改变，将拒绝落库。</p>
     <p v-if="sourceError" role="alert">{{ sourceError }}</p>
-    <n-input v-model:value="title" placeholder="新章标题（留空则自动编号）" />
-    <n-input v-model:value="directive" type="textarea" :autosize="{ minRows: 3, maxRows: 7 }" placeholder="章前指令" />
+    <n-input v-model:value="title" :input-props="{ 'aria-label': '聊天写章标题' }" placeholder="新章标题（留空则自动编号）" />
+    <n-input v-model:value="directive" :input-props="{ 'aria-label': '聊天写章构思' }" type="textarea" :autosize="{ minRows: 3, maxRows: 7 }" placeholder="章前指令" />
     <n-select v-model:value="outlineNodeId" :options="outlineOptions" placeholder="可选：绑定章级大纲" clearable />
     <div class="actions">
       <n-button size="small" :disabled="generating" @click="cancelCard">{{ savedChapter ? '完成本次写章' : '关闭并保留页内稿件' }}</n-button>
@@ -224,6 +234,15 @@ function cancelCard() { if (generating.value) return; if (savedChapter.value) fi
       <p role="status">{{ candidateStatus === 'saved' ? '章节草稿已保存' : candidateStatus === 'unknown' ? '候选保存状态未确认' : candidateStatus === 'failed' ? '未完成，候选未保存' : '生成中，候选尚未确认保存' }}</p>
       <p v-if="candidateDiffers" role="alert">本次候选与已保存章节不同，以下候选未保存；请查看实际章节。</p>
       <p v-if="state.error" role="alert">{{ state.error }}</p>
+      <section v-if="state.ruleCheck" aria-label="聊天写章完整规则检查">
+        <p role="status">{{ generationConsistencyMessage(state.ruleCheck) }}</p>
+        <p>对应已保存章节正文，仅检查伏笔状态、人物已知信息与时间线因果。</p>
+        <ul v-if="state.ruleCheck.conflicts.length">
+          <li v-for="(item, i) in state.ruleCheck.conflicts" :key="i">{{ item.message }}</li>
+        </ul>
+        <p v-for="(warning, i) in state.ruleCheck.warnings" :key="i">{{ warning }}</p>
+        <textarea v-if="candidateDiffers" readonly :value="state.ruleCheck.content" aria-label="规则检查对应的已保存正文" class="candidate-text" />
+      </section>
       <p v-if="unsavedEdits">等待期间的新构思尚未保存，仍保留在上方；请先复制再完成本次写章。</p>
       <p>候选与当前构思在本页面内暂留；完整刷新或关闭页面前，请先复制需要保留的内容。</p>
       <n-button size="small" :disabled="!previewText" @click="copyCandidate">复制候选</n-button>

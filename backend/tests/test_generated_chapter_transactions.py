@@ -1,4 +1,5 @@
 """生成新章的最终短事务：真模型等待、物理SQLite、来源与动作原子性。"""
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -249,7 +250,13 @@ class GeneratedChapterTransactionTest(unittest.TestCase):
 
     def test_readonly_cached_chat_replay_returns_actual_current_chapter_fields(self):
         with patch.object(writing.llm, "stream_complete", return_value=iter([self.body])):
-            saved = frames(self.request(self.chat).text)[-1]["chapter"]
+            original_done = frames(self.request(self.chat).text)[-1]
+            saved = original_done["chapter"]
+        original_check = original_done["consistency"]
+        self.assertEqual({key: original_check[key] for key in ("status", "subject", "novel_id", "chapter_id", "content_sha256", "offset_unit", "conflicts")},
+            {"status": "completed", "subject": "saved_chapter", "novel_id": "work", "chapter_id": saved["id"],
+             "content_sha256": hashlib.sha256(saved["content"].encode("utf-8")).hexdigest(),
+             "offset_unit": "unicode_codepoint", "conflicts": []})
         with self.sessions() as db:
             cached = db.get(models.Chapter, saved["id"])
             self.assertEqual(cached.title, "新候选")
@@ -260,7 +267,15 @@ class GeneratedChapterTransactionTest(unittest.TestCase):
                 values = [json.loads(line[5:]) for line in chat_actions.write_chapter(
                     db, "thread", "source-a", WriteChapterRequest())]
             provider.assert_not_called()
-            self.assertEqual(values, [{"type": "done", "chapter": changed.json()}])
+            self.assertEqual(len(values), 1)
+            self.assertEqual(set(values[0]), {"type", "chapter", "consistency"})
+            self.assertEqual({key: values[0][key] for key in ("type", "chapter")}, {"type": "done", "chapter": changed.json()})
+            check = values[0]["consistency"]
+            self.assertEqual({key: check[key] for key in ("status", "subject", "novel_id", "chapter_id", "content_sha256", "offset_unit", "conflicts")},
+                {"status": "skipped", "subject": "existing_action", "novel_id": "work", "chapter_id": saved["id"],
+                 "content_sha256": hashlib.sha256(changed.json()["content"].encode("utf-8")).hexdigest(),
+                 "offset_unit": "unicode_codepoint", "conflicts": []})
+            self.assertTrue(check["warnings"])
             self.assertEqual(self.rows(), before)
 
     def test_explicit_manual_duplicate_seq_and_shared_core_insert_contract_remain_legal(self):

@@ -1,5 +1,6 @@
 """前章作者来源：实际HTTP改稿、模型等待、精确源值与原动作回放。"""
 from threading import Event, Thread
+import hashlib
 import json
 import unittest
 from unittest.mock import patch
@@ -192,13 +193,26 @@ class GeneratedChapterSourceTest(unittest.TestCase):
     def test_completed_assistant_receipt_replay_survives_previous_author_change_or_delete(self):
         with patch.object(writing.llm, "stream_complete", return_value=iter([self.body])):
             saved = transactions.frames(self.request(self.chat).text)[-1]
+        original_check = saved["consistency"]
+        self.assertEqual({key: original_check[key] for key in ("status", "subject", "novel_id", "chapter_id", "content_sha256", "offset_unit", "conflicts")},
+            {"status": "completed", "subject": "saved_chapter", "novel_id": "work", "chapter_id": saved["chapter"]["id"],
+             "content_sha256": hashlib.sha256(saved["chapter"]["content"].encode("utf-8")).hexdigest(),
+             "offset_unit": "unicode_codepoint", "conflicts": []})
         self.assertEqual(self.client.put(self.base + "/prior", json={"content": "已确认动作之后前章改稿"}).status_code, 200)
         self.assertEqual(self.client.delete(self.base + "/prior").status_code, 204)
         before = self.rows()
         with patch.object(writing.llm, "stream_complete") as provider:
             replay = transactions.frames(self.request(self.chat).text)
         provider.assert_not_called()
-        self.assertEqual(replay, [saved])
+        self.assertEqual(len(replay), 1)
+        self.assertEqual(set(replay[0]), {"type", "chapter", "consistency"})
+        self.assertEqual({key: replay[0][key] for key in ("type", "chapter")}, {key: saved[key] for key in ("type", "chapter")})
+        check = replay[0]["consistency"]
+        self.assertEqual({key: check[key] for key in ("status", "subject", "novel_id", "chapter_id", "content_sha256", "offset_unit", "conflicts")},
+            {"status": "skipped", "subject": "existing_action", "novel_id": "work", "chapter_id": saved["chapter"]["id"],
+             "content_sha256": hashlib.sha256(saved["chapter"]["content"].encode("utf-8")).hexdigest(),
+             "offset_unit": "unicode_codepoint", "conflicts": []})
+        self.assertTrue(check["warnings"])
         self.assertEqual(self.rows(), before)
 
     def test_completed_assistant_deleted_target_remains_missing_without_regeneration(self):

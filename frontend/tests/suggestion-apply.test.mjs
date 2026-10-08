@@ -12,6 +12,7 @@ const compile = (source) => ts.transpileModule(source, { compilerOptions: {
 const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 const creationUrl = moduleUrl(compile(await readFile(new URL('../src/utils/chapterCreation.ts', import.meta.url), 'utf8')))
 const chapterUrl = moduleUrl(compile(await readFile(new URL('../src/utils/chapter.ts', import.meta.url), 'utf8')))
+const consistencyUrl = moduleUrl(compile(await readFile(new URL('../src/utils/generationConsistency.ts', import.meta.url), 'utf8')))
 const limitsUrl = moduleUrl(compile(await readFile(new URL('../src/utils/wordLimits.ts', import.meta.url), 'utf8')))
 let sequence = 0
 const flush = async () => { for (let i = 0; i < 15; i++) { await Promise.resolve(); await nextTick() } }
@@ -39,6 +40,7 @@ async function mount(name, props, api) {
     .replace(/import \{ api(?:, streamSSE)? \} from ['"]\.\.\/api['"]/g, 'const { api, streamSSE } = __harness')
     .replace(/from ['"]\.\.\/utils\/chapter['"]/g, `from '${chapterUrl}'`)
     .replace(/from ['"]\.\.\/utils\/chapterCreation['"]/g, `from '${creationUrl}'`)
+    .replace(/from ['"]\.\.\/utils\/generationConsistency['"]/g, `from '${consistencyUrl}'`)
     .replace(/from ['"]\.\.\/utils\/wordLimits['"]/g, `from '${limitsUrl}'`)
     .replace(/import ChapterRevisionPanel from ['"]\.\/ChapterRevisionPanel.vue['"]/g, 'const { ChapterRevisionPanel } = __harness')
     .replace(/\bonMounted\(/g, '__harness.onMounted(')

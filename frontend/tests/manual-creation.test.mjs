@@ -11,6 +11,7 @@ const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source)
 const dependencies = Object.fromEntries(await Promise.all([
   ['../utils/chapter', '../src/utils/chapter.ts'], ['../utils/chapterCreation', '../src/utils/chapterCreation.ts'], ['../utils/wordLimits', '../src/utils/wordLimits.ts'],
   ['../utils/asyncScope', '../src/utils/asyncScope.ts'], ['../types', '../src/types.ts'],
+  ['../utils/generationConsistency', '../src/utils/generationConsistency.ts'],
 ].map(async ([name, path]) => [name, moduleUrl(compile(await readFile(new URL(path, import.meta.url), 'utf8')))])))
 const creationModule = await import(dependencies['../utils/chapterCreation'])
 const apiModule = await import(moduleUrl(compile((await readFile(new URL('../src/api.ts', import.meta.url), 'utf8'))

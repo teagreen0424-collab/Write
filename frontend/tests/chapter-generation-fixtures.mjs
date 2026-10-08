@@ -26,6 +26,7 @@ export async function cardRuntime(options={}) {
   const key=`__chapterGeneration${++sequence}`; globalThis[key]=harness
   const helper=await readFile(new URL('../src/utils/chapterGeneration.ts',import.meta.url),'utf8')
   const helperURL=moduleURL(compile(helper.replace(/from ['"]vue['"]/g,`from '${vueURL}'`))+`\n// ${key}`)
+  const consistencyURL=moduleURL(compile(await readFile(new URL('../src/utils/generationConsistency.ts',import.meta.url),'utf8')))
   async function definition(name) {
   const descriptor=parse(await readFile(new URL(`../src/components/${name}.vue`,import.meta.url),'utf8')).descriptor
   const compiled=compileScript(descriptor,{id:key})
@@ -37,6 +38,7 @@ export async function cardRuntime(options={}) {
   if(source.includes('../utils/chapterGeneration')) {
     source=source.replace(/from ['"]\.\.\/utils\/chapterGeneration['"]/g,`from '${helperURL}'`)
   }
+  source=source.replace(/from ['"]\.\.\/utils\/generationConsistency['"]/g,`from '${consistencyURL}'`)
   const component=(await import(moduleURL(compile(source)+`\n// ${key}`))).default
   const template=compileTemplate({source:descriptor.template.content,id:key,filename:name+'.vue',compilerOptions:{bindingMetadata:compiled.bindings}})
   assert.deepEqual(template.errors,[])

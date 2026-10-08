@@ -16,7 +16,7 @@ from app.application.revisions import (
     SOURCE_REWRITE,
     update_chapter_with_revision,
 )
-from app.application import generated_chapter
+from app.application import generated_chapter, generated_consistency
 from app.infrastructure.ai.llm_provider import LLMProvider
 from app.infrastructure.ai.prompts import (
     CONTINUE_SYSTEM,
@@ -108,7 +108,9 @@ def write_chapter(
         if action_message_id:
             existing = generated_chapter.existing_chat_chapter(db, novel_id, action_message_id)
             if existing is not None:
-                yield sse({"type": "done", "chapter": _chapter_dict(existing)})
+                chapter = _chapter_dict(existing)
+                yield sse({"type": "done", "chapter": chapter, "consistency": generated_consistency.result(
+                    None, novel_id, chapter["id"], chapter["content"], "existing_action")})
                 return
         source = generated_chapter.capture_source(db, novel_id)
         if expected_latest_id is not None and source.latest_id != expected_latest_id:
@@ -168,11 +170,14 @@ def write_chapter(
             seq=seq, title=title or f"第{seq}章", content=full,
             status="draft", directive=directive, outline_node_id=outline_node_id,
         )
+        facts = generated_consistency.capture_rule_facts(db, novel_id)
         chapter = generated_chapter.save_generated_chapter(
             db, novel_id, source, data, action_message_id=action_message_id,
             previous_source=previous_source,
         )
-        yield sse({"type": "done", "chapter": _chapter_dict(chapter)})
+        chapter = _chapter_dict(chapter)
+        yield sse({"type": "done", "chapter": chapter, "consistency": generated_consistency.result(
+            facts, novel_id, chapter["id"], chapter["content"], "saved_chapter")})
     except SQLAlchemyError:
         # 写事务只由save helper负责回滚；不把SQL、参数或原文带进作者错误提示。
         yield _generation_storage_error()
@@ -213,6 +218,7 @@ def continue_chapter(
             raise ValueError("未生成有效续写内容，请重试")
 
         # 追加正文属于覆盖既有作者内容：先留旧版本，再与追加同一事务提交
+        facts = generated_consistency.capture_rule_facts(db, novel_id)
         updated = update_chapter_with_revision(
             db,
             novel_id,
@@ -221,7 +227,9 @@ def continue_chapter(
             SOURCE_CONTINUE,
             expected_author_fields=source_fields,
         )
-        yield sse({"type": "done", "chapter": _chapter_dict(updated)})
+        chapter = _chapter_dict(updated)
+        yield sse({"type": "done", "chapter": chapter, "consistency": generated_consistency.result(
+            facts, novel_id, chapter["id"], chapter["content"], "saved_chapter")})
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         yield _stream_error(exc)
@@ -288,6 +296,7 @@ def rewrite_passage(
             raise ValueError("未生成有效改写内容，请重试")
 
         new_content = original[:selection_start] + full + original[selection_end:]
+        facts = generated_consistency.capture_rule_facts(db, novel_id)
         if preview:
             yield sse(
                 {
@@ -298,6 +307,8 @@ def rewrite_passage(
                     "expected_author_fields": source_fields,
                     "selection_start": selection_start,
                     "selection_end": selection_end,
+                    "consistency": generated_consistency.result(
+                        facts, novel_id, chapter_id, new_content, "preview_candidate"),
                 }
             )
             return
@@ -307,7 +318,9 @@ def rewrite_passage(
             db, novel_id, chapter_id, {"content": new_content}, SOURCE_REWRITE,
             expected_author_fields=source_fields,
         )
-        yield sse({"type": "done", "chapter": _chapter_dict(updated)})
+        chapter = _chapter_dict(updated)
+        yield sse({"type": "done", "chapter": chapter, "consistency": generated_consistency.result(
+            facts, novel_id, chapter["id"], chapter["content"], "saved_chapter")})
     except Exception as exc:  # noqa: BLE001
         if not preview:
             db.rollback()

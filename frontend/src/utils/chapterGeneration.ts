@@ -1,5 +1,6 @@
 import { reactive, ref } from 'vue'
 import type { Chapter } from '../types'
+import type { GenerationConsistencyObservation } from './generationConsistency'
 
 export interface ChapterGenerationState {
   title: string
@@ -18,6 +19,7 @@ export interface ChapterGenerationState {
   savedChapter: Chapter | null
   unsavedEdits: boolean
   pending: number | null
+  ruleCheck: GenerationConsistencyObservation | null
 }
 
 // 本页面内保留卡片稿件和写入锁；完整重载前仍需作者复制。
@@ -33,7 +35,7 @@ export function chapterGenerationState(novelId: string, conversationId: string, 
       title: '', directive: sourceText, outlineNodeId: '', previousChapterId: '',
       latestTitle: '暂无章节，从第一章开始', outlineOptions: [], sourceLoaded: false,
       needsSourceRefresh: false, revision: 0, outlineRevision: 0, candidate: '', outcome: 'idle', error: '',
-      savedChapter: null, unsavedEdits: false, pending: null,
+      savedChapter: null, unsavedEdits: false, pending: null, ruleCheck: null,
     })
     drafts.set(key, state)
     registryVersion.value += 1

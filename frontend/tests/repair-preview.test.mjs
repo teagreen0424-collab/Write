@@ -12,6 +12,7 @@ const compile = (source) => ts.transpileModule(source, { compilerOptions: {
 const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 const creationUrl = moduleUrl(compile(await readFile(new URL('../src/utils/chapterCreation.ts', import.meta.url), 'utf8')))
 const chapterUrl = moduleUrl(compile(await readFile(new URL('../src/utils/chapter.ts', import.meta.url), 'utf8')))
+const consistencyUrl = moduleUrl(compile(await readFile(new URL('../src/utils/generationConsistency.ts', import.meta.url), 'utf8')))
 const wordLimitsUrl = moduleUrl(compile(await readFile(new URL('../src/utils/wordLimits.ts', import.meta.url), 'utf8')))
 const script = compileScript(parse(await readFile(new URL('../src/components/WritingPanel.vue', import.meta.url), 'utf8')).descriptor, { id: 'repair-preview-test' }).content
 const wait = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
@@ -58,6 +59,7 @@ async function panel(options = {}) {
     .replace(/import \{ api, streamSSE \} from ['"]\.\.\/api['"]/g, 'const { api, streamSSE } = __harness')
     .replace(/from ['"]\.\.\/utils\/chapter['"]/g, `from '${chapterUrl}'`)
     .replace(/from ['"]\.\.\/utils\/chapterCreation['"]/g, `from '${creationUrl}'`)
+    .replace(/from ['"]\.\.\/utils\/generationConsistency['"]/g, `from '${consistencyUrl}'`)
     .replace(/from ['"]\.\.\/utils\/wordLimits['"]/g, `from '${wordLimitsUrl}'`)
     .replace(/import ChapterRevisionPanel from ['"]\.\/ChapterRevisionPanel.vue['"]/g, 'const { ChapterRevisionPanel } = __harness')
     .replace(/\bonMounted\(/g, '__harness.onMounted(')

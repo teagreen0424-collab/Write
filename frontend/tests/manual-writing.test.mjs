@@ -13,6 +13,7 @@ const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source)
 const dependencyUrls = Object.fromEntries(await Promise.all([
   ['../types', '../src/types.ts'], ['../utils/chapter', '../src/utils/chapter.ts'], ['../utils/chapterCreation', '../src/utils/chapterCreation.ts'],
   ['../utils/wordLimits', '../src/utils/wordLimits.ts'],
+  ['../utils/generationConsistency', '../src/utils/generationConsistency.ts'],
 ].map(async ([name, path]) => [name, moduleUrl(compile(await readFile(new URL(path, import.meta.url), 'utf8')))])))
 const settle = async () => { for (let i = 0; i < 20; i += 1) { await Promise.resolve(); await nextTick() } }
 const wait = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }

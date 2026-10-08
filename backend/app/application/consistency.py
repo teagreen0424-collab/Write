@@ -28,11 +28,12 @@ def _extract_secret(known_info: str) -> str:
     return secret.strip("，。、；： ")
 
 
-def consistency_check(db: Session, novel_id: str, content: str) -> dict:
+def rule_conflicts(content: str, foreshadowings, characters, events) -> list[dict]:
+    """仅用已读取的事实运行三类字面规则；偏移按 Python Unicode 码点计数。"""
     conflicts: list[dict] = []
 
     # 1) 伏笔状态：已消费/已悬置的伏笔被再次使用
-    for f in repos.ForeshadowingRepo(db).list(novel_id):
+    for f in foreshadowings:
         if f.status in ("consumed", "suspended") and f.content and f.content in content:
             start = content.find(f.content)
             conflicts.append(
@@ -46,7 +47,7 @@ def consistency_check(db: Session, novel_id: str, content: str) -> dict:
             )
 
     # 2) 人物已知信息：角色知道了「不知道 X」的信息
-    for c in repos.CharacterRepo(db).list(novel_id):
+    for c in characters:
         secret = _extract_secret(c.known_info or "")
         if secret and len(secret) >= 2 and c.name and c.name in content and secret in content:
             start = content.find(secret)
@@ -61,7 +62,6 @@ def consistency_check(db: Session, novel_id: str, content: str) -> dict:
             )
 
     # 3) 时间线先后：因果事件都被提及但顺序倒置
-    events = repos.TimelineEventRepo(db).list(novel_id)
     event_map = {e.id: e for e in events}
     for e in events:
         if not e.cause_id or not e.title:
@@ -83,7 +83,15 @@ def consistency_check(db: Session, novel_id: str, content: str) -> dict:
                     }
                 )
 
-    return {"conflicts": conflicts}
+    return conflicts
+
+
+def consistency_check(db: Session, novel_id: str, content: str) -> dict:
+    # 手动检查、自动驾驶和生成提示共用同一纯规则；保持原仓储读取行为。
+    return {"conflicts": rule_conflicts(content,
+        repos.ForeshadowingRepo(db).list(novel_id),
+        repos.CharacterRepo(db).list(novel_id),
+        repos.TimelineEventRepo(db).list(novel_id))}
 
 
 # ================= 语义层（深度检查） =================

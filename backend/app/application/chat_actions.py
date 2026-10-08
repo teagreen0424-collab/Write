@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.application import outline_plan
 from app.application import writing
 from app.application import inject_idea
-from app.application import generated_chapter
+from app.application import generated_chapter, generated_consistency
 from app.infrastructure import models
 from app.infrastructure.repository import ConversationReadError, ConversationRepo
 from app.interfaces.schemas import OutlineVolumeDraft
@@ -206,7 +206,8 @@ def write_chapter(db: Session, conversation_id: str, message_id: str, request: W
         conv, _ = source_message(db, conversation_id, message_id)
         existing = generated_chapter.existing_chat_chapter(db, conv.novel_id, message_id)
         if existing is not None:
-            yield writing.sse({"type": "done", "chapter": existing})
+            yield writing.sse({"type": "done", "chapter": existing, "consistency": generated_consistency.result(
+                None, conv.novel_id, existing["id"], existing["content"], "existing_action")})
             return
         if request.outline_node_id:
             node = db.query(models.OutlineNode).filter(

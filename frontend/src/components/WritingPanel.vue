@@ -16,6 +16,8 @@ import {
 import { api, streamSSE } from '../api'
 import { chapterLabel, countCharacters } from '../utils/chapter'
 import { wordLimitError, wordLimitLabel, wordLimits } from '../utils/wordLimits'
+import { codePointRange, createGenerationObservation, generationConsistencyMessage, verifyGenerationConsistency,
+  type GenerationConsistencyObservation } from '../utils/generationConsistency'
 import { isChapterCreationResult, listChapterCreations, newChapterCreation, removeChapterCreation, storeChapterCreation,
   type ChapterCreationIntent } from '../utils/chapterCreation'
 import ChapterRevisionPanel from './ChapterRevisionPanel.vue'
@@ -97,6 +99,7 @@ const incompleteTextRef = ref<HTMLTextAreaElement | null>(null)
 let streamRunId = 0
 let unmounted = false
 const conflicts = ref<Conflict[]>([])
+const generationRuleCheck = ref<GenerationConsistencyObservation | null>(null)
 const rewriteIntent = ref('去AI味')
 
 // 去 AI 味扫描与语义深度检查
@@ -143,6 +146,7 @@ const showPreview = ref(false)
 const previewPassage = ref('')
 const previewNew = ref('')
 const previewFullContent = ref('')
+const previewRuleCheck = ref<GenerationConsistencyObservation | null>(null)
 const previewApplying = ref(false)
 interface ParagraphRewriteContext extends EditorScope {
   authorRevision: number
@@ -582,8 +586,14 @@ const segments = computed<Segment[]>(() => {
   const text = content.value
   if (!text) return [{ text, kind: 'plain' }]
   const marks: { start: number; end: number; kind: 'conflict' | 'cliche' }[] = []
-  for (const c of conflicts.value) marks.push({ start: c.start, end: c.end, kind: 'conflict' })
-  for (const h of clicheHits.value) marks.push({ start: h.start, end: h.end, kind: 'cliche' })
+  for (const c of conflicts.value) {
+    const range = codePointRange(text, c.start, c.end)
+    if (range) marks.push({ ...range, kind: 'conflict' })
+  }
+  for (const h of clicheHits.value) {
+    const range = codePointRange(text, h.start, h.end)
+    if (range) marks.push({ ...range, kind: 'cliche' })
+  }
   if (!marks.length) return [{ text, kind: 'plain' }]
   marks.sort((a, b) => {
     if (a.start !== b.start) return a.start - b.start
@@ -629,6 +639,7 @@ function clearMarks() {
   deepLoading.value = false
   outlineCheckLoading.value = false
   conflicts.value = []
+  generationRuleCheck.value = null
   clicheHits.value = []
   cliche.value = null
   deepConflicts.value = []
@@ -638,6 +649,19 @@ function clearMarks() {
   deepRequestError.value = ''
   outlineCheckResult.value = null
   invalidateStoryCheck()
+}
+
+async function receiveSavedRuleCheck(raw: unknown, chapter: Chapter, operationCurrent: () => boolean) {
+  const scope = captureEditorScope(), revision = authorRevision, epoch = qualityEpoch
+  const source = { novelId: chapter.novel_id, chapterId: chapter.id, subject: 'saved_chapter' as const, content: chapter.content }
+  const isCurrent = () => operationCurrent() && isCurrentEditorScope(scope)
+    && revision === authorRevision && epoch === qualityEpoch && content.value === source.content
+  if (!isCurrent()) return
+  generationRuleCheck.value = createGenerationObservation(source)
+  const checked = await verifyGenerationConsistency(raw, source)
+  if (!isCurrent()) return
+  generationRuleCheck.value = checked
+  if (checked.status === 'completed') conflicts.value = checked.conflicts
 }
 
 function invalidateStoryCheck() {
@@ -711,7 +735,7 @@ async function startNew(force = false) {
   clearMarks()
 }
 
-async function reloadAndReselect(chapter?: Chapter, runId?: number) {
+async function reloadAndReselect(chapter?: Chapter, runId?: number, onSaved?: (chapter: Chapter) => Promise<void>) {
   const scope = captureEditorScope()
   const revision = authorRevision
   const detailRequestId = ++chapterDetailRequestId
@@ -729,6 +753,8 @@ async function reloadAndReselect(chapter?: Chapter, runId?: number) {
     rememberSaved()
     clearMarks()
   }
+  await onSaved?.(c)
+  if (!isCurrentEditorScope(scope) || (runId !== undefined && !isCurrentStream(runId))) return
   try {
     await loadChapters()
     if (!isCurrentEditorScope(scope)) return
@@ -803,6 +829,8 @@ async function generateChapter(
         const completedRunId = streamRunId, completedRevision = authorRevision
         // 完成回包已被采用；后置目录读取不能再清理另一轮生成的状态。
         message.success('已生成新章')
+        await receiveSavedRuleCheck(data.consistency, created, () => streamRunId === completedRunId)
+        if (!isCurrentEditorScope(createdScope) || streamRunId !== completedRunId || authorRevision !== completedRevision) return
         try { await loadChapters() }
         catch (error) {
           if (isCurrentEditorScope(createdScope) && streamRunId === completedRunId && authorRevision === completedRevision) {
@@ -876,11 +904,13 @@ async function doContinue() {
       onToken: (t) => { if (isCurrentStream(runId)) streamText.value += t },
       onDone: async (data) => {
         if (!isCurrentStream(runId)) return
-        await reloadAndReselect(data.chapter, runId)
-        if (!isCurrentStream(runId)) return
-        clearStreamOutput()
-        streaming.value = false
-        message.success('已续写')
+        await reloadAndReselect(data.chapter, runId, async (saved) => {
+          if (!isCurrentStream(runId)) return
+          clearStreamOutput()
+          streaming.value = false
+          message.success('已续写')
+          await receiveSavedRuleCheck(data.consistency, saved, () => isCurrentStream(runId))
+        })
       },
       onError: (m, code) => failStream(runId, m, code),
     },
@@ -944,7 +974,7 @@ async function doRewrite() {
     payload,
     {
       onToken: (t) => { if (isCurrentStream(runId)) streamText.value += t },
-      onDone: (obj) => {
+      onDone: async (obj) => {
         if (!isCurrentStream(runId)) return
         if (!isCurrent()) { failStream(runId, '生成期间作者输入已改变，请保留候选输出并重新核对'); return }
         streaming.value = false
@@ -958,6 +988,15 @@ async function doRewrite() {
         }
         clearStreamOutput()
         showPreview.value = true
+        const epoch = qualityEpoch
+        const previewRecord = previewContext.value
+        const source = { novelId: context.novelId, chapterId: context.chapterId!,
+          subject: 'preview_candidate' as const, content: previewFullContent.value }
+        previewRuleCheck.value = createGenerationObservation(source)
+        const checked = await verifyGenerationConsistency(obj?.consistency, source)
+        if (!isCurrent() || epoch !== qualityEpoch || !showPreview.value || previewContext.value !== previewRecord
+          || previewFullContent.value !== source.content) return
+        previewRuleCheck.value = checked
       },
       onError: (m, code) => {
         if (!isCurrentStream(runId)) return
@@ -1037,6 +1076,7 @@ async function applyPreview() {
 }
 
 function invalidatePreview(invalidateApply = true) {
+  previewRuleCheck.value = null
   if (invalidateApply) {
     previewApplyRequestId += 1
     previewApplying.value = false
@@ -1979,7 +2019,8 @@ watch(() => [props.novelId, selectedId.value, showSummary.value], () => {
   summarySaving.value = false
 }, { flush: 'sync' })
 watch(summaryDraft, () => { summaryRevision += 1 }, { flush: 'sync' })
-watch(() => [props.novelId, selectedId.value, title.value, content.value, directive.value, selectedChapter.value?.outline_node_id],
+watch([() => props.novelId, () => selectedId.value, () => title.value, () => content.value,
+  () => directive.value, () => selectedChapter.value?.outline_node_id],
   clearMarks, { flush: 'sync' })
 
 watch(hasUnsavedChanges, (dirty) => emit('dirty-change', dirty), { immediate: true })
@@ -2067,8 +2108,8 @@ onBeforeUnmount(() => {
 
     <div class="editor">
       <div class="editor-toolbar">
-        <n-input v-model:value="title" :disabled="repairApplying || streaming" placeholder="章节标题" class="title-input" />
-        <n-input v-model:value="directive" :disabled="repairApplying || streaming" placeholder="章前指令（如：让 A 与 B 决裂）" class="directive-input" />
+        <n-input v-model:value="title" :input-props="{ 'aria-label': '章节标题' }" :disabled="repairApplying || streaming" placeholder="章节标题" class="title-input" />
+        <n-input v-model:value="directive" :input-props="{ 'aria-label': '章前指令' }" :disabled="repairApplying || streaming" placeholder="章前指令（如：让 A 与 B 决裂）" class="directive-input" />
         <div class="toolbar-groups">
         <div class="btn-row primary-actions">
           <n-button type="primary" :loading="streaming" :disabled="repairApplying || saving" @click="doWrite">AI生成新章</n-button>
@@ -2205,6 +2246,7 @@ onBeforeUnmount(() => {
         <textarea
           ref="contentRef"
           v-model="content"
+          aria-label="章节正文"
           :disabled="repairApplying"
           class="content-editor"
           placeholder="在此写作，或点击上方按钮生成"
@@ -2214,6 +2256,15 @@ onBeforeUnmount(() => {
       <div v-else-if="!streaming" class="editor-empty">
         <n-empty description="选择章节或点击「新章」开始写作" />
       </div>
+
+      <section v-if="generationRuleCheck" aria-label="生成草稿规则检查" class="generation-rule-result">
+        <p role="status">{{ generationConsistencyMessage(generationRuleCheck) }}</p>
+        <p>对应本次已保存正文，仅检查伏笔状态、人物已知信息与时间线因果。</p>
+        <ul v-if="generationRuleCheck.conflicts.length">
+          <li v-for="(item, i) in generationRuleCheck.conflicts" :key="i">{{ item.message }}</li>
+        </ul>
+        <p v-for="(warning, i) in generationRuleCheck.warnings" :key="i">{{ warning }}</p>
+      </section>
 
       <div v-if="conflicts.length || clicheHits.length" class="marks">
         <div class="marks-title">正文标记（冲突 / 套路命中）</div>
@@ -2414,6 +2465,14 @@ onBeforeUnmount(() => {
 
     <n-modal :show="showPreview" @update:show="handlePreviewVisibility" :closable="!previewApplying && !previewRefreshing" :mask-closable="!previewApplying && !previewRefreshing" :close-on-esc="!previewApplying && !previewRefreshing" preset="card" title="改写预览（尚未落库）" style="width: 760px">
       <p v-if="previewError" role="alert" aria-label="改写来源核对提示" class="delete-warning">{{ previewError }}</p>
+      <section v-if="previewRuleCheck" aria-label="改写候选规则检查" class="generation-rule-result">
+        <p role="status">{{ generationConsistencyMessage(previewRuleCheck) }}</p>
+        <p>检查的是候选全文；候选尚未应用，原稿没有因此修改。</p>
+        <ul v-if="previewRuleCheck.conflicts.length">
+          <li v-for="(item, i) in previewRuleCheck.conflicts" :key="i">{{ item.message }}</li>
+        </ul>
+        <p v-for="(warning, i) in previewRuleCheck.warnings" :key="i">{{ warning }}</p>
+      </section>
       <div class="preview-cols" aria-label="段落改写候选">
         <div class="preview-col">
           <div class="preview-col-title">原文</div>
@@ -2795,6 +2854,9 @@ onBeforeUnmount(() => {
   max-height: 200px;
   overflow: auto;
 }
+.generation-rule-result { margin-top: 12px; padding: 10px 12px; background: #fafafa; border: 1px solid #e5e7eb; border-radius: 8px; }
+.generation-rule-result p { margin: 0 0 6px; }
+.generation-rule-result ul { margin: 0; padding-left: 1.4em; }
 .marks-title {
   font-weight: 600;
   margin-bottom: 8px;

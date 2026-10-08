@@ -199,6 +199,17 @@ export interface Conflict {
   entity_id: string
 }
 
+export interface GeneratedRuleCheck {
+  status: 'completed' | 'failed' | 'skipped'
+  novel_id: string
+  chapter_id: string
+  subject: 'saved_chapter' | 'preview_candidate' | 'existing_action'
+  content_sha256: string
+  offset_unit: 'unicode_codepoint'
+  conflicts: Conflict[]
+  warnings: string[]
+}
+
 // ================= 章节版本（阶段八第一轮） =================
 export type RevisionSource =
   | 'manual_save'

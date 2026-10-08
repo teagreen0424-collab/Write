@@ -14,6 +14,7 @@ const dependencyUrls = Object.fromEntries(await Promise.all([
   ['../types', '../src/types.ts'],
   ['../utils/chapter', '../src/utils/chapter.ts'], ['../utils/chapterCreation', '../src/utils/chapterCreation.ts'],
   ['../utils/wordLimits', '../src/utils/wordLimits.ts'],
+  ['../utils/generationConsistency', '../src/utils/generationConsistency.ts'],
   ['../utils/asyncScope', '../src/utils/asyncScope.ts'],
   ['../utils/projectDraft', '../src/utils/projectDraft.ts'],
 ].map(async ([name, path]) => [name, moduleUrl(compile((await readFile(new URL(path, import.meta.url), 'utf8'))

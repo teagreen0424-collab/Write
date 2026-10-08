@@ -7,6 +7,7 @@ import ApplySuggestionCard from './ApplySuggestionCard.vue'
 import OutlinePlanCard from './OutlinePlanCard.vue'
 import ChapterWriteCard from './ChapterWriteCard.vue'
 import { findChapterGenerationState } from '../utils/chapterGeneration'
+import { generationConsistencyMessage } from '../utils/generationConsistency'
 
 const props = defineProps<{ message: ChatMessage; novelId: string | null; actions?: ChatAction[]; actionsStatus?: 'pending' | 'ready' | 'failed' }>()
 const emit = defineEmits<{
@@ -37,9 +38,10 @@ const appliedInfo = ref<Record<string, unknown> | null>(
 
 const isAssistant = computed(() => props.message.role === 'assistant')
 const hasActionSource = computed(() => isAssistant.value && !!props.novelId && !props.message.id.startsWith('local-'))
+const writingDraft = computed(() => hasActionSource.value
+  ? findChapterGenerationState(props.novelId!, props.message.conversation_id, props.message.id) : undefined)
 const hasWritingDraft = computed(() => {
-  if (!hasActionSource.value) return false
-  const draft = findChapterGenerationState(props.novelId!, props.message.conversation_id, props.message.id)
+  const draft = writingDraft.value
   return !!draft && (!!draft.candidate || draft.revision > 0 || draft.outcome !== 'idle' || draft.pending !== null)
 })
 const canApply = computed(
@@ -258,6 +260,14 @@ function onSettingsApplied(summary: { type: string; action: string; id: string }
         @cancel="showOutline = false"
       />
     </div>
+    <section v-if="writingDraft?.ruleCheck" aria-label="聊天写章规则检查" class="generation-rule-result">
+      <p role="status">{{ generationConsistencyMessage(writingDraft.ruleCheck) }}</p>
+      <p>对应本页生成时返回的章节正文。{{ chapterDeleted ? '章节目标已删除，此处仅保留当时的检查记录。' : '通过“写章构思与候选”可查看完整记录。' }}</p>
+      <ul v-if="writingDraft.ruleCheck.conflicts.length">
+        <li v-for="(item, i) in writingDraft.ruleCheck.conflicts" :key="i">{{ item.message }}</li>
+      </ul>
+      <p v-for="(warning, i) in writingDraft.ruleCheck.warnings" :key="i">{{ warning }}</p>
+    </section>
     <div v-if="showWriting && hasActionSource" :inert="actionsStatus !== 'ready' && !hasWritingDraft">
     <ChapterWriteCard
       :novel-id="novelId!"
@@ -342,4 +352,7 @@ function onSettingsApplied(summary: { type: string; action: string; id: string }
   align-items: center;
   gap: 6px;
 }
+.generation-rule-result { width: min(680px, 90vw); box-sizing: border-box; padding: 10px 12px; background: #fffbe6; border: 1px solid #f0dfa3; border-radius: 8px; }
+.generation-rule-result p { margin: 0 0 6px; }
+.generation-rule-result ul { margin: 0; padding-left: 1.4em; }
 </style>
