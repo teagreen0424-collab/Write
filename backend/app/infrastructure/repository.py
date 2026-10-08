@@ -759,7 +759,11 @@ class ConversationRepo:
         if not commit:
             return obj
         frozen = {column.key: getattr(obj, column.key) for column in models.Message.__table__.columns}
-        self.db.commit()
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         for key, value in frozen.items():
             set_committed_value(obj, key, value)
         return obj
