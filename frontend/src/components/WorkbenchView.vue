@@ -248,7 +248,7 @@ function navigateSafely(target: string, navigate: () => void) {
       projectUnsaved.value ? '作品构思或待核对原提交在当前页面内保留，完整刷新或关闭前请复制。' : '',
       settingsDirty.value ? '设定或文风有未保存修改，或原提交待核对。原提交、后来稿和等待状态在本页面内保留，不会自动保存；完整刷新或关闭前请复制。' : '',
       outlineDirty.value ? '大纲有未保存编辑、生成预览，或正在保存。' : '',
-      activeTab.value === 'writing' && writingDirty.value ? '当前章节有未保存修改或未完成输出。' : '',
+      activeTab.value === 'writing' && writingDirty.value ? '当前章节有未保存修改或未完成输出。已建立手工保存记录的已有章节原提交与后来稿在本页暂留；其他未提交内容离开后可能放弃，完整刷新或关闭前请先复制。' : '',
       activeTab.value === 'autopilot' && autopilotDirty.value
         ? '自动驾驶继续在后台运行，离开只断开本页监控。未提交构思在当前页面内保留，完整刷新或关闭页面前请复制。未得到暂存确认的本页片段离开后可能丢失，请先复制保留；已暂存片段可以重新找回。'
         : '',
@@ -360,15 +360,15 @@ onBeforeUnmount(() => { alive = false; createEpoch += 1; asyncScope.dispose(); w
     <n-modal
       :show="showNavigationConfirm"
       preset="card"
-      :title="projectUnsaved ? '保留作品构思并离开？' : activeTab === 'settings' ? '保留设定页内稿并离开？' : activeTab === 'autopilot' ? '离开自动驾驶页？' : '放弃未保存修改？'"
+      :title="projectUnsaved ? '保留作品构思并离开？' : activeTab === 'settings' ? '保留设定页内稿并离开？' : activeTab === 'autopilot' ? '离开自动驾驶页？' : activeTab === 'writing' ? '离开写作页？' : '放弃未保存修改？'"
       style="width: min(480px, calc(100vw - 32px))"
       @update:show="cancelNavigation"
     >
-      <p>{{ navigationWarning }}{{ projectUnsaved ? '作品构思会保留，其他面板的未保存内容仍需按提示核对。确定继续' : activeTab === 'autopilot' || activeTab === 'settings' ? '确定' : '确定放弃并' }}{{ navigationTarget }}吗？</p>
+      <p>{{ navigationWarning }}{{ projectUnsaved ? '作品构思会保留，其他面板的未保存内容仍需按提示核对。确定继续' : activeTab === 'autopilot' || activeTab === 'settings' || activeTab === 'writing' ? '确定' : '确定放弃并' }}{{ navigationTarget }}吗？</p>
       <template #footer>
         <div class="modal-actions">
           <n-button @click="cancelNavigation">继续编辑</n-button>
-          <n-button type="warning" @click="confirmNavigation">{{ projectUnsaved ? '保留并继续' : activeTab === 'autopilot' || activeTab === 'settings' ? '离开并继续' : '放弃并继续' }}</n-button>
+          <n-button type="warning" @click="confirmNavigation">{{ projectUnsaved ? '保留并继续' : activeTab === 'autopilot' || activeTab === 'settings' || activeTab === 'writing' ? '离开并继续' : '放弃并继续' }}</n-button>
         </div>
       </template>
     </n-modal>

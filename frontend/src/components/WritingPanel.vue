@@ -20,6 +20,10 @@ import { codePointRange, createGenerationObservation, generationConsistencyMessa
   type GenerationConsistencyObservation } from '../utils/generationConsistency'
 import { isChapterCreationResult, listChapterCreations, newChapterCreation, removeChapterCreation, storeChapterCreation,
   type ChapterCreationIntent } from '../utils/chapterCreation'
+import { adoptManualChapter, beginManualChapterCheck, beginManualChapterSave, completeManualChapter, editManualChapter,
+  failManualChapterSave, findManualChapterDraft, finishManualChapterSave, manualChapterAuthor, manualChapterDraft,
+  manualChapterDrafts, manualChapterDirty, manualChapterRead, manualChapterWriteBlocked, missingManualChapter,
+  observeManualChapter, synchronizeManualChapter, type ManualChapterDraft } from '../utils/manualChapterDraft'
 import ChapterRevisionPanel from './ChapterRevisionPanel.vue'
 import type {
   Chapter,
@@ -58,7 +62,14 @@ const directive = ref('')
 const content = ref('')
 const contentRef = ref<HTMLTextAreaElement | null>(null)
 const savedSnapshot = ref({ title: '', directive: '', content: '' })
-const saving = ref(false)
+const manualState = ref<ManualChapterDraft | null>(null)
+const localSaving = ref(false)
+const saving = computed({ get: () => localSaving.value || !!manualState.value?.pending, set: value => { localSaving.value = value } })
+const manualBlocked = computed(() => manualChapterWriteBlocked(selectedId.value ? findManualChapterDraft(props.novelId, selectedId.value) : null))
+const manualRecords = computed(() => manualChapterDrafts().filter(state => state.submission || manualChapterDirty(state)))
+const manualCopyFallback = ref('')
+const manualCopyOriginal = ref(false)
+let manualInternalUpdate = 0
 const activeCreation = ref<ChapterCreationIntent | null>(null)
 const creationRecords = ref<ChapterCreationIntent[]>([])
 const creationStorageWarning = ref('')
@@ -323,7 +334,8 @@ const hasIncompleteOutput = computed(() => !!streamError.value)
 const hasUnsavedChanges = computed(
   () => isDirty.value || isSummaryDirty.value || streaming.value || hasIncompleteOutput.value
     || saving.value || previewApplying.value || showPreview.value
-    || settleLoading.value || settleApplying.value || showSettle.value || hasUnverifiedCreation.value,
+    || settleLoading.value || settleApplying.value || showSettle.value || hasUnverifiedCreation.value
+    || manualState.value?.phase === 'unknown' || manualState.value?.phase === 'missing',
 )
 
 function captureEditorScope(): EditorScope {
@@ -341,6 +353,7 @@ function invalidateEditorBinding() {
   invalidateChapterDetail()
   saveRequestId += 1
   saving.value = false
+  manualState.value = null
   deleteRequestId += 1
   deleting.value = false
   showDelete.value = false
@@ -390,6 +403,63 @@ function rememberSaved() {
     directive: directive.value,
     content: content.value,
   }
+}
+
+function displayManualDraft(state: ManualChapterDraft, updateDetail = true) {
+  if (state.novelId !== props.novelId || state.chapterId !== selectedId.value || unmounted) return
+  manualInternalUpdate += 1
+  try {
+    savedSnapshot.value = manualChapterAuthor(state.baseline)
+    title.value = state.draft.title
+    directive.value = state.draft.directive
+    content.value = state.draft.content
+    if (updateDetail && state.saved) selectedDetail.value = state.saved as Chapter
+  } finally { manualInternalUpdate -= 1 }
+}
+
+function manualWriteAllowed(novelId = props.novelId, chapterId = selectedId.value) {
+  const state = chapterId ? findManualChapterDraft(novelId, chapterId) : undefined
+  if (!manualChapterWriteBlocked(state)) return true
+  message.warning(state?.exists === false ? '原章节当前不存在，页内稿件仅可复制。' : state?.checking !== null
+    ? '正在核对当前章节资料，请等待核对完成；本次不会写入。' : state?.pending !== null
+    ? '原章节保存仍在等待回应，请先保留输入并等待；同一章节不会重复提交。'
+    : '原章节保存结果尚未核对，请先核对当前资料，再明确决定如何继续。')
+  return false
+}
+
+async function checkManualChapter(state = manualState.value) {
+  if (!state) return
+  const check = beginManualChapterCheck(state)
+  if (!check) return
+  const scope = captureEditorScope()
+  try {
+    const current = await api.getChapter(state.novelId, state.chapterId)
+    if (state.checking !== check.operation) return
+    if (!observeManualChapter(state, check.read, current)) {
+      if (isCurrentEditorScope(scope)) message.warning('当前章节回应缺少完整资料或读取期间输入已改变，原提交和当前稿仍保留。')
+    } else if (isCurrentEditorScope(scope)) message.info('已读取当前已保存章节。这是当前资料，不能证明原未知请求是否保存或以后是否迟到。')
+  } catch (error) {
+    if (state.checking !== check.operation) return
+    if ((error as Error & { status?: number }).status === 404) missingManualChapter(state, check.read)
+    else state.error = `当前资料读取失败：${(error as Error).message}`
+    if (isCurrentEditorScope(scope)) message.warning(state.error)
+  } finally { if (state.checking === check.operation) state.checking = null }
+}
+
+function adoptCurrentManualChapter() {
+  const state = manualState.value
+  if (!state || !adoptManualChapter(state)) return
+  displayManualDraft(state)
+  message.warning('已采用当前资料作为编辑基线，原提交与当前输入仍保留；没有自动保存。旧未知请求仍可能迟到，下一次保存由你明确决定。')
+}
+
+async function copyManualChapter(state: ManualChapterDraft, original: boolean, retainedIndex?: number) {
+  const submission = retainedIndex === undefined ? state.submission : state.retained[retainedIndex]
+  const raw = original ? submission?.author : state.draft
+  if (!raw) return
+  const text = JSON.stringify(manualChapterAuthor(raw), null, 2)
+  try { await navigator.clipboard.writeText(text); if (!unmounted) message.success(original ? '已复制原提交章节稿' : '已复制当前章节稿') }
+  catch { if (!unmounted) { manualCopyOriginal.value = original; manualCopyFallback.value = text } }
 }
 
 function askDiscard(prompt: string, positiveText = '放弃修改'): Promise<boolean> {
@@ -684,6 +754,8 @@ function adoptChapter(c: Chapter) {
   directive.value = c.directive
   rememberSaved()
   clearMarks()
+  const stored = findManualChapterDraft(c.novel_id, c.id)
+  if (stored) { manualState.value = stored; displayManualDraft(stored) }
 }
 
 async function selectChapter(c: Pick<Chapter, 'id' | 'novel_id'>, force = false): Promise<boolean> {
@@ -698,6 +770,12 @@ async function selectChapter(c: Pick<Chapter, 'id' | 'novel_id'>, force = false)
   const isCurrent = () => isCurrentEditorScope(scope) && requestId === chapterDetailRequestId && revision === authorRevision
   if (!force && !await confirmDiscard()) return false
   if (!isCurrent()) return false
+  const stored = findManualChapterDraft(scope.novelId, targetId)
+  const read = stored ? manualChapterRead(stored) : null
+  if (stored && (manualChapterWriteBlocked(stored) || manualChapterDirty(stored)) && stored.saved) {
+    adoptChapter(stored.saved as Chapter)
+    return true
+  }
   chapterLoadingId.value = targetId
   try {
     const chapter = await api.getChapter(scope.novelId, targetId)
@@ -706,6 +784,7 @@ async function selectChapter(c: Pick<Chapter, 'id' | 'novel_id'>, force = false)
       message.warning('章节读取响应与目标不一致，当前编辑稿已保留')
       return false
     }
+    if (stored && read) observeManualChapter(stored, read, chapter, true)
     upsertChapter(chapter)
     adoptChapter(chapter)
     return true
@@ -772,6 +851,7 @@ async function onRestored(chapter: Chapter) {
   const context = revisionContext.value
   if (!showRevisions.value || !context || !isCurrentEditorScope(context)
     || chapter.novel_id !== context.novelId || chapter.id !== context.chapterId) return
+  showRevisions.value = false
   const requestId = ++restoreRequestId
   const isCurrent = () => isCurrentEditorScope(context) && requestId === restoreRequestId
   chapterLoadRequestId += 1
@@ -793,6 +873,7 @@ async function onRestored(chapter: Chapter) {
 }
 
 function openRevisionHistory() {
+  if (!manualWriteAllowed()) return
   if (!selectedId.value || saving.value || previewApplying.value || deleting.value || repairApplying.value || !requireSaved('查看版本历史')) return
   revisionContext.value = { ...captureEditorScope(), authorRevision }
   showRevisions.value = true
@@ -893,6 +974,7 @@ async function confirmWriteNext() {
 }
 
 async function doContinue() {
+  if (!manualWriteAllowed()) return
   if (!selectedId.value || streaming.value || !requireSaved('续写本章')) return
   const scope = captureEditorScope()
   const runId = await beginStream()
@@ -1019,6 +1101,7 @@ async function doRewrite() {
 // 应用改写：仅此时才落库，来源记为 rewrite_apply
 async function applyPreview() {
   const context = previewContext.value
+  if (context && !manualWriteAllowed(context.novelId, context.chapterId)) return
   if (!context || !showPreview.value || !isCurrentEditorScope(context) || context.authorRevision !== authorRevision
     || !previewGuarded.value || previewRefreshNeeded.value || previewRefreshing.value
     || previewApplying.value || saving.value || streaming.value || hasIncompleteOutput.value || !previewFullContent.value.trim()) return
@@ -1235,6 +1318,7 @@ async function refreshRepairChapter() {
 }
 
 async function applyRepair() {
+  if (!manualWriteAllowed()) return
   const context = repairContext.value
   const preview = repairPreview.value
   if (!context || !preview || !showRepair.value || repairApplying.value || repairLoading.value
@@ -1468,6 +1552,9 @@ function locateExcerpt(excerpt: string) {
 }
 
 async function saveContent() {
+  if (selectedId.value) {
+    if (!manualWriteAllowed() || showRevisions.value || summarySaving.value || settleLoading.value || settleApplying.value) return
+  }
   if (!props.novelId || saving.value || previewApplying.value || deleting.value || streaming.value || repairApplying.value
     || (!isDirty.value && !hasUnverifiedCreation.value)) return
   if (creationBlocked.value) { message.warning('原创建意图已被拒绝，请保留稿件核对目录，或明确另开新章'); return }
@@ -1486,6 +1573,35 @@ async function saveContent() {
   }
   const isCurrent = () => isCurrentEditorScope(scope) && requestId === saveRequestId
   saving.value = true
+  if (scope.chapterId) {
+    const fact = selectedDetail.value
+    if (!completeManualChapter(fact, scope.novelId, scope.chapterId)) {
+      saving.value = false
+      message.warning('未取得完整的原章节资料，请先读取章节后再保存；当前输入仍保留。')
+      return
+    }
+    const state = manualChapterDraft(scope.novelId, scope.chapterId, fact, submitted, savedSnapshot.value)
+    manualState.value = state
+    editManualChapter(state, submitted)
+    const submission = beginManualChapterSave(state)
+    if (!submission) { saving.value = false; return }
+    try {
+      const updated = await api.updateChapter(state.novelId, state.chapterId, JSON.parse(submission.payloadJson))
+      const known = finishManualChapterSave(state, submission.operation, updated)
+      if (!isCurrent()) return
+      displayManualDraft(state)
+      if (!known) { message.warning(state.error); return }
+      if (!state.exists) { message.warning('原提交已收到保存回应，但原章节当前不存在；页内稿件仅可复制。'); return }
+      chapterLoadRequestId += 1
+      upsertChapter(updated)
+      try { await loadChapters(); if (isCurrent()) { upsertChapter(updated); message.success('已保存') } }
+      catch (error) { if (isCurrent()) { upsertChapter(updated); message.warning(`已保存，但章节列表刷新失败：${(error as Error).message}`) } }
+    } catch (error) {
+      failManualChapterSave(state, submission.operation, (error as Error).message, (error as Error & { status?: number }).status === 404)
+      if (isCurrent()) { displayManualDraft(state); message.warning(state.error) }
+    } finally { if (isCurrent()) localSaving.value = false }
+    return
+  }
   try {
     const updated = scope.chapterId
       ? await api.updateChapter(scope.novelId, scope.chapterId, { ...submitted, revision_source: 'manual_save' })
@@ -1577,6 +1693,7 @@ async function closeSummary() {
 }
 
 async function saveSummary() {
+  if (!manualWriteAllowed()) return
   if (!selectedId.value || summarySaving.value || !isSummaryDirty.value) return
   const novelId = props.novelId
   const chapterId = selectedId.value
@@ -1610,6 +1727,7 @@ async function saveSummary() {
 }
 
 async function deleteChapter() {
+  if (!manualWriteAllowed()) return
   if (!selectedId.value || deleting.value || saving.value || previewApplying.value || repairApplying.value || streaming.value) return
   let scope = captureEditorScope()
   let requestId = ++deleteRequestId
@@ -1690,6 +1808,7 @@ async function doConsistency() {
 }
 
 async function doSettle() {
+  if (!manualWriteAllowed()) return
   if (!props.novelId || saving.value || previewApplying.value || deleting.value || summarySaving.value || repairApplying.value || settleLoading.value || settleApplying.value) return
   if (streaming.value || hasIncompleteOutput.value) {
     message.warning('请先处理未完成输出，再定稿沉淀')
@@ -1854,6 +1973,7 @@ async function refreshSettleChapter() {
 }
 
 async function confirmSettle() {
+  if (!manualWriteAllowed()) return
   const context = settleContext.value
   if (!showSettle.value || !context || !isCurrentSettle(context) || settleApplying.value || settleLoading.value || settleConfirmBlocked.value) return
   const pending = settlePendingSubmission.value
@@ -1981,6 +2101,16 @@ async function doExport(kind: 'markdown' | 'txt') {
 }
 
 watch(() => [props.novelId, selectedId.value], invalidateEditorBinding, { flush: 'sync' })
+watch([() => manualState.value?.draft, () => manualState.value?.baseline, () => manualState.value?.saved, () => manualState.value?.phase], (values, previous) => {
+  if (manualState.value) displayManualDraft(manualState.value, values[2] !== previous[2])
+}, { flush: 'sync' })
+watch([title, content, directive], () => {
+  if (!manualInternalUpdate && manualState.value && manualState.value.chapterId === selectedId.value
+    && manualState.value.novelId === props.novelId) editManualChapter(manualState.value, authorSnapshot())
+}, { flush: 'sync' })
+watch(savedSnapshot, () => {
+  if (!manualInternalUpdate && manualState.value) synchronizeManualChapter(manualState.value, selectedDetail.value, authorSnapshot(), savedSnapshot.value)
+}, { flush: 'sync' })
 watch(
   () => props.novelId,
   () => {
@@ -1990,6 +2120,22 @@ watch(
     creationRecords.value = []
     creationStorageWarning.value = ''
     startNew(true)
+    const stored = props.initialChapterId ? findManualChapterDraft(props.novelId, props.initialChapterId) : undefined
+    if (stored?.saved) {
+      adoptChapter(stored.saved as Chapter)
+      if (!manualChapterWriteBlocked(stored) && !manualChapterDirty(stored)) {
+        const read = manualChapterRead(stored), scope = captureEditorScope(), revision = authorRevision
+        const detailRequest = ++chapterDetailRequestId
+        api.getChapter(stored.novelId, stored.chapterId).then(chapter => {
+          if (!isCurrentEditorScope(scope) || revision !== authorRevision || detailRequest !== chapterDetailRequestId) return
+          if (observeManualChapter(stored, read, chapter, true)) displayManualDraft(stored)
+        }).catch(error => {
+          if (!isCurrentEditorScope(scope) || detailRequest !== chapterDetailRequestId) return
+          if ((error as Error & { status?: number }).status === 404) missingManualChapter(stored, read)
+          else message.warning(`章节读取失败，页内稿件仍保留：${(error as Error).message}`)
+        })
+      }
+    }
     refreshCreationRecords()
     if (props.novelId) {
       const epoch = pageEpoch
@@ -2124,9 +2270,9 @@ onBeforeUnmount(() => {
           <n-button :disabled="!selectedId || repairApplying" :loading="streaming" @click="doContinue">
             续写本章
           </n-button>
-          <n-button :disabled="!novelId || (!isDirty && !hasUnverifiedCreation) || creationBlocked || repairApplying || streaming" :loading="saving" @click="saveContent">{{ selectedId ? '保存' : hasUnverifiedCreation ? '核对原保存' : '保存草稿' }}</n-button>
+          <n-button :disabled="manualBlocked || !novelId || (!isDirty && !hasUnverifiedCreation) || creationBlocked || repairApplying || streaming" :loading="saving" @click="saveContent">{{ selectedId ? '保存' : hasUnverifiedCreation ? '核对原保存' : '保存草稿' }}</n-button>
           <span v-if="novelId" class="save-state" :class="{ dirty: isDirty }">
-            {{ isDirty ? '未保存' : selectedId ? '已保存' : '新章草稿' }}
+            {{ manualState?.phase === 'pending' ? '原保存等待回应' : manualState?.phase === 'unknown' ? '原保存未确认' : manualState?.phase === 'missing' ? '原章节不存在' : isDirty ? '未保存' : selectedId ? '已保存' : '新章草稿' }}
           </span>
         </div>
         <section v-if="creationRecords.length || activeCreation || creationStorageWarning" class="story-review-hint" aria-label="待核对草稿保存">
@@ -2212,6 +2358,32 @@ onBeforeUnmount(() => {
           <template v-else>如需生成下一章，请先选择章节列表中的最后一章。</template>
         </div>
       </div>
+      <section v-if="manualState" aria-label="已有章节保存核对" class="manual-save-record">
+        <p role="status">{{ manualState.phase === 'pending' ? '原提交正在等待保存回应，同一章节不会重复提交。' : manualState.phase === 'unknown' ? '原提交保存结果尚未确认；原提交和当前输入分别保留。' : !manualState.exists ? '原章节当前不存在，以下页内稿件仅可复制，不会重新创建。' : manualState.phase === 'known' ? '原提交已确认保存；当前输入是否保存请看编辑区状态。' : '已明确采用当前资料为编辑基线；当前输入尚需你决定是否保存。' }}</p>
+        <p>本页原提交和后来稿暂留，不会自动保存。完整刷新或关闭页面前，请先复制需要保留的内容。</p>
+        <p v-if="manualState.error" role="alert">{{ manualState.error }}</p>
+        <n-button size="small" :loading="manualState.checking !== null" @click="checkManualChapter()">核对当前已保存章节</n-button>
+        <n-button v-if="manualState.phase === 'unknown' && manualState.observed" size="small" :disabled="manualState.pending !== null || manualState.checking !== null || !manualState.exists" @click="adoptCurrentManualChapter">以当前资料继续编辑</n-button>
+        <n-button v-if="manualState.submission" size="small" @click="copyManualChapter(manualState, true)">复制原提交章节稿</n-button>
+        <n-button size="small" @click="copyManualChapter(manualState, false)">复制当前章节稿</n-button>
+        <div v-if="manualState.observed && manualState.phase === 'unknown'" aria-label="核对得到的当前章节资料">
+          <p>以下是刚读取的当前资料，不能证明原未知提交是否保存，也不能证明旧请求以后不会迟到。采用只改变编辑基线，保留当前输入，不自动写入。</p>
+          <n-input readonly :value="manualState.observed.title" :input-props="{ 'aria-label': '核对得到的当前章节标题' }" />
+          <n-input readonly :value="manualState.observed.directive" :input-props="{ 'aria-label': '核对得到的当前章前指令' }" />
+          <n-input readonly type="textarea" :value="manualState.observed.content" :input-props="{ 'aria-label': '核对得到的当前章节正文' }" />
+        </div>
+        <p v-if="manualState.submission?.outcome === 'unknown'">原提交仍没有保存回执；即使采用当前资料，旧请求仍可能迟到，请明确决定下一次保存。</p>
+        <n-button v-for="(_submission, i) in manualState.retained" :key="i" size="small" @click="copyManualChapter(manualState, true, i)">复制此前未确认原提交 {{ i + 1 }}</n-button>
+      </section>
+      <section v-if="manualRecords.some(state => state.key !== manualState?.key)" aria-label="其他章节页内稿" class="manual-save-record">
+        <p>其他章节的原提交和当前稿只供复制，不会切换作品、恢复已删章节或自动保存。</p>
+        <article v-for="state in manualRecords.filter(row => row.key !== manualState?.key)" :key="state.key" :data-novel-id="state.novelId" :data-chapter-id="state.chapterId">
+          <p>{{ state.saved?.title || '原章节' }} · {{ !state.exists ? '已删除，仅可复制' : state.pending !== null ? '等待保存回应' : state.phase === 'unknown' ? '原保存未确认' : manualChapterDirty(state) ? '当前稿未保存' : '原保存已确认' }}</p>
+          <n-button v-if="state.submission" size="small" @click="copyManualChapter(state, true)">复制其他章节原提交</n-button>
+          <n-button size="small" @click="copyManualChapter(state, false)">复制其他章节当前稿</n-button>
+          <n-button v-for="(_submission, i) in state.retained" :key="i" size="small" @click="copyManualChapter(state, true, i)">复制此前未确认原提交 {{ i + 1 }}</n-button>
+        </article>
+      </section>
 
       <div v-if="streaming" class="stream-box">
         <div class="stream-title">生成中…</div>
@@ -2639,6 +2811,10 @@ onBeforeUnmount(() => {
       @restored="onRestored"
     />
   </div>
+    <n-modal :show="!!manualCopyFallback" preset="card" title="手动复制章节稿" style="width: 600px" @update:show="(value: boolean) => { if (!value) manualCopyFallback = '' }">
+      <p>剪贴板不可用，请手动选择并复制以下标题、章前指令与正文。关闭此框不会清除页内稿件。</p>
+      <n-input readonly type="textarea" :value="manualCopyFallback" :input-props="{ 'aria-label': manualCopyOriginal ? '手动复制原提交章节稿' : '手动复制当前章节稿' }" :autosize="{ minRows: 5, maxRows: 16 }" />
+    </n-modal>
 </template>
 
 <style scoped>
@@ -2704,6 +2880,18 @@ onBeforeUnmount(() => {
   gap: 8px;
   margin-bottom: 12px;
 }
+.manual-save-record {
+  flex-shrink: 0;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border: 1px solid #d9e6f2;
+  border-radius: 6px;
+  background: #f7fbff;
+  font-size: 13px;
+}
+.manual-save-record p { margin: 0 0 8px; }
+.manual-save-record :deep(.n-button) { margin: 0 6px 6px 0; }
+.manual-save-record article + article { margin-top: 10px; }
 .title-input {
   width: 100%;
 }

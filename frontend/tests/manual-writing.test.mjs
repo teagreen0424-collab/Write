@@ -19,7 +19,7 @@ const settle = async () => { for (let i = 0; i < 20; i += 1) { await Promise.res
 const wait = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
 const chapter = (novelId = 'novel-a', patch = {}) => ({ id: `${novelId}-chapter`, novel_id: novelId, seq: 1,
   title: `${novelId}标题`, directive: '', content: `${novelId}正文`, status: 'finalized', summary: '原摘要',
-  tension_score: 8, drift_score: 0.2, outline_node_id: `${novelId}-outline`, ...patch })
+  tension_score: 8, drift_score: 0.2, outline_node_id: `${novelId}-outline`, created_at: '', updated_at: '', ...patch })
 let sequence = 0
 
 async function writing(options = {}) {
@@ -52,8 +52,11 @@ async function writing(options = {}) {
   globalThis.__manualWriting = harness
   const descriptor = parse(await readFile(new URL('../src/components/WritingPanel.vue', import.meta.url), 'utf8')).descriptor
   const compiled = compileScript(descriptor, { id: `manual-${++sequence}` })
+  const manualChapterURL = moduleUrl(compile((await readFile(new URL('../src/utils/manualChapterDraft.ts', import.meta.url), 'utf8'))
+    .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// manual-page-${sequence}`)
   let source = 'const __harness = globalThis.__manualWriting\n' + compiled.content
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+    .replace(/from ['"]\.\.\/utils\/manualChapterDraft['"]/g, `from '${manualChapterURL}'`)
     .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1} = __harness')
     .replace(/import \{ api, streamSSE \} from ['"]\.\.\/api['"]/g, 'const { api, streamSSE } = __harness')
     .replace(/import (\w+) from ['"]\.\/[^'"]+\.vue['"]/g, 'const $1 = {}')

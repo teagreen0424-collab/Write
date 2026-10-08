@@ -40,8 +40,11 @@ async function panel(options = {}) {
     useMessage: () => Object.fromEntries(['success', 'warning', 'error', 'info'].map((type) => [type, (text) => messages.push({ type, text })])),
     onMounted: (fn) => { hooks.mount = fn }, onBeforeUnmount: (fn) => { hooks.unmount = fn },
   }
+  const manualChapterURL = moduleUrl(compile((await readFile(new URL('../src/utils/manualChapterDraft.ts', import.meta.url), 'utf8'))
+    .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)) + `\n// manual-page-${sequence}`)
   const source = 'const __harness = globalThis.__storyCheckHarness\n' + script
     .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+    .replace(/from ['"]\.\.\/utils\/manualChapterDraft['"]/g, `from '${manualChapterURL}'`)
     .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1} = __harness')
     .replace(/import \{ api, streamSSE \} from ['"]\.\.\/api['"]/g, 'const { api, streamSSE } = __harness')
     .replace(/from ['"]\.\.\/utils\/chapter['"]/g, `from '${chapterUrl}'`)
