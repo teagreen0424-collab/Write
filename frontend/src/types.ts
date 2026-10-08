@@ -436,6 +436,8 @@ export interface OutlineVolumeDraft {
 export interface OutlineApplyResult {
   volume_id: string
   node_ids: string[]
+  request_id?: string
+  append_replayed?: boolean
 }
 
 /** 仅证明原用户消息已保存，不证明模型回复完成。 */

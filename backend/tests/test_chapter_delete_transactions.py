@@ -118,7 +118,8 @@ class ChapterDeleteTransactionTest(unittest.TestCase):
         with closing(sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True)) as db:
             db.row_factory = sqlite3.Row
             tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
-            self.assertEqual(len(tables), 20)
+            self.assertEqual(len(tables), 21)
+            self.assertIn('outline_append_receipt', tables)
             self.assertEqual([list(row) for row in db.execute("PRAGMA integrity_check")], [["ok"]])
             return {table: [dict(row) for row in db.execute(f'SELECT * FROM "{table}" ORDER BY rowid')] for table in tables}
 

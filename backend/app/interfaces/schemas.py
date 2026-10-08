@@ -609,6 +609,7 @@ class OutlinePreviewRequest(BaseModel):
 
 class OutlineApplyRequest(BaseModel):
     plan: OutlineVolumeDraft
+    request_id: Optional[UUID] = None
 
 
 class AutopilotInjectRequest(BaseModel):

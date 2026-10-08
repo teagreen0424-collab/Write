@@ -169,7 +169,8 @@ class RelationshipRoutesTest(unittest.TestCase):
 
     def test_native_get_eight_exact_fields_and_scoped_reads_are_read_only(self):
         before, embeds = self.rows(), len(self.embed_calls)
-        self.assertEqual(len(before), 20)
+        self.assertEqual(len(before), 21)
+        self.assertIn('outline_append_receipt', before)
         self.assertEqual(self.request("GET", self.url).json(), self.original)
         self.assert_actual_response(self.original)
         for path in (f"/api/v1/novels/foreign/relationships/{self.original['id']}",

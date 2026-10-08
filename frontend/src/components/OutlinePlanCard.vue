@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton, NInput, NSpin, useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { OutlineApplyResult, OutlineVolumeDraft } from '../types'
@@ -20,6 +20,17 @@ const sourceText = ref('')
 const plan = ref<OutlineVolumeDraft | null>(null)
 const loading = ref(false)
 const applying = ref(false)
+const appendSubmission = ref<{
+  requestId: string; draft: OutlineVolumeDraft; sourceRevision: number; planRevision: number
+} | null>(null)
+const appendUnconfirmed = ref(false)
+const originalAppendText = computed(() => {
+  const original = appendSubmission.value?.draft
+  if (!original) return ''
+  const chapterText = (chapter: { title: string; summary: string }) => `章：${chapter.title}\n${chapter.summary}`
+  return [`卷：${original.title}`, original.summary, ...original.chapters.map(chapterText),
+    ...original.acts.flatMap(act => [`幕：${act.title}`, act.summary, ...act.chapters.map(chapterText)])].join('\n\n')
+})
 const asyncScope = createAsyncScope(() => JSON.stringify([props.novelId, props.conversationId ?? '', props.messageId ?? '']))
 let previewSequence = 0
 let applySequence = 0
@@ -39,10 +50,12 @@ watch(() => [props.novelId, props.conversationId, props.messageId], () => {
   plan.value = null
   loading.value = false
   applying.value = false
+  appendSubmission.value = null
+  appendUnconfirmed.value = false
 }, { flush: 'sync' })
 
 async function preview() {
-  if (!props.novelId || loading.value || applying.value) return
+  if (!props.novelId || loading.value || applying.value || appendUnconfirmed.value) return
   if (!props.messageId && !sourceText.value.trim()) {
     toast.warning('请先写下这卷的构思')
     return
@@ -69,7 +82,7 @@ async function preview() {
 
 async function apply() {
   if (!props.novelId || applying.value || loading.value) return
-  const draft: OutlineVolumeDraft | null = plan.value ? JSON.parse(JSON.stringify(plan.value)) : null
+  const draft: OutlineVolumeDraft | null = appendSubmission.value?.draft ?? (plan.value ? JSON.parse(JSON.stringify(plan.value)) : null)
   if (!draft || !draft.title.trim()) {
     toast.warning('卷标题不能为空')
     return
@@ -81,15 +94,22 @@ async function apply() {
   const scope = asyncScope.capture()
   const sequence = ++applySequence
   const novelId = props.novelId, conversationId = props.conversationId, messageId = props.messageId
-  const expectedSourceRevision = sourceRevision
-  const expectedPlanRevision = planRevision
+  const workbench = !conversationId || !messageId
+  if (workbench && !appendSubmission.value) appendSubmission.value = {
+    requestId: crypto.randomUUID(), draft, sourceRevision, planRevision,
+  }
+  const submission = appendSubmission.value
+  const expectedSourceRevision = submission?.sourceRevision ?? sourceRevision
+  const expectedPlanRevision = submission?.planRevision ?? planRevision
   const isCurrent = () => asyncScope.isCurrent(scope) && sequence === applySequence
   applying.value = true
   try {
     const result = conversationId && messageId
       ? await api.applyMessageOutline(conversationId, messageId, draft)
-      : await api.applyOutline(novelId, draft)
+      : await api.applyOutline(novelId, draft, submission!.requestId)
     if (!isCurrent()) return
+    appendSubmission.value = null
+    appendUnconfirmed.value = false
     if (sourceRevision !== expectedSourceRevision || planRevision !== expectedPlanRevision) {
       toast.success('大纲已追加到作品，当前新增编辑已保留')
       return
@@ -97,7 +117,15 @@ async function apply() {
     toast.success('大纲已追加到作品')
     emit('applied', result)
   } catch (error) {
-    if (isCurrent()) toast.error((error as Error).message)
+    if (!isCurrent()) return
+    const failure = error as Error & { status?: number; code?: string }
+    if (workbench && (!failure.status || failure.status >= 500 || failure.status === 408 || failure.status === 429 || failure.code === 'outline_append_busy')) {
+      appendUnconfirmed.value = true
+      toast.warning(`大纲追加结果未确认：${failure.message}。请核对原追加，原提交与当前新编辑均保留。`)
+    } else {
+      if (workbench && !appendUnconfirmed.value) appendSubmission.value = null
+      toast.error(failure.message)
+    }
   } finally {
     if (isCurrent()) applying.value = false
   }
@@ -120,10 +148,15 @@ onBeforeUnmount(() => {
       placeholder="描述这一卷的人物、目标、冲突与预期转折"
     />
     <div class="actions">
-      <n-button size="small" :loading="loading" :disabled="applying" @click="preview">
+      <n-button size="small" :loading="loading" :disabled="applying || appendUnconfirmed" @click="preview">
         {{ plan ? '重新生成预览' : '生成预览' }}
       </n-button>
       <n-button size="small" @click="emit('cancel')">关闭</n-button>
+    </div>
+    <div v-if="appendUnconfirmed && appendSubmission" class="append-warning" role="status">
+      <p>本次追加可能已经保存。核对会沿用原请求与原大纲，不会把等待期间的新编辑重复追加。</p>
+      <p>关闭后将无法在这次预览中核对，请先复制下方原大纲与当前编辑。</p>
+      <n-input :value="originalAppendText" type="textarea" readonly :autosize="{ minRows: 2, maxRows: 5 }" :input-props="{ 'aria-label': '原追加大纲，可手动复制' }" />
     </div>
     <n-spin :show="loading">
       <div v-if="plan" class="draft">
@@ -154,7 +187,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="actions">
           <n-button size="tiny" @click="plan.acts.push({ title: '', summary: '', chapters: [] })">+ 幕</n-button>
-          <n-button type="primary" size="small" :loading="applying" @click="apply">确认追加到大纲</n-button>
+          <n-button type="primary" size="small" :loading="applying" @click="apply">{{ appendUnconfirmed ? '核对原追加' : '确认追加到大纲' }}</n-button>
         </div>
       </div>
     </n-spin>

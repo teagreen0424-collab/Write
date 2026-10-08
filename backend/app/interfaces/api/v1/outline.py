@@ -1,9 +1,11 @@
 """大纲节点路由（卷/幕/章三级 + 同级重排）。"""
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.domain.entities import OutlineLevel
 from app.application import outline_plan
+from app.application.outline_append import OutlineAppendError, append_outline_once
 from app.infrastructure.db import get_db
 from app.infrastructure.repository import OutlineRepo
 from app.interfaces import schemas
@@ -18,6 +20,11 @@ def preview_outline(novel_id: str, payload: schemas.OutlinePreviewRequest, db: S
 
 @router.post("/apply")
 def apply_outline(novel_id: str, payload: schemas.OutlineApplyRequest, db: Session = Depends(get_db)):
+    if payload.request_id is not None:
+        try:
+            return append_outline_once(db, novel_id, payload.plan, str(payload.request_id))
+        except OutlineAppendError as error:
+            return JSONResponse(status_code=error.status_code, content={'detail': error.detail, 'code': error.code})
     return outline_plan.apply_outline(db, novel_id, payload.plan)
 
 

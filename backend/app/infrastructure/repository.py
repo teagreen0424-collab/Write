@@ -112,6 +112,7 @@ class NovelRepo:
                 models.AutopilotTask,
                 models.ChapterSettleReceipt,
                 models.ChapterCreationReceipt,
+                models.OutlineAppendReceipt,
                 models.Character,
                 models.Location,
                 models.WorldSetting,

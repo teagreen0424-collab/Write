@@ -141,6 +141,19 @@ class ChapterCreationReceipt(Base):
     created_at: Mapped[str] = mapped_column(String(40), default=_now)
 
 
+class OutlineAppendReceipt(Base):
+    """工作台追加请求的已提交身份；节点删除后保留，作品删除时清理。"""
+
+    __tablename__ = "outline_append_receipt"
+
+    request_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    novel_id: Mapped[str] = mapped_column(String(36), ForeignKey("novel.id", ondelete="CASCADE"), index=True)
+    volume_id: Mapped[str] = mapped_column(String(36))
+    node_ids: Mapped[list] = mapped_column(JSON)
+    payload_fingerprint: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[str] = mapped_column(String(40), default=_now)
+
+
 class AutopilotDraft(Base, TimestampMixin):
     """自动驾驶恢复缓存，独立于正文、章节版本和设定事实。
 

@@ -408,9 +408,9 @@ export const api = {
     request<OutlineVolumeDraft>(`${BASE}/novels/${novelId}/outline/preview`, {
       method: 'POST', body: JSON.stringify({ source_text: sourceText }),
     }),
-  applyOutline: (novelId: string, plan: OutlineVolumeDraft) =>
+  applyOutline: (novelId: string, plan: OutlineVolumeDraft, requestId?: string) =>
     request<OutlineApplyResult>(`${BASE}/novels/${novelId}/outline/apply`, {
-      method: 'POST', body: JSON.stringify({ plan }),
+      method: 'POST', body: JSON.stringify({ plan, ...(requestId ? { request_id: requestId } : {}) }),
     }),
   rebuildSettingIndex: (novelId: string) =>
     request<{ indexed: number; failed: number }>(`${BASE}/novels/${novelId}/memory/rebuild-settings`, {
