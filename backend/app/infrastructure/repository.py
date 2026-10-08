@@ -71,54 +71,58 @@ class NovelRepo:
 
     def delete(self, novel_id: str):
         obj = self.get(novel_id)
-        self.db.query(models.ChatAction).filter(
-            models.ChatAction.novel_id == novel_id
-        ).delete(synchronize_session=False)
-        # 先删作品下的会话及其消息（message 无 novel_id，需按 conversation_id 删）
-        conv_ids = [
-            c.id
-            for c in self.db.query(models.Conversation)
-            .filter(models.Conversation.novel_id == novel_id)
-            .all()
-        ]
-        if conv_ids:
-            message_ids = [
-                m.id for m in self.db.query(models.Message.id).filter(
-                    models.Message.conversation_id.in_(conv_ids)
-                ).all()
-            ]
-            if message_ids:
-                self.db.query(models.ChatAction).filter(
-                    models.ChatAction.message_id.in_(message_ids)
-                ).delete(synchronize_session=False)
-            self.db.query(models.Message).filter(
-                models.Message.conversation_id.in_(conv_ids)
+        try:
+            self.db.query(models.ChatAction).filter(
+                models.ChatAction.novel_id == novel_id
             ).delete(synchronize_session=False)
-        self.db.query(models.Conversation).filter(
-            models.Conversation.novel_id == novel_id
-        ).delete(synchronize_session=False)
-        # 显式级联删除作品作用域下的子表数据，避免孤儿残留
-        for model in (
-            models.AutopilotTaskEvent,
-            models.AutopilotTask,
-            models.ChapterSettleReceipt,
-            models.ChapterCreationReceipt,
-            models.Character,
-            models.Location,
-            models.WorldSetting,
-            models.TimelineEvent,
-            models.Foreshadowing,
-            models.Relationship,
-            models.Chapter,
-            models.ChapterRevision,
-            models.AutopilotDraft,
-            models.OutlineNode,
-            models.MemoryChunk,
-            models.Injection,
-        ):
-            self.db.query(model).filter(model.novel_id == novel_id).delete()
-        self.db.delete(obj)
-        self.db.commit()
+            # 先删作品下的会话及其消息（message 无 novel_id，需按 conversation_id 删）
+            conv_ids = [
+                c.id
+                for c in self.db.query(models.Conversation)
+                .filter(models.Conversation.novel_id == novel_id)
+                .all()
+            ]
+            if conv_ids:
+                message_ids = [
+                    m.id for m in self.db.query(models.Message.id).filter(
+                        models.Message.conversation_id.in_(conv_ids)
+                    ).all()
+                ]
+                if message_ids:
+                    self.db.query(models.ChatAction).filter(
+                        models.ChatAction.message_id.in_(message_ids)
+                    ).delete(synchronize_session=False)
+                self.db.query(models.Message).filter(
+                    models.Message.conversation_id.in_(conv_ids)
+                ).delete(synchronize_session=False)
+            self.db.query(models.Conversation).filter(
+                models.Conversation.novel_id == novel_id
+            ).delete(synchronize_session=False)
+            # 显式级联删除作品作用域下的子表数据，避免孤儿残留
+            for model in (
+                models.AutopilotTaskEvent,
+                models.AutopilotTask,
+                models.ChapterSettleReceipt,
+                models.ChapterCreationReceipt,
+                models.Character,
+                models.Location,
+                models.WorldSetting,
+                models.TimelineEvent,
+                models.Foreshadowing,
+                models.Relationship,
+                models.Chapter,
+                models.ChapterRevision,
+                models.AutopilotDraft,
+                models.OutlineNode,
+                models.MemoryChunk,
+                models.Injection,
+            ):
+                self.db.query(model).filter(model.novel_id == novel_id).delete()
+            self.db.delete(obj)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
 
 
 class ScopedRepo:
@@ -565,12 +569,16 @@ class OutlineRepo:
         if self.children(novel_id, node_id):
             raise HTTPException(status_code=400, detail="该节点下还有子节点，请先删除子节点")
         # 删除节点不级联删正文：将关联章节的 outline_node_id 置空
-        self.db.query(models.Chapter).filter(
-            models.Chapter.novel_id == novel_id,
-            models.Chapter.outline_node_id == node_id,
-        ).update({"outline_node_id": ""})
-        self.db.delete(obj)
-        self.db.commit()
+        try:
+            self.db.query(models.Chapter).filter(
+                models.Chapter.novel_id == novel_id,
+                models.Chapter.outline_node_id == node_id,
+            ).update({"outline_node_id": ""})
+            self.db.delete(obj)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
 
     def reorder(self, novel_id: str, ordered_ids: list[str]):
         self._ensure_novel(novel_id)
@@ -681,20 +689,24 @@ class ConversationRepo:
 
     def delete(self, conversation_id: str):
         obj = self.get(conversation_id)
-        message_ids = [
-            m.id for m in self.db.query(models.Message.id).filter(
+        try:
+            message_ids = [
+                m.id for m in self.db.query(models.Message.id).filter(
+                    models.Message.conversation_id == conversation_id
+                ).all()
+            ]
+            if message_ids:
+                self.db.query(models.ChatAction).filter(
+                    models.ChatAction.message_id.in_(message_ids)
+                ).delete(synchronize_session=False)
+            self.db.query(models.Message).filter(
                 models.Message.conversation_id == conversation_id
-            ).all()
-        ]
-        if message_ids:
-            self.db.query(models.ChatAction).filter(
-                models.ChatAction.message_id.in_(message_ids)
             ).delete(synchronize_session=False)
-        self.db.query(models.Message).filter(
-            models.Message.conversation_id == conversation_id
-        ).delete(synchronize_session=False)
-        self.db.delete(obj)
-        self.db.commit()
+            self.db.delete(obj)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
 
     def add_message(
         self, conversation_id: str, role: str, content: str, meta=None,
