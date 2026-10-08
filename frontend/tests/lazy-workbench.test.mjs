@@ -95,7 +95,10 @@ async function mounted(options = {}) {
   harness.NModal = modal
   const key = `__lazyWorkbench${++sequence}`
   globalThis[key] = harness
-  const dependencies = { ...dependencyUrls, '../utils/projectDraft': moduleUrl(compile(
+  const dependencies = { ...dependencyUrls, '../utils/styleAnchorDraft': moduleUrl(compile(
+    (await readFile(new URL('../src/utils/styleAnchorDraft.ts', import.meta.url), 'utf8'))
+      .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+  ) + `\n// style-page-${sequence}`), '../utils/projectDraft': moduleUrl(compile(
     (await readFile(new URL('../src/utils/projectDraft.ts', import.meta.url), 'utf8'))
       .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
   ) + `\n// fixture-page-${sequence}`) }

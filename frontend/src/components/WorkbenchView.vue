@@ -246,7 +246,7 @@ function navigateSafely(target: string, navigate: () => void) {
     navigationTarget.value = target
     navigationWarning.value = [
       projectUnsaved.value ? '作品构思或待核对原提交在当前页面内保留，完整刷新或关闭前请复制。' : '',
-      settingsDirty.value ? '设定或文风基准有未保存修改，或正在保存。' : '',
+      settingsDirty.value ? '设定或文风基准有未保存修改，或正在保存。文风原提交、后来稿和等待状态在本页面内保留；其他设定表单离页后可能丢失，完整刷新或关闭前请复制。' : '',
       outlineDirty.value ? '大纲有未保存编辑、生成预览，或正在保存。' : '',
       activeTab.value === 'writing' && writingDirty.value ? '当前章节有未保存修改或未完成输出。' : '',
       activeTab.value === 'autopilot' && autopilotDirty.value

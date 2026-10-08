@@ -9,12 +9,14 @@ import {
   NList,
   NListItem,
   NMenu,
+  NModal,
   NSelect,
   useMessage,
 } from 'naive-ui'
 import { api } from '../api'
 import { chapterLabel } from '../utils/chapter'
 import { createAsyncScope } from '../utils/asyncScope'
+import { anchorDirty, anchorOperation, isAnchorNovel, styleAnchorDraft, styleAnchorDrafts, type StyleAnchorDraft } from '../utils/styleAnchorDraft'
 import {
   ENTITY_TYPES,
   getEntityConfig,
@@ -38,13 +40,12 @@ const editingId = ref<string | null>(null)
 const loading = ref(false)
 const rebuildingIndex = ref(false)
 const saving = ref(false)
-const savingAnchor = ref(false)
+const anchorState = computed(() => styleAnchorDraft(props.novelId))
+const savingAnchor = computed(() => anchorState.value.pending !== null)
 const asyncScope = createAsyncScope(() => props.novelId)
 let entityLoadSequence = 0
 let metaLoadSequence = 0
 let selectionRevision = 0
-let anchorRevision = 0
-let anchorSaveRevision = 0
 let anchorLoadSequence = 0
 let pendingFocus: { type: EntityType; id: string } | null = null
 const emptyEntities = (): Record<EntityType, EntityRecord[]> => ({
@@ -67,8 +68,8 @@ const entityDirty = computed(() => {
 })
 
 // 文风基准：决定定稿时是否计算文风漂移分
-const styleAnchor = ref('')
-const anchorBaseline = ref('')
+const styleAnchor = computed({ get: () => anchorState.value.draft, set: (value: string) => { anchorState.value.draft = value } })
+const anchorBaseline = computed(() => anchorState.value.baseline)
 const anchorChapterId = ref<string | null>(null)
 const chapters = ref<ChapterMetadata[]>([])
 const loadingAnchor = ref(false)
@@ -76,9 +77,12 @@ const anchorSet = computed(() => styleAnchor.value.trim().length > 0)
 const chapterOptions = computed(() =>
   chapters.value.map((c) => ({ label: chapterLabel(c), value: c.id })),
 )
-const dirty = computed(() => entityDirty.value || styleAnchor.value !== anchorBaseline.value || saving.value || savingAnchor.value)
+const dirty = computed(() => entityDirty.value || anchorDirty(anchorState.value) || saving.value)
 watch(dirty, (value) => emit('dirty-change', value), { immediate: true, flush: 'sync' })
-watch(styleAnchor, () => { anchorRevision += 1 }, { flush: 'sync' })
+const showAnchorCopy = ref(false)
+const anchorCopy = ref('')
+const anchorCopyOriginal = ref(false)
+const otherAnchorDrafts = computed(() => styleAnchorDrafts().filter(state => state !== anchorState.value))
 
 function confirmEntityChange(): boolean {
   return (!entityDirty.value && !saving.value) || window.confirm('当前设定有未保存修改或正在保存，确定放弃本页编辑并继续吗？')
@@ -97,9 +101,11 @@ async function pickAnchorChapter(id: string | null) {
   loadingAnchor.value = false
   if (!id || !props.novelId) return
   const scope = asyncScope.capture()
-  const revision = anchorRevision, saveRevision = anchorSaveRevision
+  const state = anchorState.value
+  const revision = state.revision, saveRevision = state.version
   const isCurrent = () => asyncScope.isCurrent(scope) && sequence === anchorLoadSequence
-    && anchorChapterId.value === id && revision === anchorRevision && saveRevision === anchorSaveRevision
+    && anchorChapterId.value === id && state === anchorState.value
+    && revision === state.revision && saveRevision === state.version
   loadingAnchor.value = true
   try {
     const chapter = await api.getChapter(scope.identity, id)
@@ -117,22 +123,115 @@ async function pickAnchorChapter(id: string | null) {
 }
 
 async function saveAnchor() {
-  if (!props.novelId || savingAnchor.value) return
+  const state = anchorState.value
+  if (!props.novelId || state.pending !== null || state.checking !== null || state.phase === 'unknown' || !state.exists) return
   const scope = asyncScope.capture()
-  const submitted = styleAnchor.value
-  anchorSaveRevision += 1
+  const submitted = state.draft
+  const operation = anchorOperation()
+  state.version += 1
+  state.original = submitted
+  state.saved = null
+  state.observed = null
+  state.error = ''
+  state.phase = 'pending'
+  state.pending = operation
   anchorLoadSequence += 1
   loadingAnchor.value = false
-  savingAnchor.value = true
+  const current = () => asyncScope.isCurrent(scope) && anchorState.value === state
   try {
-    await api.updateNovel(scope.identity, { style_anchor: submitted })
-    if (!asyncScope.isCurrent(scope)) return
-    anchorBaseline.value = submitted
-    message.success('已保存文风基准')
+    const saved = await api.updateNovel(scope.identity, { style_anchor: submitted })
+    if (state.pending !== operation) return
+    if (!isAnchorNovel(saved) || saved.id !== scope.identity || saved.style_anchor !== submitted) {
+      state.phase = 'unknown'
+      state.error = '未收到与原提交一致的完整保存确认，请先复制并核对当前文风。'
+      if (current()) message.warning(state.error)
+      return
+    }
+    state.saved = { ...saved }
+    state.title = saved.title
+    state.initialized = true
+    state.baseline = submitted
+    state.phase = 'saved'
+    if (current()) message.success(state.draft === submitted ? '已保存文风基准' : '原提交文风已保存，当前修改仍未保存')
   } catch (e) {
-    if (asyncScope.isCurrent(scope)) message.error((e as Error).message)
+    if (state.pending !== operation) return
+    state.phase = 'unknown'
+    state.error = `文风保存结果待核对：${(e as Error).message}`
+    if (current()) message.error(state.error)
   } finally {
-    if (asyncScope.isCurrent(scope)) savingAnchor.value = false
+    if (state.pending === operation) {
+      state.pending = null
+      state.version += 1
+    }
+  }
+}
+
+async function checkAnchor() {
+  const state = anchorState.value
+  if (!props.novelId || state.pending !== null || state.checking !== null) return
+  const scope = asyncScope.capture()
+  const operation = anchorOperation()
+  const version = ++state.version
+  state.checking = operation
+  const current = () => asyncScope.isCurrent(scope) && anchorState.value === state
+  try {
+    const novels = await api.listNovels()
+    if (state.checking !== operation || state.version !== version) return
+    const novel = novels.find(item => item.id === state.novelId)
+    state.exists = !!novel
+    if (!novel) {
+      state.observed = null
+      state.error = '当前目录已无此作品；保留稿件供复制，不再向此作品保存。'
+    } else if (!isAnchorNovel(novel)) {
+      state.observed = null
+      state.error = '当前作品资料不完整，尚不能继续编辑；原提交与当前稿已保留。'
+    } else {
+      state.observed = { ...novel }
+      state.title = novel.title
+      state.error = '这是当前文风资料，不能证明原请求结果；核对后可明确采用它继续编辑。'
+    }
+    if (current()) message.warning(state.error)
+  } catch (e) {
+    if (state.checking !== operation || state.version !== version) return
+    state.error = `当前文风读取失败：${(e as Error).message}`
+    if (current()) message.error(state.error)
+  } finally {
+    if (state.checking === operation) {
+      state.checking = null
+      state.version += 1
+    }
+  }
+}
+
+function adoptCurrentAnchor() {
+  const state = anchorState.value, observed = state.observed
+  if (state.pending !== null || state.checking !== null || !state.exists || !observed) return
+  const revision = state.revision, version = state.version
+  if (!window.confirm('当前资料不能证明原请求结果；旧请求仍可能迟到提交。采用当前文风作为后续编辑基线？当前输入会保留，之后仍需明确点击保存。')) return
+  if (state !== anchorState.value || state.revision !== revision || state.version !== version || state.observed !== observed) return
+  state.version += 1
+  state.initialized = true
+  state.baseline = observed.style_anchor
+  state.saved = null
+  state.phase = 'idle'
+  state.error = '已采用当前文风资料，原请求结果仍未知；当前输入须由你明确保存。'
+}
+
+async function copyAnchor(original = false, state: StyleAnchorDraft = anchorState.value) {
+  const hostState = anchorState.value
+  const text = original ? state.original : state.draft
+  if (text === null) return
+  const scope = asyncScope.capture()
+  const current = () => asyncScope.isCurrent(scope) && anchorState.value === hostState
+  try {
+    await navigator.clipboard.writeText(text)
+    if (current()) message.success(original ? '已复制原提交文风' : '已复制当前文风')
+  } catch {
+    if (!current()) return
+    anchorCopy.value = text
+    anchorCopyOriginal.value = original
+    showAnchorCopy.value = true
+    message.warning('复制不可用，请从只读文风框手动复制。')
   }
 }
 
@@ -160,16 +259,22 @@ async function loadNovelMeta() {
   if (!props.novelId) return
   const scope = asyncScope.capture()
   const sequence = ++metaLoadSequence
-  const expectedAnchorRevision = anchorRevision
-  const expectedSaveRevision = anchorSaveRevision
+  const state = anchorState.value
+  const expectedAnchorRevision = state.revision
+  const expectedSaveRevision = state.version
   try {
     const [novels, loadedChapters] = await Promise.all([api.listNovels(), api.listChapterMetadata(scope.identity)])
     if (!asyncScope.isCurrent(scope) || sequence !== metaLoadSequence) return
     const novel = novels.find((n) => n.id === scope.identity)
-    if (anchorSaveRevision === expectedSaveRevision && !savingAnchor.value) {
-      const untouched = anchorRevision === expectedAnchorRevision && styleAnchor.value === anchorBaseline.value
-      anchorBaseline.value = novel?.style_anchor ?? ''
-      if (untouched) styleAnchor.value = anchorBaseline.value
+    if (state.version === expectedSaveRevision && state.pending === null && state.checking === null && state.phase !== 'unknown') {
+      state.exists = !!novel
+      if (novel && typeof novel.style_anchor === 'string') {
+        const untouched = state.revision === expectedAnchorRevision && state.draft === state.baseline
+        if (typeof novel.title === 'string') state.title = novel.title
+        state.baseline = novel.style_anchor
+        state.initialized = true
+        if (untouched) state.draft = state.baseline
+      }
     }
     chapters.value = loadedChapters
   } catch (e) {
@@ -464,10 +569,8 @@ watch(
     allEntities.value = emptyEntities()
     loading.value = false
     saving.value = false
-    savingAnchor.value = false
     rebuildingIndex.value = false
-    styleAnchor.value = ''
-    anchorBaseline.value = ''
+    showAnchorCopy.value = false
     chapters.value = []
     resetForm()
     anchorChapterId.value = null
@@ -510,7 +613,7 @@ onBeforeUnmount(() => {
     <div class="style-anchor">
       <div class="anchor-header">
         <span>文风基准</span>
-        <n-button size="small" type="primary" :disabled="!novelId" :loading="savingAnchor" @click="saveAnchor">保存基准</n-button>
+        <n-button size="small" type="primary" :disabled="!novelId || savingAnchor || anchorState.checking !== null || anchorState.phase === 'unknown' || !anchorState.exists" :loading="savingAnchor" @click="saveAnchor">保存基准</n-button>
       </div>
       <div class="anchor-row">
         <n-select
@@ -522,7 +625,11 @@ onBeforeUnmount(() => {
           clearable
           @update:value="pickAnchorChapter"
         />
-        <span v-if="!anchorSet" class="anchor-hint">
+        <span v-if="savingAnchor" class="anchor-hint">原提交文风正在保存；当前新输入仍保留。</span>
+        <span v-else-if="anchorState.phase === 'unknown'" class="anchor-hint">文风保存结果待核对；请先复制并读取当前文风。</span>
+        <span v-else-if="!anchorState.exists" class="anchor-hint">当前目录已无此作品，稿件仍可复制。</span>
+        <span v-else-if="anchorState.phase === 'idle' && anchorState.original !== null" class="anchor-hint">已采用当前资料，原请求结果仍未知；当前输入须明确保存。</span>
+        <span v-else-if="!anchorSet" class="anchor-hint">
           未设置文风基准：点击“定稿沉淀”时不计算文风漂移分，质量曲线无漂移线。
         </span>
         <span v-else class="anchor-hint ok">
@@ -532,10 +639,42 @@ onBeforeUnmount(() => {
       <n-input
         v-model:value="styleAnchor"
         type="textarea"
+        :input-props="{ 'aria-label': '当前文风基准' }"
         :autosize="{ minRows: 2, maxRows: 4 }"
         placeholder="粘贴一段代表本书文风的文字（如开篇前 800 字）"
       />
+      <div class="anchor-tools">
+        <n-button size="small" @click="copyAnchor()">复制当前文风</n-button>
+        <n-button v-if="anchorState.original !== null" size="small" @click="copyAnchor(true)">复制原提交</n-button>
+        <n-button v-if="anchorState.original !== null" size="small" :disabled="savingAnchor || anchorState.checking !== null" :loading="anchorState.checking !== null" @click="checkAnchor">核对当前文风</n-button>
+        <n-button v-if="anchorState.phase === 'unknown' && anchorState.observed && anchorState.exists" size="small" :disabled="savingAnchor || anchorState.checking !== null" @click="adoptCurrentAnchor">以当前文风继续编辑</n-button>
+      </div>
+      <template v-if="anchorState.original !== null">
+        <div class="anchor-hint">{{ anchorState.saved ? '原提交已收到完整保存确认；当前修改仍须另行保存。' : '原提交文风独立保留，读取当前资料不能证明原请求结果。' }}</div>
+        <n-input type="textarea" readonly :value="anchorState.original" :input-props="{ 'aria-label': '原提交文风基准' }" :autosize="{ minRows: 1, maxRows: 2 }" />
+      </template>
+      <div v-if="anchorState.observed" class="anchor-hint">当前作品文风（仅供人工核对）：</div>
+      <n-input v-if="anchorState.observed" type="textarea" readonly :value="anchorState.observed.style_anchor" :input-props="{ 'aria-label': '核对所得当前文风' }" :autosize="{ minRows: 1, maxRows: 2 }" />
+      <div v-if="anchorState.error" class="anchor-hint">{{ anchorState.error }}</div>
+      <div class="anchor-hint">文风原提交、后来稿和等待状态仅保留在本页面；完整刷新或关闭前请复制。其他设定表单仍按离页提示处理。</div>
+      <details v-if="otherAnchorDrafts.length" class="anchor-recovery">
+        <summary>其他作品页内文风稿（{{ otherAnchorDrafts.length }}）</summary>
+        <div v-for="state in otherAnchorDrafts" :key="state.novelId" class="anchor-record">
+          <strong>{{ state.title }}</strong>
+          <span class="anchor-hint">{{ state.pending !== null ? '原提交等待中' : state.phase === 'unknown' ? '原保存结果未知' : state.saved ? '原提交已确认' : '页内稿件' }}；此处只供复制，请在原作品核对后编辑。</span>
+          <n-input type="textarea" readonly :value="state.draft" :input-props="{ 'aria-label': `其他作品当前文风 · ${state.novelId}` }" :autosize="{ minRows: 1, maxRows: 2 }" />
+          <n-input v-if="state.original !== null" type="textarea" readonly :value="state.original" :input-props="{ 'aria-label': `其他作品原提交文风 · ${state.novelId}` }" :autosize="{ minRows: 1, maxRows: 2 }" />
+          <div class="anchor-tools">
+            <n-button size="small" @click="copyAnchor(false, state)">复制此稿</n-button>
+            <n-button v-if="state.original !== null" size="small" @click="copyAnchor(true, state)">复制此原提交</n-button>
+          </div>
+        </div>
+      </details>
     </div>
+    <n-modal :show="showAnchorCopy" preset="card" title="手动复制文风" style="width: 560px" @update:show="(value: boolean) => { showAnchorCopy = value }">
+      <p>剪贴板不可用，请手动选取并复制以下只读文本。</p>
+      <n-input type="textarea" readonly :value="anchorCopy" :input-props="{ 'aria-label': anchorCopyOriginal ? '手动复制原提交文风' : '手动复制当前文风' }" :autosize="{ minRows: 3, maxRows: 12 }" />
+    </n-modal>
 
     <div class="index-tools">
       <span>旧作品设定可显式重建语义检索索引，不修改 Story Bible。</span>
@@ -652,6 +791,20 @@ onBeforeUnmount(() => {
 }
 .anchor-hint.ok {
   color: #18a058;
+}
+.anchor-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+.anchor-recovery {
+  margin-top: 8px;
+  max-height: 240px;
+  overflow: auto;
+}
+.anchor-record {
+  margin-top: 8px;
 }
 .index-tools {
   display: flex;

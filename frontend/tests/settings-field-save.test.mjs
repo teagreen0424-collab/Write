@@ -47,7 +47,7 @@ async function panel(options = {}) {
     useMessage: () => Object.fromEntries(['success', 'error', 'warning', 'info'].map((type) => [type, (text) => messages.push({ type, text })])),
     onMounted: (fn) => { hooks.mount = fn }, onBeforeUnmount: (fn) => { hooks.unmount = fn },
   }
-  for (const name of ['NButton', 'NEmpty', 'NForm', 'NFormItem', 'NInput', 'NList', 'NListItem', 'NMenu', 'NSelect']) globalThis[key][name] = name.toLowerCase()
+  for (const name of ['NButton', 'NEmpty', 'NForm', 'NFormItem', 'NInput', 'NList', 'NListItem', 'NMenu', 'NModal', 'NSelect']) globalThis[key][name] = name.toLowerCase()
   const descriptor = parse(await readFile(new URL('../src/components/SettingsPanel.vue', import.meta.url), 'utf8')).descriptor
   const script = compileScript(descriptor, { id: `settings-field-${sequence}` })
   let source = `const __harness = globalThis.${key}\n` + script.content
@@ -55,7 +55,11 @@ async function panel(options = {}) {
     .replace(/import \{([^}]+)\} from ['"]naive-ui['"]/g, 'const {$1} = __harness')
     .replace(/import \{ api \} from ['"]\.\.\/api['"]/g, 'const { api } = __harness')
     .replace(/\bonMounted\(/g, '__harness.onMounted(').replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')
-  for (const [name, url] of Object.entries(dependencies)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)
+  const pageDependencies = { ...dependencies, '../utils/styleAnchorDraft': moduleUrl(compile(
+    (await readFile(new URL('../src/utils/styleAnchorDraft.ts', import.meta.url), 'utf8'))
+      .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+  ) + `\n// style-page-${sequence}`) }
+  for (const [name, url] of Object.entries(pageDependencies)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)
   const component = (await import(moduleUrl(compile(source)))).default
   const scope = effectScope(), vm = scope.run(() => component.setup(props, { expose() {}, emit: (...args) => emitted.push(args) }))
   await hooks.mount?.(); await flush()

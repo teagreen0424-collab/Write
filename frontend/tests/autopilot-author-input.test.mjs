@@ -113,6 +113,7 @@ test('同task注入在途禁双击和新构思提交，真实模板busy，200保
   t.after(() => { response.resolve(control()); context.dispose() })
   context.vm.directive.value = '首次构思'; const first = context.vm.inject()
   context.vm.directive.value = '等待期间的新构思'; const duplicate = context.vm.inject()
+  await waitForInjection(context, 1)
   await flush()
   assert.equal(injectionRequests(context).length, 1)
   const button = nodes(context.render(), node => node.type === 'nbutton' && textOf(node) === '注入')[0]
@@ -141,6 +142,7 @@ test('注入等待期间构思A改B又改回A，author revision仍保留新输�
   const response = deferred(), context = await panel({ api: { injectAutopilot: async () => response.promise } })
   context.vm.directive.value = '作者构思A'; const saving = context.vm.inject()
   context.vm.directive.value = '作者构思B'; context.vm.directive.value = '作者构思A'
+  await waitForInjection(context, 1)
   await flush(); response.resolve(receipt(...injectionRequests(context)[0].args)); await saving
   assert.equal(context.vm.directive.value, '作者构思A'); assert.equal(context.vm.authorDirty.value, true)
   assert.equal(context.vm.injecting.value, false); assert.equal(context.vm.directiveSubmission.value.state, 'confirmed')
@@ -183,6 +185,7 @@ test('新task允许独立提交且旧task晚200不清新锁输入，task身份AB
   context.vm.directive.value = '旧task构思'; const oldSaving = context.vm.inject()
   context.vm.applySnapshot(snapshot('novel-a', { task_id: 'new-task', event_id: 1 }))
   context.vm.directive.value = '新task构思'; const newSaving = context.vm.inject()
+  await waitForInjection(context, 2)
   await flush()
   assert.equal(injectionRequests(context).length, 2); assert.equal(context.vm.injecting.value, true)
   oldResponse.resolve(receipt(...injectionRequests(context)[0].args)); await oldSaving
@@ -193,6 +196,7 @@ test('新task允许独立提交且旧task晚200不清新锁输入，task身份AB
   aba.vm.directive.value = '作者保留的构思'; const saving = aba.vm.inject()
   aba.vm.applySnapshot(snapshot('novel-a', { task_id: 'intermediate-task', event_id: 1 }))
   aba.vm.applySnapshot(snapshot('novel-a', { event_id: 1 }))
+  await waitForInjection(aba)
   await flush(); response.resolve(receipt(...injectionRequests(aba)[0].args)); await saving
   assert.equal(aba.vm.directive.value, '作者保留的构思'); assert.equal(aba.messages.length, 0); aba.dispose()
 })

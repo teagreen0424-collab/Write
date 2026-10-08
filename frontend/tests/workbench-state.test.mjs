@@ -49,7 +49,7 @@ async function panel(name, options = {}) {
     listChapterMetadata: async (novelId) => [{ id: `${novelId}-chapter`, novel_id: novelId, seq: 1, title: novelId, content: `${novelId}章节正文`, directive: '', summary: '', status: 'draft', outline_node_id: '' }],
     createEntity: async (novelId, apiPath, payload) => ({ ...payload, id: `${novelId}-created` }),
     updateEntity: async (novelId, apiPath, id, payload) => ({ ...payload, id }),
-    deleteEntity: async () => {}, updateNovel: async () => {},
+    deleteEntity: async () => {}, updateNovel: async (id, payload) => ({ id, title: id, genre: '', summary: '', style_anchor: '', created_at: '', updated_at: '', ...payload }),
     createNovel: async (payload) => ({ id: 'created-novel', ...payload, style_anchor: '', created_at: '', updated_at: '' }),
     listOutline: async (novelId) => [outlineNode(novelId)],
     createOutline: async (novelId, payload) => ({ ...payload, id: `${novelId}-created` }),
@@ -88,7 +88,10 @@ async function panel(name, options = {}) {
     .replace(/\bonMounted\(/g, '__harness.onMounted(')
     .replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')
   // 每个独立夹具代表新的页面；页内共享记录只在同一运行期复用。
-  const dependencies = { ...dependencyUrls, '../utils/projectDraft': moduleUrl(compile(
+  const dependencies = { ...dependencyUrls, '../utils/styleAnchorDraft': moduleUrl(compile(
+    (await readFile(new URL('../src/utils/styleAnchorDraft.ts', import.meta.url), 'utf8'))
+      .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+  ) + `\n// style-page-${sequence}`), '../utils/projectDraft': moduleUrl(compile(
     (await readFile(new URL('../src/utils/projectDraft.ts', import.meta.url), 'utf8'))
       .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
   ) + `\n// fixture-page-${sequence}`) }
@@ -175,7 +178,7 @@ test('设定真实 SFC 清空 JSON 会发送空结构，文风保存中新编辑
   context.vm.styleAnchor.value = '提交的文风'
   const saving = context.vm.saveAnchor()
   context.vm.styleAnchor.value = '新修改的文风'
-  pending.resolve({}); await saving
+  pending.resolve({ id: 'novel-a', title: 'novel-a', genre: '', summary: '', style_anchor: '提交的文风', created_at: '', updated_at: '' }); await saving
   assert.equal(context.vm.anchorBaseline.value, '提交的文风')
   assert.equal(context.vm.styleAnchor.value, '新修改的文风')
   assert.equal(context.vm.dirty.value, true)

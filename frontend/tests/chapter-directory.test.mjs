@@ -48,7 +48,7 @@ async function panel(name = 'WritingPanel', options = {}) {
     deleteChapter: async (_novelId, id) => { database.delete(id) },
     settleChapter: async () => settleResult(),
     listNovels: async () => [{ id: 'novel-a', style_anchor: '已保存文风' }, { id: 'novel-b', style_anchor: 'B文风' }],
-    listEntities: async () => [], updateNovel: async () => {}, listOutline: async () => [],
+    listEntities: async () => [], updateNovel: async (id, payload) => ({ id, title: id, genre: '', summary: '', style_anchor: '', created_at: '', updated_at: '', ...payload }), listOutline: async () => [],
     getForeshadowings: async () => ({ groups: { planted: [], suspended: [], consumed: [] } }),
     ...options.api,
   }
@@ -69,7 +69,11 @@ async function panel(name = 'WritingPanel', options = {}) {
     .replace(/import \{ api(?:, streamSSE)? \} from ['"]\.\.\/api['"]/g, 'const { api, streamSSE } = __harness')
     .replace(/import (\w+) from ['"]\.\/[^'"]+\.vue['"]/g, 'const $1 = {}')
     .replace(/\bonMounted\(/g, '__harness.onMounted(').replace(/\bonBeforeUnmount\(/g, '__harness.onBeforeUnmount(')
-  for (const [name, url] of Object.entries(dependencies)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)
+  const pageDependencies = { ...dependencies, '../utils/styleAnchorDraft': moduleUrl(compile(
+    (await readFile(new URL('../src/utils/styleAnchorDraft.ts', import.meta.url), 'utf8'))
+      .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+  ) + `\n// style-page-${sequence}`) }
+  for (const [name, url] of Object.entries(pageDependencies)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)
   const component = (await import(moduleUrl(compile(source)))).default
   const scope = effectScope()
   const vm = scope.run(() => component.setup(props, { expose() {}, emit: (...args) => emitted.push(args) }))
