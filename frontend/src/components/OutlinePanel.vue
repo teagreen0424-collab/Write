@@ -28,6 +28,15 @@ const editingId = ref<string | null>(null)
 const form = ref({ title: '', level: 'chapter' as OutlineLevel, summary: '', parent_id: '' })
 const formBaseline = ref(JSON.stringify(form.value))
 const formFingerprint = computed(() => JSON.stringify(form.value))
+const editChanges = computed(() => {
+  const changes: Partial<Pick<OutlineNode, 'title' | 'summary'>> = {}
+  if (!editingId.value) return changes
+  const baseline = JSON.parse(formBaseline.value) as typeof form.value
+  if (form.value.title !== baseline.title) changes.title = form.value.title
+  if (form.value.summary !== baseline.summary) changes.summary = form.value.summary
+  return changes
+})
+const hasEditChanges = computed(() => Object.keys(editChanges.value).length > 0)
 const saving = ref(false)
 const moving = ref(false)
 const loading = ref(false)
@@ -152,10 +161,12 @@ async function save() {
   const itemId = editingId.value
   const submittedForm = formFingerprint.value
   const submitted = { ...form.value }
+  const changes = { ...editChanges.value }
+  if (itemId && !Object.keys(changes).length) return
   saving.value = true
   try {
     const saved = itemId
-      ? await api.updateOutline(scope.identity, itemId, { title: submitted.title, summary: submitted.summary })
+      ? await api.updateOutline(scope.identity, itemId, changes)
       : await api.createOutline(scope.identity, submitted)
     if (!asyncScope.isCurrent(scope)) return
     if (revision === modalRevision && editingId.value === itemId) {
@@ -400,7 +411,7 @@ watch(
       <template #footer>
         <div class="modal-actions">
           <n-button @click="handleModalVisibility(false)">取消</n-button>
-          <n-button type="primary" :loading="saving" @click="save">保存</n-button>
+          <n-button type="primary" :loading="saving" :disabled="!!editingId && !hasEditChanges" @click="save">保存</n-button>
         </div>
       </template>
     </n-modal>

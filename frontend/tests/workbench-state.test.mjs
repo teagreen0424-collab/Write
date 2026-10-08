@@ -437,7 +437,7 @@ test('大纲真实模板在创建保存中禁改层级，标题概要仍能编�
   assert.equal(context.vm.dirty.value, true)
   await context.vm.save()
   const update = context.requests.find((request) => request.method === 'updateOutline')
-  assert.deepEqual(update.args[2], { title: '新幕', summary: '保存期间补充的概要' })
+  assert.deepEqual(update.args[2], { summary: '保存期间补充的概要' })
   assert.equal(context.vm.showModal.value, false)
   context.dispose()
 })
