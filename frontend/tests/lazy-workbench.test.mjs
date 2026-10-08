@@ -102,6 +102,9 @@ async function mounted(options = {}) {
     (await readFile(new URL('../src/utils/projectDraft.ts', import.meta.url), 'utf8'))
       .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
   ) + `\n// fixture-page-${sequence}`) }
+  dependencies['../utils/entityDraft'] = moduleUrl(compile((await readFile(new URL('../src/utils/entityDraft.ts', import.meta.url), 'utf8'))
+    .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+    .replace("from '../types'", `from '${dependencies['../types']}'`)) + `\n// entity-page-${sequence}`)
   async function compileComponent(name) {
     const path = name === 'App' ? '../src/App.vue' : `../src/components/${name}.vue`
     const descriptor = parse(await readFile(new URL(path, import.meta.url), 'utf8')).descriptor

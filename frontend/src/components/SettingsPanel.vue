@@ -17,13 +17,15 @@ import { api } from '../api'
 import { chapterLabel } from '../utils/chapter'
 import { createAsyncScope } from '../utils/asyncScope'
 import { anchorDirty, anchorOperation, isAnchorNovel, styleAnchorDraft, styleAnchorDrafts, type StyleAnchorDraft } from '../utils/styleAnchorDraft'
+import { advanceEntityFacts, bindEntityId, cloneEntityForm, entityCreation, entityDraftDirty, entityDrafts,
+  entityFactVersion, entityForm as recordForm, entityFormDirty, entityOperation, entityReadVersions, entityRecord,
+  fieldValue, isEntityRead, matchesEntityPayload, refreshEntityDrafts, sameFieldValue, type EntityDraft } from '../utils/entityDraft'
 import {
   ENTITY_TYPES,
   getEntityConfig,
   type ChapterMetadata,
   type EntityRecord,
   type EntityType,
-  type FieldConfig,
 } from '../types'
 
 const props = defineProps<{
@@ -36,10 +38,12 @@ const emit = defineEmits<{ (e: 'dirty-change', dirty: boolean): void }>()
 const message = useMessage()
 
 const selectedType = ref<EntityType>('character')
-const editingId = ref<string | null>(null)
+const activeEntity = ref<EntityDraft | null>(null)
+const entityState = computed(() => activeEntity.value ?? entityCreation(props.novelId, selectedType.value))
+const editingId = computed(() => entityState.value.exists ? entityState.value.recordId : null)
 const loading = ref(false)
 const rebuildingIndex = ref(false)
-const saving = ref(false)
+const saving = computed(() => entityState.value.pending !== null)
 const anchorState = computed(() => styleAnchorDraft(props.novelId))
 const savingAnchor = computed(() => anchorState.value.pending !== null)
 const asyncScope = createAsyncScope(() => props.novelId)
@@ -57,15 +61,10 @@ const emptyEntities = (): Record<EntityType, EntityRecord[]> => ({
   relationship: [],
 })
 const allEntities = ref<Record<EntityType, EntityRecord[]>>(emptyEntities())
-const form = ref<Record<string, any>>({})
-const formBaseline = ref('{}')
+const form = computed({ get: () => entityState.value.draft, set: (value: Record<string, any>) => { entityState.value.draft = value } })
+const formBaseline = computed({ get: () => JSON.stringify(entityState.value.baseline), set: (value: string) => { entityState.value.baseline = JSON.parse(value) } })
 const formFingerprint = computed(() => JSON.stringify(form.value))
-let formRevision = 0
-watch(form, () => { formRevision += 1 }, { deep: true, flush: 'sync' })
-const entityDirty = computed(() => {
-  const baseline = JSON.parse(formBaseline.value)
-  return getEntityConfig(selectedType.value).fields.some((field) => !sameFieldValue(field, form.value[field.key], baseline[field.key]))
-})
+const entityDirty = computed(() => entityFormDirty(entityState.value))
 
 // 文风基准：决定定稿时是否计算文风漂移分
 const styleAnchor = computed({ get: () => anchorState.value.draft, set: (value: string) => { anchorState.value.draft = value } })
@@ -77,15 +76,20 @@ const anchorSet = computed(() => styleAnchor.value.trim().length > 0)
 const chapterOptions = computed(() =>
   chapters.value.map((c) => ({ label: chapterLabel(c), value: c.id })),
 )
-const dirty = computed(() => entityDirty.value || anchorDirty(anchorState.value) || saving.value)
+const dirty = computed(() => entityDraftDirty(entityState.value) || anchorDirty(anchorState.value))
 watch(dirty, (value) => emit('dirty-change', value), { immediate: true, flush: 'sync' })
 const showAnchorCopy = ref(false)
 const anchorCopy = ref('')
 const anchorCopyOriginal = ref(false)
 const otherAnchorDrafts = computed(() => styleAnchorDrafts().filter(state => state !== anchorState.value))
+const otherEntityDrafts = computed(() => entityDrafts().filter(state => state !== entityState.value))
+const showEntityCopy = ref(false)
+const entityCopy = ref('')
+const entityCopyOriginal = ref(false)
+const entityText = (value: Record<string, any>) => JSON.stringify(value, null, 2)
 
 function confirmEntityChange(): boolean {
-  return (!entityDirty.value && !saving.value) || window.confirm('当前设定有未保存修改或正在保存，确定放弃本页编辑并继续吗？')
+  return !entityDraftDirty(entityState.value) || window.confirm('当前设定有未保存修改或原提交待回应。离开编辑器后，原提交与页内稿仍可复制；不会自动保存。继续切换？')
 }
 
 function guardUnload(event: BeforeUnloadEvent) {
@@ -320,13 +324,16 @@ async function loadAll(reportError = true): Promise<boolean> {
   if (!props.novelId) return false
   const scope = asyncScope.capture()
   const sequence = ++entityLoadSequence
+  const facts = entityFactVersion(scope.identity)
+  const versions = entityReadVersions(scope.identity)
   loading.value = true
   try {
     const result = emptyEntities()
     const lists = await Promise.all(ENTITY_TYPES.map((t) => api.listEntities(scope.identity, t.apiPath)))
-    if (!asyncScope.isCurrent(scope) || sequence !== entityLoadSequence) return false
+    if (!asyncScope.isCurrent(scope) || sequence !== entityLoadSequence || facts !== entityFactVersion(scope.identity)) return false
     ENTITY_TYPES.forEach((t, index) => { result[t.type] = lists[index] })
     allEntities.value = result
+    refreshEntityDrafts(scope.identity, result, versions)
     if (pendingFocus) applyFocus(pendingFocus)
     return true
   } catch (e) {
@@ -337,23 +344,18 @@ async function loadAll(reportError = true): Promise<boolean> {
   }
 }
 
-function resetForm() {
-  const cfg = config.value
-  const next: Record<string, any> = {}
-  for (const f of cfg.fields) {
-    if (f.type === 'select') next[f.key] = f.options?.[0]?.value ?? ''
-    else next[f.key] = ''
-  }
-  form.value = next
-  formBaseline.value = JSON.stringify(next)
+function resetForm(fresh = false) {
+  activeEntity.value = entityCreation(props.novelId, selectedType.value, fresh)
 }
 
 function startCreate() {
   if (!props.novelId || !confirmEntityChange()) return
+  const state = entityState.value
+  if (state.recordId === null && (state.pending !== null || state.phase === 'unknown')
+    && !window.confirm('原创建请求可能已经保存或仍会迟到提交；同名列表不能确认其结果。请先人工核对。确定以独立新意图另建记录？原提交和后来稿会保留供复制，不会自动重发。')) return
   selectionRevision += 1
   pendingFocus = null
-  editingId.value = null
-  resetForm()
+  resetForm(true)
 }
 
 function changeType(value: string) {
@@ -361,7 +363,6 @@ function changeType(value: string) {
   selectionRevision += 1
   pendingFocus = null
   selectedType.value = value as EntityType
-  editingId.value = null
   resetForm()
 }
 
@@ -370,42 +371,10 @@ function startEdit(item: EntityRecord) {
   populateForm(item)
 }
 
-function entityForm(item: EntityRecord): Record<string, any> {
-  const next: Record<string, any> = {}
-  for (const f of config.value.fields) {
-    const v = item[f.key]
-    next[f.key] = f.type === 'json' ? (v == null ? '' : JSON.stringify(v, null, 2)) : (v ?? '')
-  }
-  return next
-}
-
 function populateForm(item: EntityRecord) {
   selectionRevision += 1
   pendingFocus = null
-  editingId.value = item.id
-  const next = entityForm(item)
-  form.value = next
-  formBaseline.value = JSON.stringify(next)
-}
-
-function fieldValue(field: FieldConfig, raw: unknown): unknown {
-  if (field.type !== 'json') return raw ?? ''
-  if (raw == null || String(raw).trim() === '') return field.key === 'extras' ? {} : []
-  return JSON.parse(String(raw))
-}
-
-function semanticJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(semanticJson).join(',')}]`
-  if (value !== null && typeof value === 'object') {
-    const record = value as Record<string, unknown>
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${semanticJson(record[key])}`).join(',')}}`
-  }
-  return JSON.stringify(value) ?? 'undefined'
-}
-
-function sameFieldValue(field: FieldConfig, current: unknown, baseline: unknown): boolean {
-  try { return semanticJson(fieldValue(field, current)) === semanticJson(fieldValue(field, baseline)) }
-  catch { return false }
+  activeEntity.value = entityRecord(props.novelId, selectedType.value, item)
 }
 
 function validate(): string | null {
@@ -441,7 +410,8 @@ function buildPayload(): Record<string, unknown> {
 }
 
 async function save() {
-  if (!props.novelId || saving.value) return
+  const state = entityState.value
+  if (!props.novelId || state.pending !== null || state.checking !== null || state.phase === 'unknown' || !state.exists) return
   const err = validate()
   if (err) {
     message.error(err)
@@ -455,12 +425,12 @@ async function save() {
     return
   }
   const scope = asyncScope.capture()
-  const entityType = selectedType.value
-  const apiPath = config.value.apiPath
-  const itemId = editingId.value
+  const entityType = state.type
+  const apiPath = getEntityConfig(entityType).apiPath
+  const itemId = state.recordId
   const selection = selectionRevision
   const submittedForm = formFingerprint.value
-  const revision = formRevision
+  const revision = state.revision
   const submitted = JSON.parse(submittedForm)
   const baseline = JSON.parse(formBaseline.value)
   if (itemId) {
@@ -472,71 +442,164 @@ async function save() {
       return
     }
   }
-  const fields = config.value.fields
   const currentEditor = () => asyncScope.isCurrent(scope) && selection === selectionRevision
-    && selectedType.value === entityType && editingId.value === itemId
-  saving.value = true
+    && entityState.value === state
+  const operation = entityOperation()
+  state.version += 1
+  advanceEntityFacts(scope.identity)
+  state.original = cloneEntityForm(submitted)
+  state.payload = structuredClone(payload)
+  state.saved = null
+  state.observed = null
+  state.error = ''
+  state.phase = 'pending'
+  state.pending = operation
   try {
     const saved = itemId
       ? await api.updateEntity(scope.identity, apiPath, itemId, payload)
       : await api.createEntity(scope.identity, apiPath, payload)
-    if (!currentEditor()) return
-    if (!saved || typeof saved.id !== 'string' || !saved.id || (itemId && saved.id !== itemId)
-      || (saved.novel_id && saved.novel_id !== scope.identity)) {
-      message.warning('未收到与当前设定一致的保存确认，请刷新核对；当前输入已保留')
+    if (state.pending !== operation) return
+    if (!isEntityRead(saved, scope.identity, entityType, itemId) || !matchesEntityPayload(saved, payload)) {
+      state.phase = 'unknown'
+      state.error = '未收到与原身份、原提交一致的完整保存确认；原表单与当前稿已保留，请先核对。'
+      if (currentEditor()) message.warning(state.error)
       return
     }
+    state.saved = structuredClone(saved)
+    state.phase = 'saved'
+    bindEntityId(state, saved.id)
+    const untouched = state.revision === revision && JSON.stringify(state.draft) === submittedForm
+    if (untouched) {
+      const next = recordForm(entityType, saved)
+      state.draft = cloneEntityForm(next)
+      state.baseline = next
+    } else {
+      const next = { ...baseline }
+      for (const key of Object.keys(payload)) next[key] = submitted[key]
+      state.baseline = next
+    }
+    if (!currentEditor()) return
     // 先使保存前的读取失效，并保留真实保存回应；刷新失败不回退已确认事实。
     entityLoadSequence += 1
     loading.value = false
     const existing = allEntities.value[entityType].find((item) => item.id === saved.id)
     const confirmed = { ...existing, ...saved }
     allEntities.value[entityType] = [...allEntities.value[entityType].filter((item) => item.id !== saved.id), confirmed]
-    const complete = saved.novel_id === scope.identity && fields.every((field) => Object.prototype.hasOwnProperty.call(saved, field.key))
-    const untouched = formRevision === revision && formFingerprint.value === submittedForm
-    if (untouched && complete) {
-      const next = entityForm(saved)
-      form.value = next
-      formBaseline.value = JSON.stringify(next)
-    } else {
-      // 只推进本次发送字段；未发送的旧表单值不能因返回新事实而成为下次的作者修改。
-      const next = { ...baseline }
-      for (const key of Object.keys(payload)) next[key] = submitted[key]
-      formBaseline.value = JSON.stringify(next)
-    }
-    editingId.value = saved.id
-    message.success(itemId ? '已保存' : '已创建')
+    message.success(untouched ? (itemId ? '已保存' : '已创建') : '原提交已保存，当前修改仍须另行保存')
     const refreshed = await loadAll(false)
     if (!refreshed && asyncScope.isCurrent(scope) && selection === selectionRevision && editingId.value === saved.id) {
       message.warning('设定已保存，但列表刷新失败；已确认的记录保留，请稍后刷新核对。')
     }
   } catch (e) {
-    if (currentEditor()) message.error((e as Error).message)
+    if (state.pending !== operation) return
+    const error = e as Error & { status?: number }
+    const rejected = error.status !== undefined && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)
+    state.phase = rejected ? 'idle' : 'unknown'
+    if (itemId && error.status === 404) state.exists = false
+    state.error = rejected ? error.message : `原设定保存结果待核对：${error.message}。原提交与当前稿已保留，不会自动重发。`
+    if (currentEditor()) message.error(state.error)
   } finally {
-    if (asyncScope.isCurrent(scope)) saving.value = false
+    if (state.pending === operation) {
+      state.pending = null
+      state.version += 1
+      advanceEntityFacts(scope.identity)
+    }
+  }
+}
+
+async function checkEntity() {
+  const state = entityState.value
+  if (!props.novelId || state.pending !== null || state.checking !== null || !state.exists) return
+  const scope = asyncScope.capture(), selection = selectionRevision
+  const current = () => asyncScope.isCurrent(scope) && entityState.value === state && selection === selectionRevision
+  const operation = entityOperation(), version = ++state.version
+  state.checking = operation
+  advanceEntityFacts(scope.identity)
+  try {
+    const [rows, novels] = await Promise.all([api.listEntities(state.novelId, getEntityConfig(state.type).apiPath),
+      state.recordId ? Promise.resolve(null) : api.listNovels()])
+    if (state.checking !== operation || state.version !== version) return
+    state.observed = null
+    if (!state.recordId) {
+      if (!novels?.some(novel => novel.id === state.novelId)) state.exists = false
+      state.error = state.exists
+        ? '已读取当前列表。列表或同名记录不能证明原创建请求结果；请人工核对。另建记录须明确开启独立新建意图。'
+        : '当前目录已无原作品；原创建表单与当前稿仅供复制。'
+    } else {
+      const row = rows.find(item => item.id === state.recordId)
+      if (!row) { state.exists = false; state.error = '当前列表已无原记录；原提交与当前稿仅供复制，不再保存或复活。' }
+      else if (!isEntityRead(row, state.novelId, state.type, state.recordId)) state.error = '当前资料不完整，不能采用；原提交与当前稿已保留。'
+      else { state.observed = structuredClone(row); state.error = '仅供核对的当前资料，不能证明原请求结果；采用后也不会自动保存。' }
+    }
+    if (current()) message.warning(state.error)
+  } catch (e) {
+    if (state.checking !== operation || state.version !== version) return
+    state.error = `当前设定读取失败：${(e as Error).message}`
+    if (current()) message.error(state.error)
+  } finally {
+    if (state.checking === operation) { state.checking = null; state.version += 1; advanceEntityFacts(scope.identity) }
+  }
+}
+
+function adoptCurrentEntity() {
+  const state = entityState.value, observed = state.observed
+  if (!state.recordId || !state.exists || state.pending !== null || state.checking !== null || !observed) return
+  const revision = state.revision, version = state.version
+  if (!window.confirm('当前资料不能证明原请求结果；旧请求仍可能迟到提交。以当前设定资料作为后续编辑基线？原提交和当前输入会保留，之后仍需明确点击保存。')) return
+  if (state !== entityState.value || state.revision !== revision || state.version !== version || state.observed !== observed) return
+  const baseline = state.baseline, next = recordForm(state.type, observed)
+  for (const field of getEntityConfig(state.type).fields) {
+    // 未发送且作者未改的旧显示值不能因采用新事实而成为下一次的作者意图。
+    if (!Object.prototype.hasOwnProperty.call(state.payload ?? {}, field.key)
+      && sameFieldValue(field, state.draft[field.key], baseline[field.key])) next[field.key] = baseline[field.key]
+  }
+  state.baseline = next
+  state.phase = 'idle'
+  state.saved = null
+  state.version += 1
+  advanceEntityFacts(state.novelId)
+  state.error = '已采用当前资料，原请求结果仍未知；当前稿须由你明确保存。'
+}
+
+async function copyEntity(original = false, state: EntityDraft = entityState.value) {
+  const value = original ? state.original : state.draft
+  if (value === null) return
+  const text = entityText(value), host = entityState.value, scope = asyncScope.capture()
+  const current = () => asyncScope.isCurrent(scope) && entityState.value === host
+  try { await navigator.clipboard.writeText(text); if (current()) message.success(original ? '已复制原提交设定' : '已复制当前设定') }
+  catch {
+    if (!current()) return
+    entityCopy.value = text; entityCopyOriginal.value = original; showEntityCopy.value = true
+    message.warning('剪贴板不可用，请从只读表单手动复制；JSON 字符串保留字段原文。')
   }
 }
 
 async function remove() {
-  if (!props.novelId || !editingId.value || saving.value) return
+  const state = entityState.value
+  if (!props.novelId || !state.recordId || state.pending !== null || state.checking !== null || state.phase === 'unknown' || !state.exists) return
   if (!window.confirm('确认删除该记录？')) return
   const scope = asyncScope.capture()
-  const itemId = editingId.value
+  const itemId = state.recordId
   const apiPath = config.value.apiPath
   const entityType = selectedType.value
   const selection = selectionRevision
   const submittedForm = formFingerprint.value
-  saving.value = true
+  const operation = entityOperation()
+  state.pending = operation
+  state.version += 1
+  advanceEntityFacts(scope.identity)
   try {
     await api.deleteEntity(scope.identity, apiPath, itemId)
+    if (state.pending !== operation) return
+    state.exists = false
+    state.observed = null
+    state.error = '原记录已删除，页内稿仅供复制。'
     if (!asyncScope.isCurrent(scope)) return
     entityLoadSequence += 1
     allEntities.value[entityType] = allEntities.value[entityType].filter((item) => item.id !== itemId)
     if (pendingFocus?.type === entityType && pendingFocus.id === itemId) pendingFocus = null
-    if (selectedType.value === entityType && editingId.value === itemId) {
-      editingId.value = null
-      if (selection === selectionRevision && formFingerprint.value === submittedForm) resetForm()
-      else formBaseline.value = '{}'
+    if (selectedType.value === entityType && entityState.value === state) {
+      if (selection === selectionRevision && formFingerprint.value === submittedForm) resetForm(true)
     }
     const refreshed = await loadAll(false)
     if (asyncScope.isCurrent(scope)) {
@@ -546,7 +609,7 @@ async function remove() {
   } catch (e) {
     if (asyncScope.isCurrent(scope)) message.error((e as Error).message)
   } finally {
-    if (asyncScope.isCurrent(scope)) saving.value = false
+    if (state.pending === operation) { state.pending = null; state.version += 1; advanceEntityFacts(scope.identity) }
   }
 }
 
@@ -565,12 +628,11 @@ watch(
     asyncScope.invalidate()
     selectionRevision += 1
     pendingFocus = null
-    editingId.value = null
     allEntities.value = emptyEntities()
     loading.value = false
-    saving.value = false
     rebuildingIndex.value = false
     showAnchorCopy.value = false
+    showEntityCopy.value = false
     chapters.value = []
     resetForm()
     anchorChapterId.value = null
@@ -710,7 +772,10 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="detail-pane">
-        <h3>{{ editingId ? '编辑' : '新建' }} {{ config.label }}</h3>
+        <h3>{{ !entityState.exists ? '原记录副本（仅供复制）' : editingId ? '编辑' : '新建' }} {{ config.label }}</h3>
+        <p v-if="saving" class="anchor-hint">原提交待回应；后来输入保留，同一目标不会重复保存。</p>
+        <p v-else-if="entityState.phase === 'unknown'" class="anchor-hint">原保存结果待核对；请复制原提交与当前稿，不会盲重发。</p>
+        <p v-if="entityState.error" class="anchor-hint">{{ entityState.error }}</p>
         <n-form label-placement="top">
           <n-form-item
             v-for="f in config.fields"
@@ -721,12 +786,14 @@ onBeforeUnmount(() => {
             <n-input
               v-if="f.type === 'text'"
               v-model:value="form[f.key]"
+              :input-props="{ 'aria-label': `当前设定表单 · ${f.key}` }"
               :placeholder="f.placeholder || `请输入${f.label}`"
             />
             <n-input
               v-else-if="f.type === 'textarea'"
               v-model:value="form[f.key]"
               type="textarea"
+              :input-props="{ 'aria-label': `当前设定表单 · ${f.key}` }"
               :autosize="{ minRows: 2, maxRows: 6 }"
               :placeholder="f.placeholder || `请输入${f.label}`"
             />
@@ -739,6 +806,7 @@ onBeforeUnmount(() => {
               v-else-if="f.type === 'json'"
               v-model:value="form[f.key]"
               type="textarea"
+              :input-props="{ 'aria-label': `当前设定表单 · ${f.key}` }"
               :autosize="{ minRows: 2, maxRows: 4 }"
               :placeholder="f.placeholder"
             />
@@ -752,12 +820,37 @@ onBeforeUnmount(() => {
           </n-form-item>
         </n-form>
         <div class="actions">
-          <n-button type="primary" :disabled="!novelId || (!!editingId && !entityDirty)" :loading="saving" @click="save">保存</n-button>
-          <n-button v-if="editingId" type="error" :disabled="saving" @click="remove">删除</n-button>
+          <n-button type="primary" :disabled="!novelId || saving || entityState.checking !== null || entityState.phase === 'unknown' || !entityState.exists || (!!editingId && !entityDirty)" :loading="saving" @click="save">保存</n-button>
+          <n-button v-if="editingId" type="error" :disabled="saving || entityState.checking !== null || entityState.phase === 'unknown'" @click="remove">删除</n-button>
+          <n-button @click="copyEntity()">复制当前设定</n-button>
+          <n-button v-if="entityState.original" @click="copyEntity(true)">复制原提交设定</n-button>
+          <n-button v-if="entityState.original && entityState.exists" :disabled="saving || entityState.checking !== null" :loading="entityState.checking !== null" @click="checkEntity">核对当前设定</n-button>
+          <n-button v-if="entityState.phase === 'unknown' && entityState.observed && entityState.exists" :disabled="saving || entityState.checking !== null" @click="adoptCurrentEntity">以当前设定继续编辑</n-button>
         </div>
+        <template v-if="entityState.original">
+          <p class="anchor-hint">{{ entityState.saved ? '原提交已收到完整保存确认；当前稿仍须另行保存。' : '原提交表单保留，当前读取不能证明原请求结果。' }}</p>
+          <n-input type="textarea" readonly :value="entityText(entityState.original)" :input-props="{ 'aria-label': '原提交设定表单' }" :autosize="{ minRows: 2, maxRows: 5 }" />
+        </template>
+        <n-input v-if="entityState.observed" type="textarea" readonly :value="entityText(recordForm(entityState.type, entityState.observed))" :input-props="{ 'aria-label': '核对所得当前设定' }" :autosize="{ minRows: 2, maxRows: 5 }" />
+        <p class="anchor-hint">设定原提交、后来稿与等待状态仅在本页面保留；切换编辑器不自动保存，完整刷新或关闭前请复制。新建按钮开启独立创建意图。</p>
+        <details v-if="otherEntityDrafts.length" class="anchor-recovery">
+          <summary>其他页内设定稿（{{ otherEntityDrafts.length }}）</summary>
+          <div v-for="state in otherEntityDrafts" :key="state.key" class="anchor-record">
+            <strong>{{ state.novelId }} · {{ getEntityConfig(state.type).label }} · {{ state.recordId || '独立创建稿' }}</strong>
+            <p class="anchor-hint">{{ !state.exists ? '来源已无，仅供复制' : state.pending !== null ? '原提交等待中' : state.phase === 'unknown' ? '原结果未知，请在原来源核对' : state.saved ? '原提交已确认' : '未保存页内稿' }}；此处只读，不会写入或改绑当前记录。</p>
+            <n-input type="textarea" readonly :value="entityText(state.draft)" :input-props="{ 'aria-label': `其他源当前设定 · ${state.key}` }" :autosize="{ minRows: 2, maxRows: 4 }" />
+            <n-input v-if="state.original" type="textarea" readonly :value="entityText(state.original)" :input-props="{ 'aria-label': `其他源原提交设定 · ${state.key}` }" :autosize="{ minRows: 2, maxRows: 4 }" />
+            <n-button size="small" @click="copyEntity(false, state)">复制此设定稿</n-button>
+            <n-button v-if="state.original" size="small" @click="copyEntity(true, state)">复制此设定原提交</n-button>
+          </div>
+        </details>
       </div>
       </div>
     </div>
+    <n-modal :show="showEntityCopy" preset="card" title="手动复制设定" style="width: 560px" @update:show="(value: boolean) => { showEntityCopy = value }">
+      <p>请手动选取并复制只读 JSON 表单；其中的字符串保留每个字段的原始文本。</p>
+      <n-input type="textarea" readonly :value="entityCopy" :input-props="{ 'aria-label': entityCopyOriginal ? '手动复制原提交设定' : '手动复制当前设定' }" :autosize="{ minRows: 3, maxRows: 14 }" />
+    </n-modal>
   </div>
 </template>
 

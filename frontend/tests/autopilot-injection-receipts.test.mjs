@@ -9,7 +9,7 @@ let source = (await readFile(new URL('./autopilot-author-input.test.mjs', import
 for (const name of ['vue', '@vue/compiler-sfc', 'typescript', 'node:crypto']) source = source.replaceAll(`from '${name}'`, `from '${import.meta.resolve(name)}'`)
 source = source.replaceAll('import.meta.url', JSON.stringify(new URL('./autopilot-author-input.test.mjs', import.meta.url).href))
   .replaceAll("import.meta.resolve('vue')", JSON.stringify(import.meta.resolve('vue')))
-const { panel, receipt, snapshot, deferred, flush, storage, injectionRequests, nodes, textOf } = await import(url(source + '\nexport { panel, receipt, snapshot, deferred, flush, storage, injectionRequests, nodes, textOf }'))
+const { panel, receipt, snapshot, deferred, flush, waitForInjection, storage, injectionRequests, nodes, textOf } = await import(url(source + '\nexport { panel, receipt, snapshot, deferred, flush, waitForInjection, storage, injectionRequests, nodes, textOf }'))
 const helper = await import(url(ts.transpileModule(await readFile(new URL('../src/utils/autopilotInjection.ts', import.meta.url), 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText))
@@ -25,7 +25,7 @@ test('原提交UUID精确正文SHA在POST前持久保存，等待期间与未知
     await response.promise; return unknown()
   } } })
   context.vm.directive.value = '  中文🙂\u0000原构思  '; const saving = context.vm.inject()
-  context.vm.directive.value = '等待期间的新稿'; await flush(); await context.vm.inject()
+  context.vm.directive.value = '等待期间的新稿'; await waitForInjection(context); await flush(); await context.vm.inject()
   assert.equal(injectionRequests(context).length, 1); assert.equal(records(cache)[0].currentDraft, '等待期间的新稿')
   response.resolve(); await saving; context.vm.directive.value = '未知之后又修稿'
   assert.equal(records(cache)[0].currentDraft, '未知之后又修稿'); assert.equal(records(cache)[0].currentDraftEdited, true)
@@ -147,7 +147,7 @@ test('初次cache满和后续draft更新失败保留页内稿/原nonce，copy失
     const cache = storage(), response = deferred(); let writes = 0
     const set = cache.setItem; cache.setItem = (...args) => { if (firstWriteFails || ++writes > 1) throw new Error('quota'); return set(...args) }
     const context = await panel({ storage: cache, api: { injectAutopilot: async () => { await response.promise; return unknown() } } })
-    context.vm.directive.value = '原提交'; const saving = context.vm.inject(); await flush()
+    context.vm.directive.value = '原提交'; const saving = context.vm.inject(); await waitForInjection(context); await flush()
     context.vm.directive.value = '必须复制的新稿'; response.resolve(); await saving
     assert.equal(context.vm.directive.value, '必须复制的新稿'); assert.match(context.vm.injectionStorageNotice.value, /未能保存最新.*复制/)
     const noticeCount = context.messages.length; context.vm.directive.value = '又更新的新稿'; assert.equal(context.messages.length, noticeCount)

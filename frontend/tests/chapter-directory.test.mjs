@@ -73,6 +73,9 @@ async function panel(name = 'WritingPanel', options = {}) {
     (await readFile(new URL('../src/utils/styleAnchorDraft.ts', import.meta.url), 'utf8'))
       .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
   ) + `\n// style-page-${sequence}`) }
+  pageDependencies['../utils/entityDraft'] = moduleUrl(compile((await readFile(new URL('../src/utils/entityDraft.ts', import.meta.url), 'utf8'))
+    .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+    .replace("from '../types'", `from '${pageDependencies['../types']}'`)) + `\n// entity-page-${sequence}`)
   for (const [name, url] of Object.entries(pageDependencies)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)
   const component = (await import(moduleUrl(compile(source)))).default
   const scope = effectScope()

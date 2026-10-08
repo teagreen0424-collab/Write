@@ -15,7 +15,7 @@ const flush = async () => { for (let index = 0; index < 20; index++) { await Pro
 const deferred = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail }); return { promise, resolve, reject } }
 const entity = (type = 'character', novelId = 'novel-a', patch = {}) => {
   const config = ENTITY_TYPES.find((item) => item.type === type)
-  return { id: `${novelId}-${type}`, novel_id: novelId, ...Object.fromEntries(config.fields.map((field) => [field.key,
+  return { id: `${novelId}-${type}`, novel_id: novelId, created_at: '', updated_at: '', ...Object.fromEntries(config.fields.map((field) => [field.key,
     field.type === 'json' ? field.key === 'extras' ? { 阵营: '原有', nested: { b: 2, a: 1 } } : ['first', 'second']
       : field.type === 'select' ? 'planted' : field.required ? `${type}原名` : `${field.key}原值`,
   ])), ...patch }
@@ -59,6 +59,9 @@ async function panel(options = {}) {
     (await readFile(new URL('../src/utils/styleAnchorDraft.ts', import.meta.url), 'utf8'))
       .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
   ) + `\n// style-page-${sequence}`) }
+  pageDependencies['../utils/entityDraft'] = moduleUrl(compile((await readFile(new URL('../src/utils/entityDraft.ts', import.meta.url), 'utf8'))
+    .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+    .replace("from '../types'", `from '${pageDependencies['../types']}'`)) + `\n// entity-page-${sequence}`)
   for (const [name, url] of Object.entries(pageDependencies)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)
   const component = (await import(moduleUrl(compile(source)))).default
   const scope = effectScope(), vm = scope.run(() => component.setup(props, { expose() {}, emit: (...args) => emitted.push(args) }))
@@ -226,7 +229,7 @@ test('JSON null或非匹配容器被明确拒绝，解析错误与API拒绝都�
 
 test('新建挂起时作者新输入不会丢，创建成功绑定原ID后下一次只更新新改字段', async () => {
   const response = deferred()
-  const context = await panel({ api: { createEntity: async (novelId, _path, payload) => { await response.promise; return { id: 'created', novel_id: novelId, ...payload } },
+  const context = await panel({ api: { createEntity: async (novelId, _path, payload) => { await response.promise; return { id: 'created', novel_id: novelId, created_at: '', updated_at: '', ...payload } },
     updateEntity: async (novelId, _path, id, payload) => ({ ...entity(), id, novel_id: novelId, ...payload }) } })
   context.vm.form.value.name = '首次创建姓名'
   const creating = context.vm.save(); context.vm.form.value.goal = '创建等待的新目标'
@@ -250,7 +253,7 @@ test('保存200后目录失败保留实际完整实体，保存前旧list不能�
   context.dispose()
 })
 
-test('作品或实体身份ABA及卸载后的旧保存成功失败静默，不推进当前基线和新loading', async () => {
+test('作品或实体身份ABA及卸载后的旧保存静默，确认只推进原提交基线并保作者稿和新loading', async () => {
   for (const transition of ['novel', 'entity', 'unmount']) for (const outcome of ['success', 'failure']) {
     const response = deferred()
     const context = await panel({ api: { updateEntity: async () => response.promise } }); context.edit()
@@ -262,7 +265,7 @@ test('作品或实体身份ABA及卸载后的旧保存成功失败静默，不�
     const baseline = context.vm.formBaseline.value, calls = context.requests.length
     if (outcome === 'success') response.resolve(entity('character', 'novel-a', { goal: '旧请求目标' })); else response.reject(new Error('旧保存错误'))
     await saving
-    assert.equal(context.vm.form.value.goal, '新的作者输入'); assert.equal(context.vm.formBaseline.value, baseline)
+    assert.equal(context.vm.form.value.goal, '新的作者输入'); assert.equal(JSON.parse(context.vm.formBaseline.value).goal, outcome === 'success' ? '旧请求目标' : JSON.parse(baseline).goal)
     assert.equal(context.messages.length, 0); assert.equal(context.requests.length, calls)
     if (transition !== 'unmount') context.dispose()
   }

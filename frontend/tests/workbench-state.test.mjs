@@ -20,7 +20,12 @@ const dependencyUrls = Object.fromEntries(await Promise.all([
   .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)))])))
 const settle = async () => { for (let index = 0; index < 20; index += 1) { await Promise.resolve(); await nextTick() } }
 const wait = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
-const character = (novelId = 'novel-a') => ({ id: `${novelId}-character`, novel_id: novelId, name: `${novelId}人物`, extras: { 阵营: '原有设定' } })
+const { ENTITY_TYPES } = await import(dependencyUrls['../types'])
+const completeEntity = (novelId, path, id, payload = {}) => ({
+  ...Object.fromEntries(ENTITY_TYPES.find(type => type.apiPath === path).fields.map(field => [field.key, field.type === 'json' ? field.key === 'extras' ? {} : [] : field.type === 'select' ? field.options[0].value : ''])),
+  id, novel_id: novelId, created_at: '', updated_at: '', ...payload,
+})
+const character = (novelId = 'novel-a') => ({ ...completeEntity(novelId, 'characters', `${novelId}-character`), id: `${novelId}-character`, novel_id: novelId, name: `${novelId}人物`, extras: { 阵营: '原有设定' } })
 const outlineNode = (novelId = 'novel-a', patch = {}) => ({ id: `${novelId}-volume`, novel_id: novelId, level: 'volume', parent_id: '', sort_order: 0, title: `${novelId}卷`, summary: '原有概要', ...patch })
 const book = (novelId = 'novel-a') => ({ title: novelId, chapter_count: 1, word_count: 10, draft_count: 0, finalized_count: 1, volumes: [], chapters: [] })
 const preflight = (patch = {}) => ({ chapter_count: 1, word_count: 10, ready: true, draft_chapters: [], unbound_chapters: [], unresolved_foreshadowings: [], rule_conflicts: [], ...patch })
@@ -43,12 +48,13 @@ async function panel(name, options = {}) {
     addEventListener: (name, fn) => listeners.set(name, fn),
     removeEventListener: (name) => listeners.delete(name),
   }
+  const database = new Map(['novel-a', 'novel-b'].flatMap(id => ENTITY_TYPES.map(type => [`${id}/${type.apiPath}`, type.type === 'character' ? [character(id)] : []])))
   const defaults = {
     listNovels: async () => ['novel-a', 'novel-b'].map((id) => ({ id, title: id, style_anchor: `${id}文风` })),
-    listEntities: async (novelId, apiPath) => apiPath === 'characters' ? [character(novelId)] : [],
+    listEntities: async (novelId, apiPath) => structuredClone(database.get(`${novelId}/${apiPath}`) ?? []),
     listChapterMetadata: async (novelId) => [{ id: `${novelId}-chapter`, novel_id: novelId, seq: 1, title: novelId, content: `${novelId}章节正文`, directive: '', summary: '', status: 'draft', outline_node_id: '' }],
-    createEntity: async (novelId, apiPath, payload) => ({ ...payload, id: `${novelId}-created` }),
-    updateEntity: async (novelId, apiPath, id, payload) => ({ ...payload, id }),
+    createEntity: async (novelId, apiPath, payload) => completeEntity(novelId, apiPath, `${novelId}-created`, payload),
+    updateEntity: async (novelId, apiPath, id, payload) => completeEntity(novelId, apiPath, id, { ...database.get(`${novelId}/${apiPath}`)?.find(row => row.id === id), ...payload }),
     deleteEntity: async () => {}, updateNovel: async (id, payload) => ({ id, title: id, genre: '', summary: '', style_anchor: '', created_at: '', updated_at: '', ...payload }),
     createNovel: async (payload) => ({ id: 'created-novel', ...payload, style_anchor: '', created_at: '', updated_at: '' }),
     listOutline: async (novelId) => [outlineNode(novelId)],
@@ -65,6 +71,12 @@ async function panel(name, options = {}) {
   const api = Object.fromEntries(Object.entries(implementations).map(([method, implementation]) => [method, (...args) => {
     requests.push({ method, args: JSON.parse(JSON.stringify(args)) })
     const result = implementation(...args)
+    if (method === 'createEntity' || method === 'updateEntity') return Promise.resolve(result).then(saved => {
+      if (saved?.novel_id === args[0] && saved.created_at !== undefined && saved.updated_at !== undefined) {
+        const rows = database.get(`${args[0]}/${args[1]}`) ?? []; database.set(`${args[0]}/${args[1]}`, [...rows.filter(row => row.id !== saved.id), structuredClone(saved)])
+      }
+      return saved
+    })
     return method === 'settleApply' ? Promise.resolve(result).then(settleReceiptResult) : result
   }]))
   const harness = {
@@ -95,6 +107,9 @@ async function panel(name, options = {}) {
     (await readFile(new URL('../src/utils/projectDraft.ts', import.meta.url), 'utf8'))
       .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
   ) + `\n// fixture-page-${sequence}`) }
+  dependencies['../utils/entityDraft'] = moduleUrl(compile((await readFile(new URL('../src/utils/entityDraft.ts', import.meta.url), 'utf8'))
+    .replace(/from ['"]vue['"]/g, `from '${import.meta.resolve('vue')}'`)
+    .replace("from '../types'", `from '${dependencies['../types']}'`)) + `\n// entity-page-${sequence}`)
   for (const [name, url] of Object.entries(dependencies)) source = source.replaceAll(`from '${name}'`, `from '${url}'`)
   const component = (await import(moduleUrl(compile(source) + `\n// ${++sequence}`))).default
   const scope = effectScope()
@@ -154,7 +169,7 @@ test('设定真实 SFC 保存后续编辑仍为脏数据，新建获得身份后
   context.vm.form.value.name = '第一次名字'
   const saving = context.vm.save()
   context.vm.form.value.name = '保存时又改的名字'
-  pending.resolve({ id: 'created-character', name: '第一次名字' }); await saving
+  pending.resolve(completeEntity('novel-a', 'characters', 'created-character', { name: '第一次名字' })); await saving
   assert.equal(context.vm.form.value.name, '保存时又改的名字')
   assert.equal(context.vm.editingId.value, 'created-character')
   assert.equal(context.vm.entityDirty.value, true)
