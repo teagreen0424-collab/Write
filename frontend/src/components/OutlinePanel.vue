@@ -341,7 +341,7 @@ watch(
 
     <n-empty v-if="!nodes.length" description="暂无大纲，请新增卷或生成一卷预览" />
 
-    <n-modal :show="showPlanner" preset="card" title="AI 大纲预览" style="width: min(800px, 94vw)" @update:show="(visible: boolean) => { if (!visible) closePlanner() }">
+    <n-modal :show="showPlanner" preset="card" title="AI 大纲预览" style="width: min(800px, 94vw); max-height: 90vh" :content-style="{ overflow: 'auto', minHeight: '0' }" @update:show="(visible: boolean) => { if (!visible) closePlanner() }">
       <OutlinePlanCard
         v-if="showPlanner"
         :key="modalRevision"

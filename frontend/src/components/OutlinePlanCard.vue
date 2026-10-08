@@ -185,7 +185,7 @@ onBeforeUnmount(() => {
           </div>
           <n-button size="tiny" @click="act.chapters.push({ title: '', summary: '' })">+ 幕内章节</n-button>
         </div>
-        <div class="actions">
+        <div class="actions confirmation-actions">
           <n-button size="tiny" @click="plan.acts.push({ title: '', summary: '', chapters: [] })">+ 幕</n-button>
           <n-button type="primary" size="small" :loading="applying" @click="apply">{{ appendUnconfirmed ? '核对原追加' : '确认追加到大纲' }}</n-button>
         </div>
@@ -197,9 +197,16 @@ onBeforeUnmount(() => {
 <style scoped>
 .planner { display: grid; gap: 12px; }
 .planner p { margin: 0; color: #666; }
-.draft, .group { display: grid; gap: 8px; }
+.draft, .group { display: grid; gap: 8px; min-width: 0; }
 .group { border: 1px solid #e5e7eb; padding: 10px; border-radius: 6px; }
 .item, .actions { display: flex; align-items: center; gap: 8px; }
-.item :first-child { min-width: 120px; }
-.item :nth-child(2) { flex: 1; }
+.item > :first-child { flex: 1; min-width: 120px; }
+.item > :nth-child(2) { flex: 1; min-width: 0; }
+.confirmation-actions { position: sticky; bottom: 0; padding: 8px 0; background: #fff; z-index: 1; }
+@media (max-width: 600px) {
+  .item { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .item > :first-child { min-width: 0; }
+  .item > :nth-child(2) { grid-column: 1; }
+  .item > :last-child { grid-column: 2; grid-row: 1 / span 2; }
+}
 </style>
