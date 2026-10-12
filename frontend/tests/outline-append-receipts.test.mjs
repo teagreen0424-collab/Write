@@ -8,13 +8,16 @@ test('大纲未知追加重试同一UUID和原树，核对不吞掉后来构思�
     if (!saved.has(requestId)) saved.set(requestId, structuredClone(plan))
     if (fail) { fail=false; throw new Error('真实保存后回应丢失夹具') }
     return { ...receipt(requestId), append_replayed: true }
+  }, checkOutlineAppend: async (id, requestId, plan) => {
+    assert.deepEqual(plan, saved.get(requestId))
+    return { ...receipt(requestId), append_replayed: true }
   } } })
   try {
     await c.vm.apply(); assert.equal(c.vm.appendUnconfirmed.value, true)
     c.vm.sourceText.value='后来构思'; c.vm.plan.value.title='后来卷标题'; c.vm.plan.value.chapters[0].summary='后来章节概要'
     await c.vm.apply()
     const writes=c.requests.filter(r => r.method==='applyOutline')
-    assert.equal(writes.length,2); assert.deepEqual(writes[1].args,writes[0].args)
+    assert.equal(writes.length,1); assert.equal(c.requests.filter(r => r.method==='checkOutlineAppend').length,1)
     assert.match(writes[0].args[2], /^[0-9a-f-]{36}$/)
     assert.equal(saved.size,1); assert.equal(c.vm.plan.value.title,'后来卷标题')
     assert.equal(c.vm.plan.value.chapters[0].summary,'后来章节概要'); assert.equal(c.vm.sourceText.value,'后来构思')
@@ -56,16 +59,16 @@ test('大纲busy409仍未知，核对必须保持同一原请求', async () => {
   const c=await appendCard({api:{applyOutline:async(id,plan,requestId)=>{if(fail){fail=false;throw Object.assign(new Error('写锁忙'),{status:409,code:'outline_append_busy'})}return receipt(requestId)}}})
   try {
     await c.vm.apply(); assert.equal(c.vm.appendUnconfirmed.value,true)
-    await c.vm.apply(); assert.equal(c.requests[0].args[2],c.requests[1].args[2])
+    await c.vm.apply(); const writes=c.requests.filter(r=>r.method==='applyOutline'); assert.equal(writes.length,2); assert.deepEqual(writes[0].args,writes[1].args)
     assert.equal(c.emitted.length,1)
   } finally {c.dispose()}
 })
 test('大纲已删除原节点核对409保留原请求与后来稿，不用新UUID复活', async () => {
   let calls=0
-  const c=await appendCard({api:{applyOutline:async()=>{if(++calls===1)throw new Error('丢回应');throw Object.assign(new Error('原节点已删除'),{status:409,code:'outline_append_deleted'})}}})
+  const c=await appendCard({api:{applyOutline:async()=>{++calls;throw new Error('丢回应')},checkOutlineAppend:async()=>{throw Object.assign(new Error('原节点已删除'),{status:409,code:'outline_append_deleted'})}}})
   try {
     await c.vm.apply(); c.vm.plan.value.summary='保留稿件'; await c.vm.apply(); await c.vm.apply()
-    assert.equal(new Set(c.requests.map(r=>r.args[2])).size,1)
+    assert.equal(calls,1); const checks=c.requests.filter(r=>r.method==='checkOutlineAppend'); assert.equal(checks.length,2); assert.equal(new Set(checks.map(r=>r.args[1])).size,1)
     assert.equal(c.vm.appendUnconfirmed.value,true); assert.equal(c.vm.plan.value.summary,'保留稿件'); assert.equal(c.emitted.length,0)
   } finally {c.dispose()}
 })

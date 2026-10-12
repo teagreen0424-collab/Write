@@ -412,6 +412,10 @@ export const api = {
     request<OutlineApplyResult>(`${BASE}/novels/${novelId}/outline/apply`, {
       method: 'POST', body: JSON.stringify({ plan, ...(requestId ? { request_id: requestId } : {}) }),
     }),
+  checkOutlineAppend: (novelId: string, requestId: string, plan: OutlineVolumeDraft) =>
+    request<OutlineApplyResult>(`${BASE}/novels/${novelId}/outline/append-requests/${requestId}/check`, {
+      method: 'POST', body: JSON.stringify({ plan }),
+    }),
   rebuildSettingIndex: (novelId: string) =>
     request<{ indexed: number; failed: number }>(`${BASE}/novels/${novelId}/memory/rebuild-settings`, {
       method: 'POST',

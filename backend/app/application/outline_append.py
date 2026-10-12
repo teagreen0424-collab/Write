@@ -14,11 +14,11 @@ from app.interfaces.schemas import OutlineVolumeDraft
 
 
 class OutlineAppendError(Exception):
-    def __init__(self, code: str, detail: str):
+    def __init__(self, code: str, detail: str, status_code: int = 409):
         super().__init__(detail)
         self.code = code
         self.detail = detail
-        self.status_code = 409
+        self.status_code = status_code
 
 
 def _receipt(db: Session, request_id: str):
@@ -41,12 +41,26 @@ def _replay(db: Session, novel_id: str, receipt, fingerprint: str) -> dict:
             'request_id': receipt['request_id'], 'append_replayed': True}
 
 
+def _fingerprint(novel_id: str, plan: OutlineVolumeDraft) -> str:
+    canonical = json.dumps({'version': 1, 'novel_id': novel_id, 'plan': plan.model_dump(mode='json')},
+                           ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf8')).hexdigest()
+
+
+def check_outline_append(db: Session, novel_id: str, plan: OutlineVolumeDraft, request_id: str) -> dict:
+    # 核对只读；不 flush、commit 或 rollback 调用方已有事务。
+    with db.no_autoflush:
+        NovelRepo(db).get(novel_id)
+        previous = _receipt(db, request_id)
+        if previous is None:
+            raise OutlineAppendError('outline_append_not_found', '尚无该原追加的保存回执', 404)
+        return _replay(db, novel_id, previous, _fingerprint(novel_id, plan))
+
+
 def append_outline_once(db: Session, novel_id: str, plan: OutlineVolumeDraft, request_id: str) -> dict:
     # 拒绝调用方未提交写入不能回滚其既有事务；无UUID旧路径仍由outline_plan保持。
     _require_clean_session(db)
-    canonical = json.dumps({'version': 1, 'novel_id': novel_id, 'plan': plan.model_dump(mode='json')},
-                           ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-    fingerprint = hashlib.sha256(canonical.encode('utf8')).hexdigest()
+    fingerprint = _fingerprint(novel_id, plan)
     try:
         NovelRepo(db).get(novel_id)
         previous = _receipt(db, request_id)

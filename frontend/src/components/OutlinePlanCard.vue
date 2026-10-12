@@ -102,12 +102,36 @@ async function apply() {
   const expectedSourceRevision = submission?.sourceRevision ?? sourceRevision
   const expectedPlanRevision = submission?.planRevision ?? planRevision
   const isCurrent = () => asyncScope.isCurrent(scope) && sequence === applySequence
+  const wasUnconfirmed = appendUnconfirmed.value
+  const qualifyReceipt = (result: OutlineApplyResult) => {
+    const count = 1 + draft.chapters.length + draft.acts.reduce((total, act) => total + 1 + act.chapters.length, 0)
+    if (!result || result.request_id !== submission!.requestId || typeof result.append_replayed !== 'boolean'
+      || typeof result.volume_id !== 'string' || !result.volume_id
+      || !Array.isArray(result.node_ids) || result.node_ids.length !== count
+      || result.node_ids[0] !== result.volume_id || new Set(result.node_ids).size !== count
+      || result.node_ids.some(id => typeof id !== 'string' || !id)) {
+      throw new Error('服务未返回完整的原追加回执，请更新并重启服务后核对；原稿已保留')
+    }
+  }
   applying.value = true
   try {
-    const result = conversationId && messageId
-      ? await api.applyMessageOutline(conversationId, messageId, draft)
-      : await api.applyOutline(novelId, draft, submission!.requestId)
+    let result: OutlineApplyResult
+    if (conversationId && messageId) result = await api.applyMessageOutline(conversationId, messageId, draft)
+    else if (wasUnconfirmed) {
+      try {
+        result = await api.checkOutlineAppend(novelId, submission!.requestId, draft)
+      } catch (error) {
+        if (!isCurrent()) return
+        const failure = error as Error & { status?: number; code?: string }
+        if (failure.status === 404 && failure.code === 'outline_append_not_found') {
+          result = await api.applyOutline(novelId, draft, submission!.requestId)
+        } else if (failure.status === 404 || failure.status === 405) {
+          throw new Error('当前服务不支持原追加核对，请更新并重启服务后再核对；不会再次追加')
+        } else throw error
+      }
+    } else result = await api.applyOutline(novelId, draft, submission!.requestId)
     if (!isCurrent()) return
+    if (workbench) qualifyReceipt(result)
     appendSubmission.value = null
     appendUnconfirmed.value = false
     if (sourceRevision !== expectedSourceRevision || planRevision !== expectedPlanRevision) {
@@ -154,7 +178,7 @@ onBeforeUnmount(() => {
       <n-button size="small" @click="emit('cancel')">关闭</n-button>
     </div>
     <div v-if="appendUnconfirmed && appendSubmission" class="append-warning" role="status">
-      <p>本次追加可能已经保存。核对会沿用原请求与原大纲，不会把等待期间的新编辑重复追加。</p>
+      <p>本次追加可能已经保存。核对先读取原追加回执；只有服务明确查无原请求才按原大纲重试。旧服务不支持核对时，请更新并重启服务，原稿保持可复制。</p>
       <p>关闭后将无法在这次预览中核对，请先复制下方原大纲与当前编辑。</p>
       <n-input :value="originalAppendText" type="textarea" readonly :autosize="{ minRows: 2, maxRows: 5 }" :input-props="{ 'aria-label': '原追加大纲，可手动复制' }" />
     </div>

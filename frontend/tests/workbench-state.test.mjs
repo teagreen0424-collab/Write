@@ -63,7 +63,7 @@ async function panel(name, options = {}) {
     updateOutline: async (novelId, id, payload) => ({ ...payload, id }),
     deleteOutline: async () => {}, reorderOutline: async () => {},
     previewOutline: async () => outlineDraft(), previewMessageOutline: async () => outlineDraft(),
-    applyOutline: async () => ({ volume_id: 'saved-volume' }), applyMessageOutline: async () => ({ volume_id: 'saved-volume' }),
+    applyOutline: async (id, plan, requestId) => ({ volume_id: 'saved-volume', node_ids: ['saved-volume','saved-chapter'], request_id: requestId, append_replayed: false }), applyMessageOutline: async () => ({ volume_id: 'saved-volume' }),
     settleChapter: async () => settleResult(), settleApply: async () => ({ created: [], failed: [] }),
     getBookSummary: async (novelId) => book(novelId),
     preflightExport: async () => preflight(), downloadBookFile: async () => new Blob(['章节正文']),
@@ -582,7 +582,7 @@ test('AI大纲卡真实 SFC 确认应用发送冻结草稿，期间的新编辑�
   const applying = context.vm.apply()
   context.vm.plan.value.title = '应用期间编辑的卷'
   context.vm.plan.value.chapters[0].summary = '新章节概要'
-  pending.resolve({ volume_id: 'saved-volume' }); await applying
+  pending.resolve({ volume_id: 'saved-volume', node_ids: ['saved-volume','saved-chapter'], request_id: context.requests.find(r => r.method === 'applyOutline').args[2], append_replayed: false }); await applying
   const submitted = context.requests.find((request) => request.method === 'applyOutline')
   assert.equal(submitted.args[0], 'novel-a')
   assert.equal(submitted.args[1].title, '提交的卷')
@@ -608,7 +608,7 @@ test('AI大纲卡真实 SFC 应用卸载后不提示/回显；当前未编辑的
   }
   const current = await panel('OutlinePlanCard')
   current.vm.plan.value = outlineDraft(); await current.vm.apply()
-  assert.deepEqual(current.emitted, [['applied', { volume_id: 'saved-volume' }]])
+  assert.deepEqual(current.emitted, [['applied', { volume_id: 'saved-volume', node_ids: ['saved-volume','saved-chapter'], request_id: current.requests.find(r => r.method === 'applyOutline').args[2], append_replayed: false }]])
   current.dispose()
 })
 

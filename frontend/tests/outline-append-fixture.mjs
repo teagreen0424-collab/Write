@@ -14,6 +14,7 @@ export const receipt = requestId => ({ volume_id: 'volume', node_ids: ['volume',
 export async function appendCard(options = {}) {
   const props = reactive({ novelId: 'novel-a', ...options.props }), requests = [], messages = [], emitted = [], hooks = {}
   const defaults = {
+    checkOutlineAppend: async () => { throw Object.assign(new Error('尚无原请求'), { status: 404, code: 'outline_append_not_found' }) },
     applyOutline: async (novelId, plan, requestId) => receipt(requestId),
     applyMessageOutline: async () => ({ volume_id: 'chat-volume', node_ids: ['chat-volume','chat-chapter'] }),
     previewOutline: async () => draft(), previewMessageOutline: async () => draft(),

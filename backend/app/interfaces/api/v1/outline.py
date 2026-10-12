@@ -1,11 +1,12 @@
 """大纲节点路由（卷/幕/章三级 + 同级重排）。"""
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
+from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.domain.entities import OutlineLevel
 from app.application import outline_plan
-from app.application.outline_append import OutlineAppendError, append_outline_once
+from app.application.outline_append import OutlineAppendError, append_outline_once, check_outline_append
 from app.infrastructure.db import get_db
 from app.infrastructure.repository import OutlineRepo
 from app.interfaces import schemas
@@ -26,6 +27,14 @@ def apply_outline(novel_id: str, payload: schemas.OutlineApplyRequest, db: Sessi
         except OutlineAppendError as error:
             return JSONResponse(status_code=error.status_code, content={'detail': error.detail, 'code': error.code})
     return outline_plan.apply_outline(db, novel_id, payload.plan)
+
+
+@router.post('/append-requests/{request_id}/check')
+def check_append(novel_id: str, request_id: UUID, payload: schemas.OutlineApplyRequest, db: Session = Depends(get_db)):
+    try:
+        return check_outline_append(db, novel_id, payload.plan, str(request_id))
+    except OutlineAppendError as error:
+        return JSONResponse(status_code=error.status_code, content={'detail': error.detail, 'code': error.code})
 
 
 def _validate_parent(db: Session, novel_id: str, level: str, parent_id: str) -> None:
